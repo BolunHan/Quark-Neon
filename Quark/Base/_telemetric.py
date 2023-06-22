@@ -26,7 +26,7 @@ from ._statics import get_current_path
 
 FILE_PATH = get_current_path()
 CWD = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value)
-LOG_LEVEL = CONFIG.Telemetric.get('LOG_LEVEL', 20)
+LOG_LEVEL = CONFIG.Telemetric.LOG_LEVEL
 
 INFO = SimpleNamespace(
     program='Quark',
@@ -37,16 +37,16 @@ INFO = SimpleNamespace(
 
 # step -1: instance a lock file
 while True:
-    PROCESS_ID = INFO['process_id']
+    PROCESS_ID = INFO.process_id
     lock_file = CWD.joinpath(f'Quark.{PROCESS_ID}.lock') if PROCESS_ID else CWD.joinpath(f'Quark.lock')
 
     if not os.path.isfile(lock_file):
         with open(lock_file, 'w') as f:
-            f.write(json.dumps(INFO))
+            f.write(json.dumps(INFO.__dict__))
 
         break
 
-    INFO['process_id'] += 1
+    INFO.process_id += 1
 
 # step 0: delete old logs
 log_file = CWD.joinpath(f'{INFO.program}.{PROCESS_ID}.log') if PROCESS_ID else CWD.joinpath(f'{INFO.program}.log')

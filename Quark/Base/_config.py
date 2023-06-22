@@ -1,5 +1,6 @@
 import configparser
 import json
+import os.path
 import pathlib
 from collections import defaultdict
 from types import SimpleNamespace
@@ -67,4 +68,7 @@ def from_ini(file_path):
     update_config(context=config_dict, config=CONFIG)
 
 
-from_ini(CWD.joinpath('config.ini'))
+if os.path.isfile(CWD.joinpath('config.ini')):
+    from_ini(CWD.joinpath('config.ini'))
+else:
+    raise FileNotFoundError(f'{CWD.joinpath("config.ini")} not found!')
