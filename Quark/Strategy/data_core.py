@@ -1,10 +1,14 @@
+"""
+implement MarketDataMonitor and add it to the register() method
+"""
+
 import datetime
 
 import numpy as np
-from AlgoEngine.Engine import MarketDataMonitor, MDS
+from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, BarData
 
-from . import LOGGER
+from . import LOGGER, MDS
 
 
 class TradeFlowMonitor(MarketDataMonitor):
@@ -56,7 +60,7 @@ class TradeFlowEMAMonitor(TradeFlowMonitor):
 
         self.update_interval = update_interval
         self.alpha = alpha
-        self._last_update = dict()
+        self._last_discounted_update = dict()
 
         if not (0 < alpha < 1):
             LOGGER.warning(f'{self.name} should have an alpha from 0 to 1')
@@ -65,19 +69,19 @@ class TradeFlowEMAMonitor(TradeFlowMonitor):
             LOGGER.warning(f'{self.name} should have a positive update_interval')
 
     def _discount_trade_flow(self, ticker: str, timestamp: float):
-        last_update = self._last_update.get(ticker, 0.)
+        last_update = self._last_discounted_update.get(ticker, 0.)
 
         if last_update + self.update_interval < timestamp:
             time_span = timestamp - last_update
             adjust_power = time_span // self.update_interval
             self._trade_flow[ticker] = self._trade_flow.get(ticker, 0.) * (self.alpha ** adjust_power)
-            self._last_update = timestamp // self.update_interval * self.update_interval
+            self._last_discounted_update[ticker] = timestamp // self.update_interval * self.update_interval
 
     def _check_discontinuity(self, timestamp: float, tolerance: int = 1):
         discontinued = []
 
-        for ticker in self._last_update:
-            last_update = self._last_update[ticker]
+        for ticker in self._last_discounted_update:
+            last_update = self._last_discounted_update[ticker]
 
             if last_update + tolerance * (self.update_interval + 1) < timestamp:
                 discontinued.append(ticker)
@@ -95,7 +99,7 @@ class TradeFlowEMAMonitor(TradeFlowMonitor):
         side = market_data.side.sign
 
         # since the trade data is extremely unlikely to be 2 intervals behind, the power factor is set to either 0 or 1 to save computational power
-        alpha = 1 if self._last_update.get(ticker, 0.) < market_data.timestamp else self.alpha
+        alpha = 1 if self._last_discounted_update.get(ticker, 0.) < market_data.timestamp else self.alpha
 
         self._trade_flow[ticker] = self._trade_flow.get(ticker, 0.) + volume * side * alpha
 
@@ -130,7 +134,7 @@ class PriceCoherenceMonitor(MarketDataMonitor):
         if update_interval / 2 < sample_interval:
             LOGGER.warning(f"{self.name} should have a smaller sample_interval by Shannon's Theorem, max value {update_interval / 2}")
 
-        if not (sample_interval / update_interval).is_integer():
+        if not (update_interval / sample_interval).is_integer():
             LOGGER.error(f"{self.name} should have a smaller sample_interval that is a fraction of the update_interval")
 
     def __call__(self, market_data: MarketData, **kwargs):
@@ -177,9 +181,7 @@ class PriceCoherenceMonitor(MarketDataMonitor):
         price_pct_change = []
 
         if self.weights:
-            for ticker in self.weights:
-                if ticker in self._price_change_pct:
-                    price_pct_change.append(self.weights[ticker] * self._price_change_pct[ticker])
+            price_pct_change.extend([self._price_change_pct[ticker] for ticker in self.weights])
         else:
             price_pct_change.extend(self._price_change_pct.values())
 
@@ -200,9 +202,11 @@ class SyntheticIndexMonitor(MarketDataMonitor):
     """
     a monitor to synthesize the index price / volume movement
     """
-    def __init__(self, index_name: str, weights: dict[str, float], interval: float = 60., name='Monitor.SyntheticIndexMonitor', monitor_id: str = None):
+
+    def __init__(self, index_name: str, weights: dict[str, float], interval: float = 60., name='Monitor.SyntheticIndex', monitor_id: str = None):
         self.index_name = index_name
         self.weights = weights
+        self.last_price = {_: np.nan for _ in weights}
         self.interval = interval
 
         super().__init__(
@@ -211,8 +215,9 @@ class SyntheticIndexMonitor(MarketDataMonitor):
             mds=MDS,
         )
 
-        self._base_price: dict[str, float] = {}
-        self._last_price: dict[str, float] = {}
+        self.base_price: dict[str, float] = {}
+        self.last_price: dict[str, float] = {_: np.nan for _ in weights}
+        self.index_base_price = 1.
         self._active_bar_data: BarData | None = None
         self._last_bar_data: BarData | None = None
 
@@ -222,14 +227,27 @@ class SyntheticIndexMonitor(MarketDataMonitor):
     def __call__(self, market_data: MarketData, **kwargs):
         ticker = market_data.ticker
         timestamp = market_data.timestamp
+        market_price = market_data.market_price
 
         if ticker not in self.weights:
             return
 
-        market_price = market_data.market_price
-        if ticker not in self._base_price:
-            self._base_price[ticker] = market_price
-        self._last_price[ticker] = market_price
+        if ticker not in self.base_price:
+            self.base_price[ticker] = market_price
+        self.last_price[ticker] = market_price
+
+        price_list = []
+        weight_list = []
+
+        for _ in self.weights:
+            weight_list.append(self.weights[_])
+
+            if ticker in self.last_price:
+                price_list.append(self.last_price[_] / self.base_price[_])
+            else:
+                price_list.append(1.)
+
+        index_price = np.average(price_list, weights=weight_list) * self.index_base_price
 
         if self._active_bar_data is None or timestamp >= self._active_bar_data.timestamp:
             self._last_bar_data = self._active_bar_data
@@ -238,10 +256,10 @@ class SyntheticIndexMonitor(MarketDataMonitor):
                 bar_start_time=datetime.datetime.fromtimestamp(timestamp // self.interval * self.interval),
                 timestamp=timestamp // self.interval * (self.interval + 1),  # by definition, timestamp when bar end
                 bar_span=datetime.timedelta(seconds=self.interval),
-                high_price=market_price,
-                low_price=market_price,
-                open_price=market_price,
-                close_price=market_price,
+                high_price=index_price,
+                low_price=index_price,
+                open_price=index_price,
+                close_price=index_price,
                 volume=0.,
                 notional=0.,
                 trade_count=0
@@ -254,23 +272,31 @@ class SyntheticIndexMonitor(MarketDataMonitor):
             bar_data.notional += market_data.notional
             bar_data.trade_count += 1
 
-        bar_data.close_price = market_price
-        bar_data.high_price = max(bar_data.high_price, market_price)
-        bar_data.low_price = min(bar_data.low_price, market_price)
+        bar_data.close_price = index_price
+        bar_data.high_price = max(bar_data.high_price, index_price)
+        bar_data.low_price = min(bar_data.low_price, index_price)
 
     @property
     def is_ready(self) -> bool:
-        return self._is_ready
+        if self._last_bar_data is None:
+            return False
+        else:
+            return self._is_ready
 
     @property
     def value(self) -> BarData | None:
         return self._last_bar_data
+
+    @property
+    def active_bar(self):
+        return self._active_bar_data
 
 
 class TradeCoherenceMonitor(PriceCoherenceMonitor):
     """
     similar like the price coherence, the price_change_pct should also have a linear correlation of net trade flow pct
     """
+
     def __init__(self, update_interval: float, sample_interval: float = 1., weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Volume', monitor_id: str = None):
         super().__init__(
             update_interval=update_interval,
@@ -351,6 +377,7 @@ class MACDMonitor(MarketDataMonitor):
     """
     as the name suggest, it gives a realtime macd value
     """
+
     class MACD:
         def __init__(self, short_window=12, long_window=26, signal_window=9):
             self.short_window = short_window
@@ -446,6 +473,7 @@ class MACDIndexMonitor(MACDMonitor):
     """
     adjusted macd value (by its market_price), weighted average into a value of index
     """
+
     def __init__(self, update_interval: float, weights: dict[str, float], name: str = 'Monitor.TA.MACD.Index', monitor_id: str = None):
         super().__init__(
             update_interval=update_interval,
@@ -473,7 +501,11 @@ class AggressivenessMonitor(MarketDataMonitor):
     this module requires 2 additional fields
     - sell_order_id
     - buy_order_id
+
+    without these 2 fields the monitor is set to is_ready = False
+    the monitor aggregated aggressive buying / selling volume separately
     """
+
     def __init__(self, name: str = 'Monitor.Aggressiveness', monitor_id: str = None):
         super().__init__(
             name=name,
@@ -481,16 +513,170 @@ class AggressivenessMonitor(MarketDataMonitor):
             mds=MDS
         )
 
-        self._trade_flow = dict()
+        self._last_update: dict[str, float] = dict()
+        self._trade_price: dict[str, dict[int, float]] = dict()
+        self._aggressive_buy: dict[str, float] = {}
+        self._aggressive_sell: dict[str, float] = {}
         self._is_ready = True
 
     def __call__(self, market_data: MarketData, **kwargs):
-        pass
+        if isinstance(market_data, TradeData):
+            trade_data = market_data
+            ticker = trade_data.ticker
+            price = trade_data.market_price
+            volume = trade_data.volume
+            side = trade_data.side.sign
+            timestamp = trade_data.timestamp
+
+            if ticker in self._trade_price:
+                trade_price_log = self._trade_price[ticker]
+            else:
+                trade_price_log = self._trade_price[ticker] = {}
+
+            if ticker not in self._last_update or self._last_update[ticker] < timestamp:
+                trade_price_log.clear()
+                return
+
+            if side > 0:  # a buy init trade
+                if 'buy_order_id' not in trade_data.additional:
+                    self._is_ready = False
+
+                order_id = trade_data.additional['buy_order_id']
+            elif side < 0:
+                if 'sell_order_id' not in trade_data.additional:
+                    self._is_ready = False
+
+                order_id = trade_data.additional['sell_order_id']
+            else:
+                return
+
+            if order_id not in trade_price_log:
+                trade_price_log[order_id] = price
+            else:
+                last_price = trade_price_log[order_id]
+
+                if last_price == price:
+                    pass
+                else:
+                    self._update_aggressiveness(ticker=ticker, side=side, volume=volume, timestamp=timestamp)
+
+            self._last_update[ticker] = timestamp
+
+    def _update_aggressiveness(self, ticker: str, volume: float, side: int, timestamp: float):
+        if side > 0:
+            self._aggressive_buy[ticker] = self._aggressive_buy.get(ticker) + volume
+        else:
+            self._aggressive_sell[ticker] = self._aggressive_sell.get(ticker) + volume
 
     @property
-    def value(self):
-        pass
+    def value(self) -> tuple[dict[str, float], dict[str, float]]:
+        return self._aggressive_buy, self._aggressive_sell
 
     @property
     def is_ready(self) -> bool:
-        pass
+        return self._is_ready
+
+
+class AggressivenessEMAMonitor(AggressivenessMonitor):
+    """
+    ema average of aggressiveness buying / selling volume.
+
+    Note that the discount process is triggered by on_trade_data.
+    - Upon discount, there should be a discontinuity of index value.
+    - But if the update interval is small enough, the effect should be marginal
+    """
+
+    def __init__(self, update_interval: float, alpha: float, name: str = 'Monitor.Aggressiveness.EMA', monitor_id: str = None):
+        super().__init__(name=name, monitor_id=monitor_id)
+
+        self.update_interval = update_interval
+        self.alpha = alpha
+        self._last_discounted_update = dict()
+
+        if not (0 < alpha < 1):
+            LOGGER.warning(f'{self.name} should have an alpha from 0 to 1')
+
+        if update_interval <= 0:
+            LOGGER.warning(f'{self.name} should have a positive update_interval')
+
+    def _discount_aggressiveness(self, ticker: str, timestamp: float):
+        last_update = self._last_discounted_update.get(ticker, 0.)
+
+        if last_update + self.update_interval < timestamp:
+            time_span = timestamp - last_update
+            adjust_power = time_span // self.update_interval
+            self._aggressive_buy[ticker] = self._aggressive_buy.get(ticker, 0.) * (self.alpha ** adjust_power)
+            self._aggressive_sell[ticker] = self._aggressive_sell.get(ticker, 0.) * (self.alpha ** adjust_power)
+            self._last_discounted_update[ticker] = timestamp // self.update_interval * self.update_interval
+
+    def _check_discontinuity(self, timestamp: float, tolerance: int = 1):
+        discontinued = []
+
+        for ticker in self._last_discounted_update:
+            last_update = self._last_discounted_update[ticker]
+
+            if last_update + tolerance * (self.update_interval + 1) < timestamp:
+                discontinued.append(ticker)
+
+        return discontinued
+
+    def _update_aggressiveness(self, ticker: str, volume: float, side: int, timestamp: float):
+        alpha = 1 if self._last_discounted_update.get(ticker, 0.) < timestamp else self.alpha
+
+        if side > 0:
+            self._aggressive_buy[ticker] = self._aggressive_buy.get(ticker) + volume * alpha
+        else:
+            self._aggressive_sell[ticker] = self._aggressive_sell.get(ticker) + volume * alpha
+
+
+def register_monitor(index_weights: dict[str, float]) -> dict[str, MarketDataMonitor]:
+    monitors = {}
+
+    # trade flow monitor
+    _ = TradeFlowMonitor()
+    monitors[_.name] = _
+    MDS.add_monitor(_)
+
+    # trade flow ema monitor
+    _ = TradeFlowEMAMonitor(update_interval=1, alpha=0.9885)  # alpha = 0.5 for each minute
+    monitors[_.name] = _
+    MDS.add_monitor(_)
+
+    # price coherence monitor
+    _ = PriceCoherenceMonitor(update_interval=60, sample_interval=1, weights=None)
+    monitors[_.name] = _
+    MDS.add_monitor(_)
+
+    # synthetic index monitor
+    if index_weights:
+        _ = SyntheticIndexMonitor(index_name='SZ50', weights=index_weights)
+        monitors[_.name] = _
+        MDS.add_monitor(_)
+
+    # trade coherence monitor
+    _ = TradeCoherenceMonitor(update_interval=60, sample_interval=1, weights=None)
+    monitors[_.name] = _
+    MDS.add_monitor(_)
+
+    # MACD monitor
+    _ = MACDMonitor(update_interval=60)
+    monitors[_.name] = _
+    MDS.add_monitor(_)
+
+    # MACD index monitor
+    if index_weights:
+        _ = MACDIndexMonitor(weights=index_weights, update_interval=60)
+        monitors[_.name] = _
+        MDS.add_monitor(_)
+
+    # aggressiveness monitor
+    _ = AggressivenessMonitor()
+    monitors[_.name] = _
+    MDS.add_monitor(_)
+
+    # aggressiveness ema monitor
+    _ = AggressivenessEMAMonitor(update_interval=1, alpha=0.9885)  # alpha = 0.5 for each minute
+    monitors[_.name] = _
+    MDS.add_monitor(_)
+
+    return monitors
