@@ -1,3 +1,6 @@
+import datetime
+
+import pytz
 import pathlib
 
 import numpy as np
@@ -151,14 +154,16 @@ class StrategyMetric(object):
             'Coherence.Price.Ratio.EMA': factors.get(f'Monitor.Coherence.Price.Ratio.EMA'),
             'Coherence.Volume': factors.get(f'Monitor.Coherence.Volume'),
             'TA.MACD.Index': factors.get(f'Monitor.TA.MACD.Index'),
+            # 'Aggressiveness.Net': factors.get(f'Monitor.Aggressiveness.Net'),
             'Aggressiveness.EMA.Net': factors.get(f'Monitor.Aggressiveness.EMA.Net'),
+            'Entropy.Price': factors.get(f'Monitor.Entropy.Price'),
             'Entropy.Price.EMA': factors.get(f'Monitor.Entropy.Price.EMA'),
         }
 
     def dump(self, file_path: str | pathlib.Path):
         info = pd.DataFrame(self.factor_value).T
         info['index_value'] = pd.Series(self.assets_value)
-        info.index = pd.to_datetime(info.index, unit='s')
+        info.index = [datetime.datetime.fromtimestamp(_) for _ in info.index]
         info.to_csv(file_path)
 
     def collect_signal(self, signal: int, timestamp: float):
