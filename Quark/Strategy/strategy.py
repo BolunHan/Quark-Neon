@@ -7,6 +7,7 @@ from PyQuantKit import MarketData, TransactionSide, TradeInstruction, OrderState
 
 from . import STRATEGY_ENGINE
 from .metric import StrategyMetric
+from .data_core import IndexWeight
 
 
 class DecisionCore(object):
@@ -35,17 +36,19 @@ class Strategy(object):
             index_weights: dict[str, float] = None,
             strategy_engine=None,
             metric: StrategyMetric = None,
+            **kwargs
     ):
         self.index_ticker = index_ticker
-        self.index_weights = index_weights
+        self.index_weights = IndexWeight(index_name=self.index_ticker, **index_weights)
         self.engine = strategy_engine if strategy_engine is not None else STRATEGY_ENGINE
         self.position_tracker = self.engine.position_tracker
-        self.strategy_metric = metric if metric is not None else StrategyMetric(sample_interval=1)
+        self.strategy_metric = metric if metric is not None else StrategyMetric(sample_interval=1, index_weights=self.index_weights)
         self.mds = self.engine.mds
         self.monitors: dict[str, MarketDataMonitor] = {}
+        self.mode = kwargs.pop('mode', 'production')
 
         self.status = StrategyStatus.idle
-        self.subscription: set[str] = set()
+        self.subscription = self.engine.subscription
         self.eod_status = {'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.}
         self.decision_core = DecisionCore()
 
@@ -53,14 +56,19 @@ class Strategy(object):
             clear_on_eod=True,
         )
 
+        self._last_update_ts = 0.
+        self._sampling_interval = 5.
+
     def get_underlying(self, ticker: str, side: int):
         return ticker
 
     def register(self):
         from .data_core import register_monitor
-        self.monitors.update(register_monitor(index_weights=self.index_weights))
+        self.engine.multi_threading = False
+        self.monitors.update(register_monitor(index_name=self.index_ticker, index_weights=self.index_weights))
         self.engine.add_handler(on_market_data=self._on_market_data)
         self.engine.add_handler(_on_order=self._on_order)
+        self.status = StrategyStatus.working
         return self.monitors
 
     def unwind_all(self):
@@ -107,8 +115,14 @@ class Strategy(object):
     def _on_market_data(self, market_data: MarketData, **kwargs):
         market_time = market_data.market_time
         timestamp = market_data.timestamp
-        market_price = market_data.market_price
-        ticker = market_data.ticker
+
+        if self.mode == 'sampling':
+            if self._last_update_ts + self._sampling_interval > timestamp:
+                return
+            self._last_update_ts = timestamp // self._sampling_interval * self._sampling_interval
+
+        # market_price = market_data.market_price
+        # ticker = market_data.ticker
 
         # working condition 0: in working status
         if self.status == StrategyStatus.idle or self.status == StrategyStatus.closed or self.status == StrategyStatus.error:
@@ -129,9 +143,9 @@ class Strategy(object):
                 return self.unwind_all()
             return
 
-        # signal condition 3: only subscribed ticker
-        if ticker not in self.index_weights:
-            return
+        # Optional signal condition 3: only subscribed ticker
+        # if ticker not in self.index_weights:
+        #     return
 
         # all conditions passed, checking signal
         monitor_value = self.strategy_metric.collect_factors(monitors=self.monitors, timestamp=timestamp)
