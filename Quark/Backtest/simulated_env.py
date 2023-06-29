@@ -43,11 +43,6 @@ class Cache(object):
         self.topic = topic
         self.overwrite = overwrite
 
-        if topic in DATA_CACHE:
-            self.cache = DATA_CACHE[topic]
-        else:
-            self.cache = DATA_CACHE[topic] = {}
-
     def __call__(self, function: callable):
         if self.topic == 'Daily':
             return functools.partial(self._daily_wrapper, f=function)
@@ -59,10 +54,17 @@ class Cache(object):
         market_date = kwargs['market_date']
         key = f'{ticker}.{market_date:%Y-%m-%d}'
 
-        if key not in self.cache or self.overwrite:
-            self.cache[key] = f(**kwargs)
+        if self.topic in DATA_CACHE:
+            cache = DATA_CACHE[self.topic]
+        else:
+            cache = DATA_CACHE[self.topic] = {}
 
-        return self.cache[key]
+        if key not in cache or self.overwrite:
+            _ = f(**kwargs)
+            cache[key] = _
+            return _
+
+        return cache[key]
 
 
 def trade_calendar(start_date: datetime.date, end_date: datetime.date, market='SSE') -> list[datetime.date]:
