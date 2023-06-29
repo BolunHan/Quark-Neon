@@ -3,7 +3,7 @@ implement MarketDataMonitor and add it to the register() method
 """
 import abc
 import datetime
-
+from collections import deque
 import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, BarData
@@ -32,9 +32,10 @@ class IndexWeight(dict):
 
 
 class EMA(metaclass=abc.ABCMeta):
-    def __init__(self, discount_interval: float, alpha: float):
+    def __init__(self, discount_interval: float, alpha: float = None, window: int = None):
         self.discount_interval = discount_interval
-        self.alpha = alpha
+        self.alpha = alpha if alpha else 1 - 2 / (window + 1)
+        self.window = window if window else round(2 / (1 - alpha) - 1)
 
         if not (0 < alpha < 1):
             LOGGER.warning(f'{self.__class__.__name__} should have an alpha from 0 to 1')
@@ -45,11 +46,13 @@ class EMA(metaclass=abc.ABCMeta):
         self._last_discount_ts: dict[str, float] = {}
         self._history: dict[str, dict[str, float]] = {}
         self._current: dict[str, dict[str, float]] = {}
+        self._window: dict[str, dict[str, list[float]]] = {}
         self.ema: dict[str, dict[str, float]] = {}
 
     def _register_ema(self, name):
         self._history[name] = {}
         self._current[name] = {}
+        self._window[name] = {}
         _ = self.ema[name] = {}
         return _
 
@@ -71,8 +74,13 @@ class EMA(metaclass=abc.ABCMeta):
         for entry_name in update_data:
             if entry_name in self._current:
                 if np.isfinite(_ := update_data[entry_name]):
-                    self._current[entry_name][ticker] = _
-                    self.ema[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) * self.alpha + _ * (1 - self.alpha)
+                    current = self._current[entry_name][ticker] = _
+                    memory = self._history[entry_name].get(ticker)
+
+                    if memory is None:
+                        self.ema[entry_name][ticker] = np.nan
+                    else:
+                        self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
     def _accumulate_ema(self, ticker: str, timestamp: float = None, **accumulative_data: float):
         if timestamp:
@@ -88,8 +96,13 @@ class EMA(metaclass=abc.ABCMeta):
                 for entry_name in accumulative_data:
                     if entry_name in self._history:
                         if np.isfinite(_ := accumulative_data[entry_name]):
-                            self._history[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) + _ * alpha
-                            self.ema[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) * self.alpha + self._current[entry_name].get(ticker, 0.) * (1 - self.alpha)
+                            current = self._current[entry_name].get(ticker, 0.)
+                            memory = self._history[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) + _ * alpha
+
+                            if memory is None:
+                                self.ema[entry_name][ticker] = np.nan
+                            else:
+                                self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
                 return
 
@@ -102,22 +115,58 @@ class EMA(metaclass=abc.ABCMeta):
         for entry_name in accumulative_data:
             if entry_name in self._current:
                 if np.isfinite(_ := accumulative_data[entry_name]):
-                    self._current[entry_name][ticker] = self._current[entry_name].get(ticker, 0.) + _
-                    self.ema[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) * self.alpha + self._current[entry_name].get(ticker, 0.) * (1 - self.alpha)
+                    current = self._current[entry_name][ticker] = self._current[entry_name].get(ticker, 0.) + _
+                    memory = self._history[entry_name].get(ticker)
+
+                    if memory is None:
+                        self.ema[entry_name][ticker] = np.nan
+                    else:
+                        self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
     def _discount_ema(self, ticker: str, timestamp: float):
-        last_update = self._last_discount_ts.get(ticker, 0.)
+        last_update = self._last_discount_ts.get(ticker, timestamp)
 
-        if last_update + self.discount_interval < timestamp:
+        # a discount event is triggered
+        if last_update + self.discount_interval <= timestamp:
             time_span = timestamp - last_update
-            adjust_power = time_span // self.discount_interval
-            alpha = self.alpha ** adjust_power
+            adjust_power = int(time_span // self.discount_interval)
 
             for entry_name in self._history:
-                self.ema[entry_name][ticker] = self._history[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) * alpha + self._current[entry_name].get(ticker, 0.) * (1 - self.alpha)
-                self._current[entry_name][ticker] = 0.
+                current = self._current[entry_name].get(ticker)
+                memory = self._history[entry_name].get(ticker)
+                window: deque = self._window[entry_name].get(ticker, deque(maxlen=self.window))
 
-            self._last_discount_ts[ticker] = timestamp // self.discount_interval * self.discount_interval
+                # pre-check: drop None or nan
+                if current is None or not np.isfinite(current):
+                    return
+
+                # step 1: update window
+                for _ in range(adjust_power - 1):
+                    if window:
+                        window.append(window[-1])
+
+                window.append(current)
+
+                # step 2: re-calculate memory if window is not full
+                if len(window) < window.maxlen or memory is None:
+                    memory = None
+
+                    for _ in window:
+                        if memory is None:
+                            memory = _
+
+                        memory = memory * self.alpha + _ * (1 - self.alpha)
+
+                # step 3: calculate ema value by memory and current value
+                ema = memory * self.alpha + current * (1 - self.alpha)
+
+                # step 4: update EMA state
+                self._current[entry_name].pop(ticker)
+                self._history[entry_name][ticker] = ema
+                self._window[entry_name][ticker] = window
+                self.ema[entry_name][ticker] = ema
+
+        self._last_discount_ts[ticker] = timestamp // self.discount_interval * self.discount_interval
 
     def _check_discontinuity(self, timestamp: float, tolerance: int = 1):
         discontinued = []
@@ -360,7 +409,7 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
         ticker = market_data.ticker
         timestamp = market_data.timestamp
 
-        self._discount_ema(ticker=ticker, timestamp=timestamp)
+        self._discount_ema(ticker='dispersion_ratio', timestamp=timestamp)
         self._discount_all(timestamp=timestamp)
 
         super().__call__(market_data=market_data, **kwargs)
@@ -370,7 +419,7 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
             self.last_update = timestamp // self.update_interval * self.update_interval
 
     @property
-    def value(self) -> float:
+    def value(self) -> tuple[float, float, float]:
         up_dispersion = self.collect_dispersion(side=1)
         down_dispersion = self.collect_dispersion(side=-1)
 
@@ -381,7 +430,7 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
         else:
             dispersion_ratio = down_dispersion / (up_dispersion + down_dispersion)
 
-        self._update_ema(ticker='dispersion_ratio', dispersion_ratio=dispersion_ratio)
+        self._update_ema(ticker='dispersion_ratio', dispersion_ratio=dispersion_ratio - 0.5)
 
         return up_dispersion, down_dispersion, self.dispersion_ratio.get('dispersion_ratio', np.nan)
 
@@ -952,7 +1001,7 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         ticker = market_data.ticker
         timestamp = market_data.timestamp
 
-        self._discount_ema(ticker=ticker, timestamp=timestamp)
+        self._discount_ema(ticker='entropy', timestamp=timestamp)
         self._discount_all(timestamp=timestamp)
 
         super().__call__(market_data=market_data, **kwargs)
@@ -970,6 +1019,11 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
 
 def register_monitor(index_name: str, index_weights: dict[str, float] = None) -> dict[str, MarketDataMonitor]:
     monitors = {}
+    alpha_0 = 0.9885  # alpha = 0.5 for each minute
+    alpha_1 = 0.9735  # alpha = 0.2 for each minute
+    alpha_2 = 0.9624  # alpha = 0.1 for each minute
+    alpha_3 = 0.9261  # alpha = 0.01 for each minute
+    alpha_4 = 0.8913  # alpha = 0.001 for each minute
 
     index_weights = IndexWeight(index_name=index_name, **index_weights)
     index_weights.normalize()
@@ -981,7 +1035,7 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None) ->
     # MDS.add_monitor(_)
 
     # trade flow ema monitor
-    _ = TradeFlowEMAMonitor(discount_interval=1, alpha=0.9885)  # alpha = 0.5 for each minute
+    _ = TradeFlowEMAMonitor(discount_interval=1, alpha=alpha_0)
     monitors[_.name] = _
     MDS.add_monitor(_)
 
@@ -991,7 +1045,7 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None) ->
     # MDS.add_monitor(_)
 
     # price coherence ema monitor
-    _ = CoherenceEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=0.9885)
+    _ = CoherenceEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=alpha_4)
     monitors[_.name] = _
     MDS.add_monitor(_)
 
@@ -1021,17 +1075,17 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None) ->
     # MDS.add_monitor(_)
 
     # aggressiveness ema monitor
-    _ = AggressivenessEMAMonitor(discount_interval=1, alpha=0.9885)  # alpha = 0.5 for each minute
+    _ = AggressivenessEMAMonitor(discount_interval=1, alpha=alpha_4)  # alpha = 0.5 for each minute
     monitors[_.name] = _
     MDS.add_monitor(_)
 
     # price coherence monitor
-    # _ = EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights)
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    _ = EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights)
+    monitors[_.name] = _
+    MDS.add_monitor(_)
 
     # price coherence monitor
-    _ = EntropyEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=0.9885)
+    _ = EntropyEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=alpha_4)
     monitors[_.name] = _
     MDS.add_monitor(_)
 
