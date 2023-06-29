@@ -3,6 +3,7 @@ __package__ = 'Quark.Backtest'
 import datetime
 import os.path
 import pathlib
+import time
 import uuid
 
 import simulated_env
@@ -10,7 +11,7 @@ from ..API import historical
 from ..Base import GlobalStatics
 from ..Misc import helper
 from ..Strategy.data_core import SyntheticIndexMonitor
-from ..Strategy.strategy import Strategy
+from ..Strategy.strategy import Strategy, StrategyStatus
 from . import LOGGER
 
 INDEX_NAME = '000016.SH'
@@ -19,6 +20,7 @@ END_DATE = datetime.date(2023, 6, 1)
 TEST_ID = str(uuid.uuid4())
 TEST_ID_SHORT = TEST_ID.split('-')[0]
 IS_INITIALIZED = False
+EPOCH_TS = 0.
 CALENDAR = simulated_env.trade_calendar(start_date=START_DATE, end_date=END_DATE)
 
 STRATEGY = Strategy(
@@ -26,7 +28,8 @@ STRATEGY = Strategy(
     index_weights=helper.load_dict(
         file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'index_weights.{INDEX_NAME}.{MARKET_DATE:%Y%m%d}.json'),
         json_dict=simulated_env.query_index_weights(index_name=INDEX_NAME, market_date=MARKET_DATE)
-    )
+    ),
+    mode='sampling'
 )
 
 
@@ -50,6 +53,7 @@ def init_cache(tickers: list[str]):
 def bod(market_date: datetime.date, **kwargs):
     global MARKET_DATE
     global IS_INITIALIZED
+    global EPOCH_TS
 
     if market_date not in CALENDAR:
         return
@@ -69,6 +73,7 @@ def bod(market_date: datetime.date, **kwargs):
 
     # backtest specific action 1: unzip data
     historical.unzip_batch(market_date=market_date, ticker_list=subscription)
+    STRATEGY.subscription.clear()
 
     if 'replay' in kwargs:
         replay = kwargs['replay']
@@ -81,7 +86,7 @@ def bod(market_date: datetime.date, **kwargs):
             if _ not in subscription:
                 replay.remove_subscription(ticker=_, dtype='TradeData')
 
-    STRATEGY.subscription = subscription
+    STRATEGY.subscription.update(subscription)
 
     # startup task 2: update monitors
     # for backtest purpose, the monitors is only registered once
@@ -89,29 +94,38 @@ def bod(market_date: datetime.date, **kwargs):
         monitors = STRATEGY.register()
     else:
         monitors = STRATEGY.monitors
+        STRATEGY.status = StrategyStatus.working
 
     # OPTIONAL: task 2.1: update baseline for Monitor.SyntheticIndex
-    monitor: SyntheticIndexMonitor = monitors['Monitor.SyntheticIndex']
-    last_close_price = helper.load_dict(
-        file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'last_close.{MARKET_DATE:%Y%m%d}.json'),
-        json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
-    )
-    monitor.base_price.clear()
-    monitor.base_price.update(last_close_price)
-    monitor.index_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
+    monitor: SyntheticIndexMonitor = monitors.get('Monitor.SyntheticIndex')
+    if monitor:
+        last_close_price = helper.load_dict(
+            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'last_close.{MARKET_DATE:%Y%m%d}.json'),
+            json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
+        )
+        monitor.base_price.clear()
+        monitor.base_price.update(last_close_price)
+        monitor.index_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
 
     # backtest-specific codes
     if not IS_INITIALIZED:
         IS_INITIALIZED = True
+
+    EPOCH_TS = time.time()
 
 
 def eod(market_date: datetime.date = MARKET_DATE, **kwargs):
     if market_date not in CALENDAR:
         return
 
+    dump_dir = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'TestResult.{TEST_ID_SHORT}')
+
+    os.makedirs(dump_dir, exist_ok=True)
+
     STRATEGY.position_tracker.clear()
-    STRATEGY.strategy_metric.dump(pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'TestResult.{TEST_ID}', f'metric.{MARKET_DATE}.csv'))
+    STRATEGY.strategy_metric.dump(dump_dir.joinpath(f'metric.{MARKET_DATE}.csv'))
     STRATEGY.strategy_metric.clear()
+    LOGGER.info(f'Backtest epoch {market_date} complete! Time costs {time.time() - EPOCH_TS}')
 
 
 STRATEGY.engine.add_handler(on_bod=bod)
@@ -121,5 +135,6 @@ if __name__ == '__main__':
     STRATEGY.engine.back_test(
         start_date=START_DATE,
         end_date=END_DATE,
-        data_loader=historical.loader
+        data_loader=historical.loader,
+        mode='sampling'
     )
