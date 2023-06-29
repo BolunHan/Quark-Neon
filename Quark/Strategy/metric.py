@@ -6,8 +6,9 @@ from AlgoEngine.Engine import MarketDataMonitor
 
 
 class StrategyMetric(object):
-    def __init__(self, sample_interval: int):
+    def __init__(self, sample_interval: int, index_weights: dict[str, float]):
         self.sample_interval = sample_interval
+        self.index_weights = index_weights
 
         self._last_update = 0.
         self.factor_value = {}
@@ -41,20 +42,38 @@ class StrategyMetric(object):
         if monitor := monitors.get('Monitor.TradeFlow.EMA'):
             if monitor.is_ready:
                 value = monitor.value
+                weighted_sum = 0.
 
                 for ticker in value:
                     factors[f'Monitor.TradeFlow.EMA.{ticker}'] = value[ticker]
-                factors[f'Monitor.TradeFlow.EMA.Sum'] = sum(value.values())
+
+                    if ticker in self.index_weights:
+                        weighted_sum += value[ticker] * self.index_weights[ticker]
+
+                factors[f'Monitor.TradeFlow.EMA.Sum'] = weighted_sum
 
         if monitor := monitors.get('Monitor.Coherence.Price'):
             if monitor.is_ready:
                 up_dispersion, down_dispersion = monitor.value
                 factors[f'Monitor.Coherence.Price.Up'] = up_dispersion
                 factors[f'Monitor.Coherence.Price.Down'] = down_dispersion
+                if up_dispersion < 0:
+                    factors[f'Monitor.Coherence.Price.Ratio'] = 1.
+                elif down_dispersion < 0:
+                    factors[f'Monitor.Coherence.Price.Ratio'] = 0.
+                else:
+                    factors[f'Monitor.Coherence.Price.Ratio'] = down_dispersion / (up_dispersion + down_dispersion)
+
+        if monitor := monitors.get('Monitor.Coherence.Price.EMA'):
+            if monitor.is_ready:
+                up_dispersion, down_dispersion, dispersion_ratio = monitor.value
+                factors[f'Monitor.Coherence.Price.Up'] = up_dispersion
+                factors[f'Monitor.Coherence.Price.Down'] = down_dispersion
+                factors[f'Monitor.Coherence.Price.Ratio.EMA'] = dispersion_ratio
 
         if monitor := monitors.get('Monitor.SyntheticIndex'):
+            self.last_assets_price = factors[f'Monitor.SyntheticIndex.Price'] = monitor.index_price
             if monitor.is_ready:
-                self.last_assets_price = factors[f'Monitor.SyntheticIndex.Price'] = monitor.active_bar.market_price
                 factors[f'Monitor.SyntheticIndex.Notional'] = monitor.active_bar.notional
                 factors[f'Monitor.SyntheticIndex.Volume'] = monitor.active_bar.volume
                 factors[f'Monitor.SyntheticIndex.LastNotional'] = monitor.value.notional
@@ -81,20 +100,40 @@ class StrategyMetric(object):
 
                 for ticker in aggressive_buy:
                     factors[f'Monitor.Aggressiveness.Buy.{ticker}'] = aggressive_buy[ticker]
+
+                for ticker in aggressive_sell:
                     factors[f'Monitor.Aggressiveness.Sell.{ticker}'] = aggressive_sell[ticker]
-                    factors[f'Monitor.Aggressiveness.Net.{ticker}'] = aggressive_buy[ticker] - aggressive_sell[ticker]
-                factors[f'Monitor.Aggressiveness.Net'] = np.sum(aggressive_buy.values()) - np.sum(aggressive_sell.values())
+                factors[f'Monitor.Aggressiveness.Net'] = np.sum(list(aggressive_buy.values())) - np.sum(list(aggressive_sell.values()))
 
         if monitor := monitors.get('Monitor.Aggressiveness.EMA'):
             if monitor.is_ready:
                 aggressive_buy, aggressive_sell = monitor.value
+                weighted_sum = 0.
 
                 for ticker in aggressive_buy:
                     factors[f'Monitor.Aggressiveness.EMA.Buy.{ticker}'] = aggressive_buy[ticker]
-                    factors[f'Monitor.Aggressiveness.EMA.Sell.{ticker}'] = aggressive_sell[ticker]
-                    factors[f'Monitor.Aggressiveness.EMA.Net.{ticker}'] = aggressive_buy[ticker] - aggressive_sell[ticker]
-                factors[f'Monitor.Aggressiveness.EMA.Net'] = np.sum(aggressive_buy.values()) - np.sum(aggressive_sell.values())
 
+                for ticker in aggressive_sell:
+                    factors[f'Monitor.Aggressiveness.EMA.Sell.{ticker}'] = aggressive_sell[ticker]
+
+                for ticker in self.index_weights:
+                    weighted_sum += (aggressive_buy.get(ticker, 0.) - aggressive_sell.get(ticker, 0.)) * self.index_weights[ticker]
+
+                factors[f'Monitor.Aggressiveness.EMA.Net'] = weighted_sum
+
+        if monitor := monitors.get('Monitor.Entropy.Price'):
+            if monitor.is_ready:
+                entropy = monitor.value
+
+                factors[f'Monitor.Entropy.Price'] = entropy
+
+        if monitor := monitors.get('Monitor.Entropy.Price.EMA'):
+            if monitor.is_ready:
+                entropy = monitor.value
+
+                factors[f'Monitor.Entropy.Price.EMA'] = entropy
+
+        # update observation timestamp
         if self._last_update + self.sample_interval < timestamp:
             timestamp = timestamp // self.sample_interval * self.sample_interval
             self.log_factors(factors=factors, timestamp=timestamp)
@@ -109,14 +148,17 @@ class StrategyMetric(object):
             'TradeFlow.EMA.Sum': factors.get(f'Monitor.TradeFlow.EMA.Sum'),
             'Coherence.Price.Up': factors.get(f'Monitor.Coherence.Price.Up'),
             'Coherence.Price.Down': factors.get(f'Monitor.Coherence.Price.Down'),
+            'Coherence.Price.Ratio.EMA': factors.get(f'Monitor.Coherence.Price.Ratio.EMA'),
             'Coherence.Volume': factors.get(f'Monitor.Coherence.Volume'),
             'TA.MACD.Index': factors.get(f'Monitor.TA.MACD.Index'),
             'Aggressiveness.EMA.Net': factors.get(f'Monitor.Aggressiveness.EMA.Net'),
+            'Entropy.Price.EMA': factors.get(f'Monitor.Entropy.Price.EMA'),
         }
 
     def dump(self, file_path: str | pathlib.Path):
-        info = pd.DataFrame(self.factor_value)
+        info = pd.DataFrame(self.factor_value).T
         info['index_value'] = pd.Series(self.assets_value)
+        info.index = pd.to_datetime(info.index, unit='s')
         info.to_csv(file_path)
 
     def collect_signal(self, signal: int, timestamp: float):
