@@ -8,9 +8,11 @@ from collections.abc import Iterable
 from PyQuantKit import TradeData
 
 from . import LOGGER
+from ..Base import GlobalStatics
 
 ARCHIVE_DIR = r'C:\Users\Bolun\Downloads\TradeDataArchive'
 DATA_DIR = r'C:\Users\Bolun\Documents\TradeData'
+TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
 def unzip(market_date: datetime.date, ticker: str):
@@ -82,12 +84,12 @@ def load_trade_data(market_date: datetime.date, ticker: str) -> list[TradeData]:
 
     with open(file_path, 'r') as f:
         data_file = csv.DictReader(f)
-        for row in data_file:
+        for row in data_file:  # type: dict[str, str | float]
             trade_data = TradeData(
                 ticker=ticker,
                 trade_price=float(row['Price']),
                 trade_volume=float(row['Volume']),
-                trade_time=datetime.datetime.combine(market_date, datetime.time(*map(int, row['Time'].split(":")))),
+                trade_time=datetime.datetime.combine(market_date, datetime.time(*map(int, row['Time'].split(":"))), TIME_ZONE),
                 side=row['Type']
             )
             trade_data.additional['sell_order_id'] = int(row['SaleOrderID'])
