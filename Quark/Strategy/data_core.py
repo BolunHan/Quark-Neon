@@ -4,11 +4,16 @@ implement MarketDataMonitor and add it to the register() method
 import abc
 import datetime
 from collections import deque
+
 import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, BarData
 
 from . import LOGGER, MDS
+from .decoder import OnlineDecoder, Wavelet
+from ..Base import GlobalStatics
+
+TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
 class IndexWeight(dict):
@@ -46,7 +51,7 @@ class EMA(metaclass=abc.ABCMeta):
         self._last_discount_ts: dict[str, float] = {}
         self._history: dict[str, dict[str, float]] = {}
         self._current: dict[str, dict[str, float]] = {}
-        self._window: dict[str, dict[str, list[float]]] = {}
+        self._window: dict[str, dict[str, deque[float]]] = {}
         self.ema: dict[str, dict[str, float]] = {}
 
     def _register_ema(self, name):
@@ -182,6 +187,40 @@ class EMA(metaclass=abc.ABCMeta):
     def _discount_all(self, timestamp: float):
         for _ in self._check_discontinuity(timestamp=timestamp, tolerance=1):
             self._discount_ema(ticker=_, timestamp=timestamp)
+
+
+class Synthetic(metaclass=abc.ABCMeta):
+    def __init__(self, weights: dict[str, float]):
+        self.weights = weights
+
+        self.base_price: dict[str, float] = {}
+        self.last_price: dict[str, float] = {}
+        self.synthetic_base_price = 1.
+
+    def _update_synthetic(self, ticker: str, market_price: float):
+        if ticker not in self.weights:
+            return
+
+        if ticker not in self.base_price:
+            self.base_price[ticker] = market_price
+
+        self.last_price[ticker] = market_price
+
+    @property
+    def synthetic_price(self):
+        price_list = []
+        weight_list = []
+
+        for ticker in self.weights:
+            weight_list.append(self.weights[ticker])
+
+            if ticker in self.last_price:
+                price_list.append(self.last_price[ticker] / self.base_price[ticker])
+            else:
+                price_list.append(1.)
+
+        synthetic_price = np.average(price_list, weights=weight_list) * self.synthetic_base_price
+        return synthetic_price
 
 
 class TradeFlowMonitor(MarketDataMonitor):
@@ -515,26 +554,18 @@ class TradeCoherenceMonitor(CoherenceMonitor):
         return slope
 
 
-class SyntheticIndexMonitor(MarketDataMonitor):
+class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
     """
     a monitor to synthesize the index price / volume movement
     """
 
     def __init__(self, index_name: str, weights: dict[str, float], interval: float = 60., name='Monitor.SyntheticIndex', monitor_id: str = None):
+        super().__init__(name=name, monitor_id=monitor_id, mds=MDS, )
+        Synthetic.__init__(self=self, weights=weights)
+
         self.index_name = index_name
-        self.weights = weights
-        self.last_price = {_: np.nan for _ in weights}
         self.interval = interval
 
-        super().__init__(
-            name=name,
-            monitor_id=monitor_id,
-            mds=MDS,
-        )
-
-        self.base_price: dict[str, float] = {}
-        self.last_price: dict[str, float] = {}
-        self.index_base_price = 1.
         self._active_bar_data: BarData | None = None
         self._last_bar_data: BarData | None = None
 
@@ -546,20 +577,18 @@ class SyntheticIndexMonitor(MarketDataMonitor):
         timestamp = market_data.timestamp
         market_price = market_data.market_price
 
+        self._update_synthetic(ticker=ticker, market_price=market_price)
+
         if ticker not in self.weights:
             return
 
-        if ticker not in self.base_price:
-            self.base_price[ticker] = market_price
-        self.last_price[ticker] = market_price
-
-        index_price = self.index_price
+        index_price = self.synthetic_price
 
         if self._active_bar_data is None or timestamp >= self._active_bar_data.timestamp:
             self._last_bar_data = self._active_bar_data
             bar_data = self._active_bar_data = BarData(
                 ticker=self.index_name,
-                bar_start_time=datetime.datetime.fromtimestamp(timestamp // self.interval * self.interval),
+                bar_start_time=datetime.datetime.fromtimestamp(timestamp // self.interval * self.interval, tz=TIME_ZONE),
                 timestamp=(timestamp // self.interval + 1) * self.interval,  # by definition, timestamp when bar end
                 bar_span=datetime.timedelta(seconds=self.interval),
                 high_price=index_price,
@@ -594,20 +623,8 @@ class SyntheticIndexMonitor(MarketDataMonitor):
         return self._last_bar_data
 
     @property
-    def index_price(self):
-        price_list = []
-        weight_list = []
-
-        for ticker in self.weights:
-            weight_list.append(self.weights[ticker])
-
-            if ticker in self.last_price:
-                price_list.append(self.last_price[ticker] / self.base_price[ticker])
-            else:
-                price_list.append(1.)
-
-        index_price = np.average(price_list, weights=weight_list) * self.index_base_price
-        return index_price
+    def index_price(self) -> float:
+        return self.synthetic_price
 
     @property
     def active_bar(self):
@@ -667,10 +684,12 @@ class MACDMonitor(MarketDataMonitor):
         def get_macd_values(self):
             return self.macd_line, self.signal_line, self.macd_histogram
 
-    def __init__(self, update_interval: float, name: str = 'Monitor.TA.MACD', monitor_id: str = None):
+    def __init__(self, update_interval: float, weights: dict[str, float] = None, name: str = 'Monitor.TA.MACD', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id)
 
         self.update_interval = update_interval
+        self.weights = weights
+
         self._macd: dict[str, MACDMonitor.MACD] = {}
         self._price = {}
         self._is_ready = True
@@ -706,37 +725,21 @@ class MACDMonitor(MarketDataMonitor):
         return macd_value
 
     @property
-    def is_ready(self) -> bool:
-        return self._is_ready
+    def weighted_index(self) -> float:
+        macd_value = self.value
+        weighted_index = 0.
 
+        if self.weights is not None:
+            for ticker in self.weights:
+                weighted_index += macd_value.get(ticker, 0.) * self.weights[ticker]
+        else:
+            weighted_index = np.nanmean(macd_value.values())
 
-class MACDIndexMonitor(MACDMonitor):
-    """
-    adjusted macd value (by its market_price), weighted average into a value of index
-
-    just like normal MACD, but the weighted MACD index is more accurate on predicting the index movement.
-
-    a large negative weighted MACD index indicate a (start of) upward trend
-    """
-
-    def __init__(self, update_interval: float, weights: dict[str, float], name: str = 'Monitor.TA.MACD.Index', monitor_id: str = None):
-        super().__init__(
-            update_interval=update_interval,
-            name=name,
-            monitor_id=monitor_id
-        )
-
-        self.weights = weights
+        return weighted_index
 
     @property
-    def value(self) -> float:
-        index_value = 0.
-
-        for ticker in self._macd:
-            _ = self._macd[ticker]
-            index_value += _.macd_histogram / _.close_price * self.weights.get(ticker, 0.)
-
-        return index_value
+    def is_ready(self) -> bool:
+        return self._is_ready
 
 
 class AggressivenessMonitor(MarketDataMonitor):
@@ -1017,6 +1020,108 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         return self.entropy_ema.get('entropy', np.nan)
 
 
+class VolatilityMonitor(MarketDataMonitor, Synthetic):
+
+    def __init__(self, weights: dict[str, float], name: str = 'Monitor.Volatility.Daily', monitor_id: str = None):
+        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        Synthetic.__init__(self=self, weights=weights)
+
+        self.daily_volatility: dict[str, float] = {}  # must be assigned from outside
+        self.index_volatility: float = np.nan  # must be assigned from outside
+
+        self._is_ready = True
+
+    def __call__(self, market_data: MarketData, **kwargs):
+        self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
+
+    @property
+    def value(self) -> dict[str, float]:
+        volatility_adjusted = {}
+
+        for ticker in self.weights:
+            if ticker not in self.daily_volatility:
+                continue
+
+            if ticker not in self.last_price:
+                continue
+
+            volatility_adjusted[ticker] = (self.last_price[ticker] / self.base_price[ticker] - 1) / self.daily_volatility[ticker]
+
+        return volatility_adjusted
+
+    @property
+    def weighted_index(self) -> float:
+        volatility_adjusted = self.value
+        weighted_index = 0.
+
+        weighted_volatility = np.sum([self.weights[_] * self.daily_volatility.get(_, 0.) for _ in self.weights])
+        diff_base = weighted_volatility - self.index_volatility
+
+        for ticker in self.weights:
+            weighted_index += volatility_adjusted.get(ticker, 0.) * self.weights[ticker]
+
+        index_volatility_range = (self.synthetic_price / self.synthetic_base_price - 1) / weighted_volatility
+
+        if not index_volatility_range:
+            return 0.
+
+        weighted_index -= index_volatility_range
+        weighted_index -= diff_base
+
+        return weighted_index
+
+    @property
+    def is_ready(self) -> bool:
+        return self._is_ready
+
+
+class DecoderMonitor(MarketDataMonitor, OnlineDecoder):
+    """
+    mark the market movement into different trend:
+    - when price goes up to 1% (up_threshold)
+    - when price goes down to 1% (down_threshold)
+    - when price goes up / down, relative to the local minimum / maximum, more than 0.5%  (confirmation_level)
+    - when the market trend goes on more than 15 * 60 seconds (timeout)
+
+    upon a new trend is confirmed, a callback function will be called.
+    """
+
+    def __init__(self, confirmation_level: float = 0.005, timeout: float = 15 * 60, up_threshold: float = 0.01, down_threshold: float = 0.01, retrospective: bool = False, name: str = 'Monitor.Decoder', monitor_id: str = None):
+        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        OnlineDecoder.__init__(self=self, confirmation_level=confirmation_level, timeout=timeout, up_threshold=up_threshold, down_threshold=down_threshold, retrospective=retrospective)
+
+        self._is_ready = True
+
+    def __call__(self, market_data: MarketData, **kwargs):
+        ticker = market_data.ticker
+        market_price = market_data.market_price
+        timestamp = market_data.timestamp
+
+        self.update_decoder(ticker=ticker, market_price=market_price, timestamp=timestamp)
+
+    @property
+    def value(self) -> dict[str, list[Wavelet]]:
+        return self.state_history
+
+    @property
+    def is_ready(self) -> bool:
+        return self._is_ready
+
+
+class IndexDecoderMonitor(DecoderMonitor, Synthetic):
+    def __init__(self, weights: dict[str, float], confirmation_level: float = 0.005, timeout: float = 15 * 60, up_threshold: float = 0.01, down_threshold: float = 0.01, retrospective: bool = False, name: str = 'Monitor.Decoder.Index', monitor_id: str = None):
+        super().__init__(confirmation_level=confirmation_level, timeout=timeout, up_threshold=up_threshold, down_threshold=down_threshold, retrospective=retrospective, name=name, monitor_id=monitor_id)
+        Synthetic.__init__(self=self, weights=weights)
+
+    def __call__(self, market_data: MarketData, **kwargs):
+        self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
+        self.update_decoder(ticker='synthetic', market_price=self.synthetic_price, timestamp=market_data.timestamp)
+
+    @property
+    def value(self) -> list[Wavelet]:
+        return self.state_history['synthetic']
+
+
 def register_monitor(index_name: str, index_weights: dict[str, float] = None) -> dict[str, MarketDataMonitor]:
     monitors = {}
     alpha_0 = 0.9885  # alpha = 0.5 for each minute
@@ -1060,12 +1165,7 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None) ->
     MDS.add_monitor(_)
 
     # MACD monitor
-    # _ = MACDMonitor(update_interval=60)
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
-
-    # MACD index monitor
-    _ = MACDIndexMonitor(weights=index_weights, update_interval=60)
+    _ = MACDMonitor(weights=index_weights, update_interval=60)
     monitors[_.name] = _
     MDS.add_monitor(_)
 
@@ -1080,13 +1180,28 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None) ->
     MDS.add_monitor(_)
 
     # price coherence monitor
-    _ = EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights)
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    # _ = EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights)
+    # monitors[_.name] = _
+    # MDS.add_monitor(_)
 
     # price coherence monitor
     _ = EntropyEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=alpha_4)
     monitors[_.name] = _
     MDS.add_monitor(_)
+
+    # price coherence monitor
+    # _ = VolatilityMonitor(weights=index_weights)
+    # monitors[_.name] = _
+    # MDS.add_monitor(_)
+
+    # price movement online decoder
+    # _ = DecoderMonitor(retrospective=False)
+    # monitors[_.name] = _
+    # MDS.add_monitor(_)
+
+    # price movement online decoder
+    # _ = IndexDecoderMonitor(up_threshold=0.005, down_threshold=0.005, confirmation_level=0.002, retrospective=True, weights=index_weights)
+    # monitors[_.name] = _
+    # MDS.add_monitor(_)
 
     return monitors
