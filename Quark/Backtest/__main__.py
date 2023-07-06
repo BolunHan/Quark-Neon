@@ -7,12 +7,14 @@ import time
 import uuid
 
 import simulated_env
+from . import LOGGER
 from ..API import historical
 from ..Base import GlobalStatics
+from ..Calibration.linear import LinearCore
 from ..Misc import helper
-from ..Strategy.data_core import SyntheticIndexMonitor
+from ..Strategy.data_core import SyntheticIndexMonitor, VolatilityMonitor
+from ..Strategy.decision_core import DummyDecisionCore
 from ..Strategy.strategy import Strategy, StrategyStatus
-from . import LOGGER
 
 INDEX_NAME = '000016.SH'
 MARKET_DATE = START_DATE = datetime.date(2023, 1, 1)
@@ -26,16 +28,20 @@ CALENDAR = simulated_env.trade_calendar(start_date=START_DATE, end_date=END_DATE
 STRATEGY = Strategy(
     index_ticker=INDEX_NAME,
     index_weights=helper.load_dict(
-        file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'index_weights.{INDEX_NAME}.{MARKET_DATE:%Y%m%d}.json'),
+        file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'index_weights.{INDEX_NAME}.{MARKET_DATE:%Y%m%d}.json'),
         json_dict=simulated_env.query_index_weights(index_name=INDEX_NAME, market_date=MARKET_DATE)
     ),
     mode='sampling'
 )
 
 
-def init_cache(tickers: list[str]):
+def init_cache_daily(tickers: list[str], look_back: int = 90):
     import pickle
-    cache_path = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'data_cache.{INDEX_NAME}.{START_DATE:%Y%m%d}.{END_DATE:%Y%m%d}.pkl')
+
+    start_date = START_DATE - datetime.timedelta(days=look_back)
+    end_date = END_DATE
+
+    cache_path = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'data_cache.{INDEX_NAME}.{start_date:%Y%m%d}.{end_date:%Y%m%d}.pkl')
 
     if os.path.isfile(cache_path):
         with open(cache_path, 'rb') as f:
@@ -43,8 +49,8 @@ def init_cache(tickers: list[str]):
         return
 
     for ticker in tickers:
-        LOGGER.info(f'initializing cache for {ticker} from {START_DATE}, {END_DATE}')
-        simulated_env.preload_daily_cache(ticker=ticker, start_date=START_DATE, end_date=END_DATE)
+        LOGGER.info(f'initializing cache for {ticker} from {start_date}, {end_date}')
+        simulated_env.preload_daily_cache(ticker=ticker, start_date=start_date, end_date=end_date)
 
     with open(cache_path, 'wb') as f:
         pickle.dump(simulated_env.DATA_CACHE, f)
@@ -59,6 +65,7 @@ def bod(market_date: datetime.date, **kwargs):
         return
 
     MARKET_DATE = market_date
+    dump_dir = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'TestResult.{TEST_ID_SHORT}')
 
     # startup task 0: load index weights
     index_weights = simulated_env.query_index_weights(index_name=INDEX_NAME, market_date=MARKET_DATE)
@@ -66,7 +73,7 @@ def bod(market_date: datetime.date, **kwargs):
 
     # backtest specific action 0: initializing cache
     if not IS_INITIALIZED:
-        init_cache(tickers=list(index_weights.keys()) + [INDEX_NAME])
+        init_cache_daily(tickers=list(index_weights.keys()) + [INDEX_NAME])
 
     # startup task 1: update subscription
     subscription = set(index_weights.keys())
@@ -100,12 +107,48 @@ def bod(market_date: datetime.date, **kwargs):
     monitor: SyntheticIndexMonitor = monitors.get('Monitor.SyntheticIndex')
     if monitor:
         last_close_price = helper.load_dict(
-            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'last_close.{MARKET_DATE:%Y%m%d}.json'),
+            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'last_close.{MARKET_DATE:%Y%m%d}.json'),
             json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
         )
         monitor.base_price.clear()
         monitor.base_price.update(last_close_price)
-        monitor.index_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
+        monitor.synthetic_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
+
+    # OPTIONAL: task 2.2: update baseline for Monitor.VolatilityMonitor
+    monitor: VolatilityMonitor = monitors.get('Monitor.Volatility.Daily')
+    if monitor:
+        last_close_price = helper.load_dict(
+            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'last_close.{MARKET_DATE:%Y%m%d}.json'),
+            json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
+        )
+        monitor.base_price.clear()
+        monitor.base_price.update(last_close_price)
+        monitor.synthetic_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
+        daily_volatility = helper.load_dict(
+            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'volatility.daily.{MARKET_DATE:%Y%m%d}.json'),
+            json_dict={_: simulated_env.query_volatility_daily(ticker=_, market_date=MARKET_DATE, window=20) for _ in index_weights}  # in production, delete this line
+        )
+        monitor.daily_volatility.clear()
+        monitor.daily_volatility.update(daily_volatility)
+        monitor.index_volatility = simulated_env.query_volatility_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, window=20)
+
+    # OPTIONAL: task 2.3: update baseline for Monitor.SyntheticIndex
+    monitor: SyntheticIndexMonitor = monitors.get('Monitor.Decoder.Index')
+    if monitor:
+        last_close_price = helper.load_dict(
+            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'last_close.{MARKET_DATE:%Y%m%d}.json'),
+            json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
+        )
+        monitor.base_price.clear()
+        monitor.base_price.update(last_close_price)
+        monitor.synthetic_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
+
+    # startup task 3: initialize decision core
+    try:
+        STRATEGY.decision_core = LinearCore(ticker=INDEX_NAME, decode_level=3)
+        STRATEGY.decision_core.load(file_dir=dump_dir, file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json')
+    except FileNotFoundError as _:
+        STRATEGY.decision_core = DummyDecisionCore()  # in production mode, just throw the error and stop the program
 
     # backtest-specific codes
     if not IS_INITIALIZED:
@@ -124,7 +167,10 @@ def eod(market_date: datetime.date = MARKET_DATE, **kwargs):
 
     STRATEGY.position_tracker.clear()
     STRATEGY.strategy_metric.dump(dump_dir.joinpath(f'metric.{MARKET_DATE}.csv'))
+    STRATEGY.decision_core.calibrate(metric=STRATEGY.strategy_metric)
+    STRATEGY.decision_core.dump(dump_dir.joinpath(f'decision_core.{MARKET_DATE}.json'))
     STRATEGY.strategy_metric.clear()
+    STRATEGY.decision_core.clear()
     LOGGER.info(f'Backtest epoch {market_date} complete! Time costs {time.time() - EPOCH_TS}')
 
 
