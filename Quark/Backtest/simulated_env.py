@@ -83,6 +83,25 @@ def query_index_weights(index_name: str, market_date: datetime.date):
     return weights
 
 
+def query_volatility_daily(ticker: str, market_date: datetime.date, window: int = 20) -> float:
+    max_trade_day_before = int(np.ceil(window / 5) * 7 + 7)
+    start_date = market_date - datetime.timedelta(days=max_trade_day_before)
+    end_date = market_date
+
+    calendar = trade_calendar(start_date=start_date, end_date=end_date)[-window:]
+
+    pct_change_list = []
+
+    for _ in calendar:
+        pre_close = query_daily(ticker=ticker, market_date=_, key='preclose')
+        close = query_daily(ticker=ticker, market_date=_, key='close')
+        pct_change = close / pre_close - 1
+        pct_change_list.append(pct_change)
+
+    volatility = float(np.std(pct_change_list))
+    return volatility
+
+
 def query_daily(ticker: str, market_date: datetime.date, key: str = 'close') -> float:
     daily = _query_daily(ticker=ticker, market_date=market_date)
 
