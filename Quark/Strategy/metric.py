@@ -1,11 +1,14 @@
 import datetime
-
-import pytz
 import pathlib
 
 import numpy as np
 import pandas as pd
 from AlgoEngine.Engine import MarketDataMonitor
+
+from .decoder import Wavelet
+from ..Base import GlobalStatics
+
+TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
 class StrategyMetric(object):
@@ -93,9 +96,7 @@ class StrategyMetric(object):
                 for ticker in value:
                     factors[f'Monitor.TA.MACD.{ticker}'] = value[ticker]
 
-        if monitor := monitors.get('Monitor.TA.MACD.Index'):
-            if monitor.is_ready:
-                factors[f'Monitor.TA.MACD.Index'] = monitor.value
+                factors[f'Monitor.TA.MACD.Index'] = monitor.weighted_index
 
         if monitor := monitors.get('Monitor.Aggressiveness'):
             if monitor.is_ready:
@@ -136,6 +137,15 @@ class StrategyMetric(object):
 
                 factors[f'Monitor.Entropy.Price.EMA'] = entropy
 
+        if monitor := monitors.get('Monitor.Volatility.Daily'):
+            if monitor.is_ready:
+                volatility_adjusted_range = monitor.value
+
+                for ticker in volatility_adjusted_range:
+                    factors[f'Monitor.Volatility.Daily.{ticker}'] = volatility_adjusted_range.get(ticker, 0.)
+
+                factors[f'Monitor.Volatility.Daily.Index'] = monitor.weighted_index
+
         # update observation timestamp
         if self._last_update + self.sample_interval < timestamp:
             timestamp = timestamp // self.sample_interval * self.sample_interval
@@ -143,6 +153,11 @@ class StrategyMetric(object):
             self._last_update = timestamp
 
         return factors
+
+    def log_wavelet(self, wavelet: Wavelet):
+        for ts in self.factor_value:
+            if wavelet.start_ts <= ts <= wavelet.end_ts:
+                self.factor_value[ts]['Decoder.Flag'] = wavelet.flag.value
 
     def log_factors(self, factors: dict, timestamp: float):
         self.assets_value[timestamp] = factors.get(f'Monitor.SyntheticIndex.Price')
@@ -158,12 +173,13 @@ class StrategyMetric(object):
             'Aggressiveness.EMA.Net': factors.get(f'Monitor.Aggressiveness.EMA.Net'),
             'Entropy.Price': factors.get(f'Monitor.Entropy.Price'),
             'Entropy.Price.EMA': factors.get(f'Monitor.Entropy.Price.EMA'),
+            # 'Volatility.Daily.Index': factors.get(f'Monitor.Volatility.Daily.Index'),
         }
 
     def dump(self, file_path: str | pathlib.Path):
-        info = pd.DataFrame(self.factor_value).T
-        info['index_value'] = pd.Series(self.assets_value)
-        info.index = [datetime.datetime.fromtimestamp(_) for _ in info.index]
+        info = self.info
+        info.index = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in info.index]
+
         info.to_csv(file_path)
 
     def collect_signal(self, signal: int, timestamp: float):
@@ -205,3 +221,9 @@ class StrategyMetric(object):
         self.signal_count = 0.
         self.total_cash_flow = 0.
         self.last_assets_price = 1.
+
+    @property
+    def info(self) -> pd.DataFrame:
+        info = pd.DataFrame(self.factor_value).T
+        info['index_value'] = pd.Series(self.assets_value)
+        return info
