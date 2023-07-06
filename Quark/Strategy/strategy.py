@@ -2,23 +2,13 @@ import datetime
 import enum
 from types import SimpleNamespace
 
-from AlgoEngine.Engine import MarketDataMonitor, PositionManagementService
+from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TransactionSide, TradeInstruction, OrderState
 
+from .decision_core import DummyDecisionCore
 from . import STRATEGY_ENGINE
-from .metric import StrategyMetric
 from .data_core import IndexWeight
-
-
-class DecisionCore(object):
-    def __init__(self):
-        pass
-
-    def update_factor(self, factor: dict[str, float], timestamp: float) -> int:
-        return 0
-
-    def trade_volume(self, position: PositionManagementService, cash: float, margin: float, timestamp: float, signal: int) -> float:
-        return 1.
+from .metric import StrategyMetric
 
 
 class StrategyStatus(enum.Enum):
@@ -50,7 +40,10 @@ class Strategy(object):
         self.status = StrategyStatus.idle
         self.subscription = self.engine.subscription
         self.eod_status = {'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.}
-        self.decision_core = DecisionCore()
+        # Using dummy core as default, no trading action will be triggered. To override this, a proper BoD function is needed.
+        # This behavior is intentional, so that accidents might be avoided if strategy is not properly initialized.
+        # Signals still can be collected with a dummy core, which is useful in backtest mode.
+        self.decision_core = DummyDecisionCore()
 
         self.profile = SimpleNamespace(
             clear_on_eod=True,
@@ -66,6 +59,10 @@ class Strategy(object):
         from .data_core import register_monitor
         self.engine.multi_threading = False
         self.monitors.update(register_monitor(index_name=self.index_ticker, index_weights=self.index_weights))
+
+        if 'Monitor.Decoder.Index' in self.monitors:
+            self.monitors['Monitor.Decoder.Index'].register_callback(self.strategy_metric.log_wavelet)
+
         self.engine.add_handler(on_market_data=self._on_market_data)
         self.engine.add_handler(_on_order=self._on_order)
         self.status = StrategyStatus.working
@@ -149,7 +146,7 @@ class Strategy(object):
 
         # all conditions passed, checking signal
         monitor_value = self.strategy_metric.collect_factors(monitors=self.monitors, timestamp=timestamp)
-        signal = self.decision_core.update_factor(factor=monitor_value, timestamp=timestamp)
+        signal = self.decision_core.signal(position=self.position_tracker, factor=monitor_value, timestamp=timestamp)
         self.strategy_metric.collect_signal(signal=signal, timestamp=timestamp)
 
         # long action
