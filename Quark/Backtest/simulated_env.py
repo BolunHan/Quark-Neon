@@ -1,11 +1,13 @@
 import datetime
 import functools
+import pathlib
 import traceback
 
 import baostock as bs
 import numpy as np
 import pandas as pd
 import exchange_calendars
+from ..Base import GlobalStatics
 
 BAO_STOCK = None
 DATA_CACHE = {}
@@ -74,11 +76,11 @@ def trade_calendar(start_date: datetime.date, end_date: datetime.date, market='S
 
 
 def query_index_weights(index_name: str, market_date: datetime.date):
-    df = pd.read_csv(fr"C:\Users\Bolun\Projects\Quark\Res\weights.{index_name.split('.')[0]}.csv")
+    df = pd.read_csv(pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f"weights.{index_name.split('.')[0]}.csv"))
     weights = {}
 
     for _, row in df.iterrows():
-        weights[row['Symbol']] = float(row['Weights'])
+        weights[row['ticker']] = float(row['weight'])
 
     return weights
 
