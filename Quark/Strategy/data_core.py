@@ -1205,3 +1205,14 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None) ->
     # MDS.add_monitor(_)
 
     return monitors
+
+
+__all__ = ['IndexWeight', 'Synthetic', 'EMA',
+           'TradeFlowMonitor', 'TradeFlowEMAMonitor',
+           'CoherenceMonitor', 'CoherenceEMAMonitor', 'TradeCoherenceMonitor',
+           'SyntheticIndexMonitor', 'MACDMonitor',
+           'AggressivenessMonitor', 'AggressivenessEMAMonitor',
+           'EntropyMonitor', 'EntropyEMAMonitor',
+           'VolatilityMonitor',
+           'DecoderMonitor', 'IndexDecoderMonitor',
+           'register_monitor']
