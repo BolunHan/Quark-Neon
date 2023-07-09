@@ -418,3 +418,38 @@ class LinearCore(DecisionCore):
 
         fig.update_xaxes(rangebreaks=[dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 9.5], pattern="hour")])
         return fig
+
+
+class LogLinearCore(LinearCore):
+    def fit(self, x: np.ndarray, y: np.ndarray):
+        # Apply log transformation to the first column of y array
+        y[:, 0] = np.log(y[:, 0])
+        # Apply log transformation with negative sign to the second column of y array
+        y[:, 1] = np.log(-y[:, 1])
+
+        # Drop rows with NaN values in both x and y arrays
+        valid_rows = np.logical_not(np.isnan(x).any(axis=1)) & np.logical_not(np.isnan(y).any(axis=1))
+        x = x[valid_rows]
+        y = y[valid_rows]
+
+        # Perform the linear regression
+        coefficients, residuals = super().fit(x, y)
+        return coefficients, residuals
+
+    def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
+        prediction = super().predict(factor, timestamp)
+
+        # Apply exponential transformation to the prediction results
+        prediction[self.pred_var[0]] = np.exp(prediction[self.pred_var[0]])
+        prediction[self.pred_var[1]] = -np.exp(prediction[self.pred_var[1]])
+
+        return prediction
+
+    def predict_batch(self, x: pd.DataFrame):
+        prediction = super().predict_batch(x)
+
+        # Apply exponential transformation to the prediction results
+        prediction[self.pred_var[0]] = np.exp(prediction[self.pred_var[0]])
+        prediction[self.pred_var[1]] = -np.exp(prediction[self.pred_var[1]])
+
+        return prediction
