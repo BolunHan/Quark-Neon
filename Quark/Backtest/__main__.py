@@ -6,8 +6,8 @@ import pathlib
 import time
 import uuid
 
-import simulated_env
 from . import LOGGER
+from . import simulated_env
 from ..API import historical
 from ..Base import GlobalStatics
 from ..Calibration.linear import LinearCore
@@ -145,10 +145,11 @@ def bod(market_date: datetime.date, **kwargs):
 
     # startup task 3: initialize decision core
     try:
-        STRATEGY.decision_core = LinearCore(ticker=INDEX_NAME, decode_level=3)
+        STRATEGY.decision_core = LinearCore(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
         STRATEGY.decision_core.load(file_dir=dump_dir, file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json')
-    except FileNotFoundError as _:
+    except Exception as _:
         STRATEGY.decision_core = DummyDecisionCore()  # in production mode, just throw the error and stop the program
+        LOGGER.warning('decision core not loaded, using dummy core!')
 
     # backtest-specific codes
     if not IS_INITIALIZED:
