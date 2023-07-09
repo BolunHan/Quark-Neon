@@ -171,7 +171,7 @@ class StrategyMetric(object):
             'TA.MACD.Index': factors.get(f'Monitor.TA.MACD.Index'),
             # 'Aggressiveness.Net': factors.get(f'Monitor.Aggressiveness.Net'),
             'Aggressiveness.EMA.Net': factors.get(f'Monitor.Aggressiveness.EMA.Net'),
-            'Entropy.Price': factors.get(f'Monitor.Entropy.Price'),
+            # 'Entropy.Price': factors.get(f'Monitor.Entropy.Price'),
             'Entropy.Price.EMA': factors.get(f'Monitor.Entropy.Price.EMA'),
             # 'Volatility.Daily.Index': factors.get(f'Monitor.Volatility.Daily.Index'),
         }
