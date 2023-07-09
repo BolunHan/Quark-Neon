@@ -1,20 +1,14 @@
 __package__ = 'Quark.Backtest'
 
-import datetime
 import os
 import pathlib
 import re
 
-import numpy as np
-import pandas as pd
-import plotly.graph_objs
-
-from ..Calibration.linear import LinearCore
-from ..Strategy.decoder import Decoder, RecursiveDecoder
 from . import LOGGER
+from ..Calibration.linear import LogLinearCore
 
 DATA_SOURCE = r'C:\Users\Bolun\Projects\Quark\TestResult.51bec829'
-DATA_CORE = LinearCore(ticker='Synthetic')
+DATA_CORE = LogLinearCore(ticker='Synthetic')
 
 
 def main():
