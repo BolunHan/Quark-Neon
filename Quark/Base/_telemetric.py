@@ -394,4 +394,13 @@ LOGGER.addHandler(logger_fh)
 # step 2: init Status and Profiler
 PROFILER = _Profiler(enabled=False)
 
+# step 3: add some annotations
+
+# add some annotations
+if GlobalStatics.TIME_ZONE is not None:
+    LOGGER.warning(f'{INFO.program}.{PROCESS_ID} is using timezone={GlobalStatics.TIME_ZONE}! Some api may not support timezone awareness!')
+
+if GlobalStatics.DEBUG_MODE:
+    LOGGER.warning(f'{INFO.program}.{PROCESS_ID} is in debug mode! Limited efficiency of program execution')
+
 __all__ = ['PROFILER', 'LOGGER', 'INFO', 'PROCESS_ID']
