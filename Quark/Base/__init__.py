@@ -8,7 +8,7 @@ from ._exceptions import Exceptions
 # step 1: init GlobalStatics from console args
 from ._statics import GlobalStatics
 
-# step 2: load config defined in  GlobalStatics
+# step 2: load config defined in GlobalStatics
 from ._config import CONFIG
 
 # step 3: init loggers and profiler
