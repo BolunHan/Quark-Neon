@@ -4,6 +4,7 @@ implement MarketDataMonitor and add it to the register() method
 import abc
 import datetime
 from collections import deque
+from typing import Iterable
 
 import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
@@ -1122,7 +1123,7 @@ class IndexDecoderMonitor(DecoderMonitor, Synthetic):
         return self.state_history['synthetic']
 
 
-def register_monitor(index_name: str, index_weights: dict[str, float] = None) -> dict[str, MarketDataMonitor]:
+def register_monitor(index_name: str, index_weights: dict[str, float] = None, factors: list[str] | str = None) -> dict[str, MarketDataMonitor]:
     monitors = {}
     alpha_0 = 0.9885  # alpha = 0.5 for each minute
     alpha_1 = 0.9735  # alpha = 0.2 for each minute
@@ -1134,75 +1135,61 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None) ->
     index_weights.normalize()
     LOGGER.info(f'Register monitors for index {index_name} and its {len(index_weights.components)} components!')
 
+    def check_and_add(monitor: MarketDataMonitor):
+        if factors is None:
+            is_pass_check = True
+        elif isinstance(factors, str) and factors == monitor.name:
+            is_pass_check = True
+        elif isinstance(factors, Iterable) and monitor.name in factors:
+            is_pass_check = True
+        else:
+            return
+
+        if is_pass_check:
+            monitors[monitor.name] = monitor
+            MDS.add_monitor(monitor)
+
     # trade flow monitor
-    # _ = TradeFlowMonitor()
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    check_and_add(TradeFlowMonitor())
 
     # trade flow ema monitor
-    _ = TradeFlowEMAMonitor(discount_interval=1, alpha=alpha_0)
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    check_and_add(TradeFlowEMAMonitor(discount_interval=1, alpha=alpha_0))
 
     # price coherence monitor
-    # _ = CoherenceMonitor(update_interval=60, sample_interval=1, weights=index_weights)
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    check_and_add(CoherenceMonitor(update_interval=60, sample_interval=1, weights=index_weights))
 
     # price coherence ema monitor
-    _ = CoherenceEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=alpha_4)
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    check_and_add(CoherenceEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=alpha_4))
 
     # synthetic index monitor
-    _ = SyntheticIndexMonitor(index_name=index_name, weights=index_weights)
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    check_and_add(SyntheticIndexMonitor(index_name=index_name, weights=index_weights))
 
     # trade coherence monitor
-    _ = TradeCoherenceMonitor(update_interval=60, sample_interval=1, weights=index_weights)
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    check_and_add(TradeCoherenceMonitor(update_interval=60, sample_interval=1, weights=index_weights))
 
     # MACD monitor
-    _ = MACDMonitor(weights=index_weights, update_interval=60)
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    check_and_add(MACDMonitor(weights=index_weights, update_interval=60))
 
     # aggressiveness monitor
-    # _ = AggressivenessMonitor()
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    check_and_add(AggressivenessMonitor())
 
     # aggressiveness ema monitor
-    _ = AggressivenessEMAMonitor(discount_interval=1, alpha=alpha_4)  # alpha = 0.5 for each minute
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    check_and_add(AggressivenessEMAMonitor(discount_interval=1, alpha=alpha_4))
 
     # price coherence monitor
-    # _ = EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights)
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    check_and_add(EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights))
 
     # price coherence monitor
-    _ = EntropyEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=alpha_4)
-    monitors[_.name] = _
-    MDS.add_monitor(_)
+    check_and_add(EntropyEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=alpha_4))
 
     # price coherence monitor
-    # _ = VolatilityMonitor(weights=index_weights)
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    check_and_add(VolatilityMonitor(weights=index_weights))
 
     # price movement online decoder
-    # _ = DecoderMonitor(retrospective=False)
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    check_and_add(DecoderMonitor(retrospective=False))
 
     # price movement online decoder
-    # _ = IndexDecoderMonitor(up_threshold=0.005, down_threshold=0.005, confirmation_level=0.002, retrospective=True, weights=index_weights)
-    # monitors[_.name] = _
-    # MDS.add_monitor(_)
+    check_and_add(IndexDecoderMonitor(up_threshold=0.005, down_threshold=0.005, confirmation_level=0.002, retrospective=True, weights=index_weights))
 
     return monitors
 
