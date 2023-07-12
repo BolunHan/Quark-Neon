@@ -36,6 +36,10 @@ class StrategyMetric(object):
         self.last_assets_price = 1.
 
     def collect_factors(self, monitors: dict[str, MarketDataMonitor], timestamp: float) -> dict[str, float]:
+        """
+        collect all the factors, from the registered MarketDataMonitor
+        """
+
         factors = {}
 
         if monitor := monitors.get('Monitor.TradeFlow'):
@@ -43,7 +47,7 @@ class StrategyMetric(object):
                 value = monitor.value
 
                 for ticker in value:
-                    factors[f'Monitor.TradeFlow.{ticker}'] = value[ticker]
+                    factors[f'TradeFlow.{ticker}'] = value[ticker]
 
         if monitor := monitors.get('Monitor.TradeFlow.EMA'):
             if monitor.is_ready:
@@ -51,63 +55,63 @@ class StrategyMetric(object):
                 weighted_sum = 0.
 
                 for ticker in value:
-                    factors[f'Monitor.TradeFlow.EMA.{ticker}'] = value[ticker]
+                    factors[f'TradeFlow.EMA.{ticker}'] = value[ticker]
 
                     if ticker in self.index_weights:
                         weighted_sum += value[ticker] * self.index_weights[ticker]
 
-                factors[f'Monitor.TradeFlow.EMA.Sum'] = weighted_sum
+                factors[f'TradeFlow.EMA.Sum'] = weighted_sum
 
         if monitor := monitors.get('Monitor.Coherence.Price'):
             if monitor.is_ready:
                 up_dispersion, down_dispersion = monitor.value
-                factors[f'Monitor.Coherence.Price.Up'] = up_dispersion
-                factors[f'Monitor.Coherence.Price.Down'] = down_dispersion
+                factors[f'Coherence.Price.Up'] = up_dispersion
+                factors[f'Coherence.Price.Down'] = down_dispersion
                 if up_dispersion < 0:
-                    factors[f'Monitor.Coherence.Price.Ratio'] = 1.
+                    factors[f'Coherence.Price.Ratio'] = 1.
                 elif down_dispersion < 0:
-                    factors[f'Monitor.Coherence.Price.Ratio'] = 0.
+                    factors[f'Coherence.Price.Ratio'] = 0.
                 else:
-                    factors[f'Monitor.Coherence.Price.Ratio'] = down_dispersion / (up_dispersion + down_dispersion)
+                    factors[f'Coherence.Price.Ratio'] = down_dispersion / (up_dispersion + down_dispersion)
 
         if monitor := monitors.get('Monitor.Coherence.Price.EMA'):
             if monitor.is_ready:
                 up_dispersion, down_dispersion, dispersion_ratio = monitor.value
-                factors[f'Monitor.Coherence.Price.Up'] = up_dispersion
-                factors[f'Monitor.Coherence.Price.Down'] = down_dispersion
-                factors[f'Monitor.Coherence.Price.Ratio.EMA'] = dispersion_ratio
+                factors[f'Coherence.Price.Up'] = up_dispersion
+                factors[f'Coherence.Price.Down'] = down_dispersion
+                factors[f'Coherence.Price.Ratio.EMA'] = dispersion_ratio
 
         if monitor := monitors.get('Monitor.SyntheticIndex'):
-            self.last_assets_price = factors[f'Monitor.SyntheticIndex.Price'] = monitor.index_price
+            self.last_assets_price = factors[f'SyntheticIndex.Price'] = monitor.index_price
             if monitor.is_ready:
-                factors[f'Monitor.SyntheticIndex.Notional'] = monitor.active_bar.notional
-                factors[f'Monitor.SyntheticIndex.Volume'] = monitor.active_bar.volume
-                factors[f'Monitor.SyntheticIndex.LastNotional'] = monitor.value.notional
-                factors[f'Monitor.SyntheticIndex.LastVolume'] = monitor.value.volume
+                factors[f'SyntheticIndex.Notional'] = monitor.active_bar.notional
+                factors[f'SyntheticIndex.Volume'] = monitor.active_bar.volume
+                factors[f'SyntheticIndex.LastNotional'] = monitor.value.notional
+                factors[f'SyntheticIndex.LastVolume'] = monitor.value.volume
 
         if monitor := monitors.get('Monitor.Coherence.Volume'):
             if monitor.is_ready:
-                factors[f'Monitor.Coherence.Volume'] = monitor.value
+                factors[f'Coherence.Volume'] = monitor.value
 
         if monitor := monitors.get('Monitor.TA.MACD'):
             if monitor.is_ready:
                 value = monitor.value
 
                 for ticker in value:
-                    factors[f'Monitor.TA.MACD.{ticker}'] = value[ticker]
+                    factors[f'TA.MACD.{ticker}'] = value[ticker]
 
-                factors[f'Monitor.TA.MACD.Index'] = monitor.weighted_index
+                factors[f'TA.MACD.Index'] = monitor.weighted_index
 
         if monitor := monitors.get('Monitor.Aggressiveness'):
             if monitor.is_ready:
                 aggressive_buy, aggressive_sell = monitor.value
 
                 for ticker in aggressive_buy:
-                    factors[f'Monitor.Aggressiveness.Buy.{ticker}'] = aggressive_buy[ticker]
+                    factors[f'Aggressiveness.Buy.{ticker}'] = aggressive_buy[ticker]
 
                 for ticker in aggressive_sell:
-                    factors[f'Monitor.Aggressiveness.Sell.{ticker}'] = aggressive_sell[ticker]
-                factors[f'Monitor.Aggressiveness.Net'] = np.sum(list(aggressive_buy.values())) - np.sum(list(aggressive_sell.values()))
+                    factors[f'Aggressiveness.Sell.{ticker}'] = aggressive_sell[ticker]
+                factors[f'Aggressiveness.Net'] = np.sum(list(aggressive_buy.values())) - np.sum(list(aggressive_sell.values()))
 
         if monitor := monitors.get('Monitor.Aggressiveness.EMA'):
             if monitor.is_ready:
@@ -115,41 +119,46 @@ class StrategyMetric(object):
                 weighted_sum = 0.
 
                 for ticker in aggressive_buy:
-                    factors[f'Monitor.Aggressiveness.EMA.Buy.{ticker}'] = aggressive_buy[ticker]
+                    factors[f'Aggressiveness.EMA.Buy.{ticker}'] = aggressive_buy[ticker]
 
                 for ticker in aggressive_sell:
-                    factors[f'Monitor.Aggressiveness.EMA.Sell.{ticker}'] = aggressive_sell[ticker]
+                    factors[f'Aggressiveness.EMA.Sell.{ticker}'] = aggressive_sell[ticker]
 
                 for ticker in self.index_weights:
                     weighted_sum += (aggressive_buy.get(ticker, 0.) - aggressive_sell.get(ticker, 0.)) * self.index_weights[ticker]
 
-                factors[f'Monitor.Aggressiveness.EMA.Net'] = weighted_sum
+                factors[f'Aggressiveness.EMA.Net'] = weighted_sum
 
         if monitor := monitors.get('Monitor.Entropy.Price'):
             if monitor.is_ready:
                 entropy = monitor.value
 
-                factors[f'Monitor.Entropy.Price'] = entropy
+                factors[f'Entropy.Price'] = entropy
 
         if monitor := monitors.get('Monitor.Entropy.Price.EMA'):
             if monitor.is_ready:
                 entropy = monitor.value
 
-                factors[f'Monitor.Entropy.Price.EMA'] = entropy
+                factors[f'Entropy.Price.EMA'] = entropy
 
         if monitor := monitors.get('Monitor.Volatility.Daily'):
             if monitor.is_ready:
                 volatility_adjusted_range = monitor.value
 
                 for ticker in volatility_adjusted_range:
-                    factors[f'Monitor.Volatility.Daily.{ticker}'] = volatility_adjusted_range.get(ticker, 0.)
+                    factors[f'Volatility.Daily.{ticker}'] = volatility_adjusted_range.get(ticker, 0.)
 
-                factors[f'Monitor.Volatility.Daily.Index'] = monitor.weighted_index
+                factors[f'Volatility.Daily.Index'] = monitor.weighted_index
+
+        if monitor := monitors.get('Monitor.FactorPool.Dummy'):
+            if monitor.is_ready:
+                factor_cache = monitor.value
+                factors.update(factor_cache)
 
         # update observation timestamp
         if self._last_update + self.sample_interval < timestamp:
             timestamp = timestamp // self.sample_interval * self.sample_interval
-            self.log_factors(factors=factors, timestamp=timestamp)
+            self.select_factors(factors=factors, timestamp=timestamp)
             self._last_update = timestamp
 
         return factors
@@ -159,22 +168,27 @@ class StrategyMetric(object):
             if wavelet.start_ts <= ts <= wavelet.end_ts:
                 self.factor_value[ts]['Decoder.Flag'] = wavelet.flag.value
 
-    def log_factors(self, factors: dict, timestamp: float):
-        self.assets_value[timestamp] = factors.get(f'Monitor.SyntheticIndex.Price')
+    def select_factors(self, factors: dict, timestamp: float):
+        """
+        select of interest factors from all the factors
+        """
+        self.assets_value[timestamp] = factors.get(f'SyntheticIndex.Price')
 
         self.factor_value[timestamp] = {
-            'TradeFlow.EMA.Sum': factors.get(f'Monitor.TradeFlow.EMA.Sum'),
-            'Coherence.Price.Up': factors.get(f'Monitor.Coherence.Price.Up'),
-            'Coherence.Price.Down': factors.get(f'Monitor.Coherence.Price.Down'),
-            'Coherence.Price.Ratio.EMA': factors.get(f'Monitor.Coherence.Price.Ratio.EMA'),
-            'Coherence.Volume': factors.get(f'Monitor.Coherence.Volume'),
-            'TA.MACD.Index': factors.get(f'Monitor.TA.MACD.Index'),
-            # 'Aggressiveness.Net': factors.get(f'Monitor.Aggressiveness.Net'),
-            'Aggressiveness.EMA.Net': factors.get(f'Monitor.Aggressiveness.EMA.Net'),
-            # 'Entropy.Price': factors.get(f'Monitor.Entropy.Price'),
-            'Entropy.Price.EMA': factors.get(f'Monitor.Entropy.Price.EMA'),
-            # 'Volatility.Daily.Index': factors.get(f'Monitor.Volatility.Daily.Index'),
+            'TradeFlow.EMA.Sum': factors.get(f'TradeFlow.EMA.Sum'),
+            'Coherence.Price.Up': factors.get(f'Coherence.Price.Up'),
+            'Coherence.Price.Down': factors.get(f'Coherence.Price.Down'),
+            'Coherence.Price.Ratio.EMA': factors.get(f'Coherence.Price.Ratio.EMA'),
+            'Coherence.Volume': factors.get(f'Coherence.Volume'),
+            'TA.MACD.Index': factors.get(f'TA.MACD.Index'),
+            # 'Aggressiveness.Net': factors.get(f'Aggressiveness.Net'),
+            'Aggressiveness.EMA.Net': factors.get(f'Aggressiveness.EMA.Net'),
+            # 'Entropy.Price': factors.get(f'Entropy.Price'),
+            'Entropy.Price.EMA': factors.get(f'Entropy.Price.EMA'),
+            # 'Volatility.Daily.Index': factors.get(f'Volatility.Daily.Index'),
         }
+
+        return factors
 
     def dump(self, file_path: str | pathlib.Path):
         info = self.info
