@@ -4,7 +4,6 @@ import datetime
 import json
 import os
 import pathlib
-import re
 import time
 from types import SimpleNamespace
 
@@ -12,10 +11,11 @@ import numpy as np
 import pandas as pd
 from AlgoEngine.Engine import PositionManagementService
 
+from . import LOGGER
 from ..Base import GlobalStatics
+from ..Strategy.decision_core import DecisionCore
 from ..Strategy.decoder import RecursiveDecoder
 from ..Strategy.metric import StrategyMetric
-from ..Strategy.decision_core import DecisionCore
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
 
@@ -48,13 +48,13 @@ class LinearCore(DecisionCore):
         self.coefficients: pd.DataFrame | None = None
 
     def __str__(self):
-        return f'DecisionCore.Linear.{id(self)}'
+        return f'DecisionCore.Linear.{id(self)}(ready={self.is_ready})'
 
     def to_json(self, fmt='dict') -> dict | str:
         json_dict = dict(
             ticker=self.ticker,
             decode_level=self.decode_level,
-            data_source=self.data_source,
+            data_source=str(self.data_source),
             inputs_var=self.inputs_var,
             pred_var=self.pred_var,
             smooth_params=dict(
@@ -88,7 +88,7 @@ class LinearCore(DecisionCore):
         self = cls(
             ticker=json_dict['ticker'],
             decode_level=json_dict['decode_level'],
-            data_source=json_dict['data_source']
+            data_source=pathlib.Path(json_dict['data_source'])
         )
 
         self.inputs_var.clear()
@@ -110,7 +110,7 @@ class LinearCore(DecisionCore):
 
     def signal(self, position: PositionManagementService, factor: dict[str, float], timestamp: float) -> int:
 
-        if self.coefficients is None:
+        if not self.is_ready:
             return 0
 
         prediction = self.predict(factor=factor, timestamp=timestamp)
@@ -159,26 +159,24 @@ class LinearCore(DecisionCore):
         if info is None:
             info = metric.info
 
+        LOGGER.info('Calibrating with factor data\n' + info.to_string())
+
         # step 1: prepare the data
         x, y = self._prepare(info=info)
 
         # Optional step 1.1: load data from previous sessions
-        if os.path.isdir(self.data_source):
+        if (look_back := self.calibration_params.look_back) > 0:
+            from ..Backtest.factor_pool import FACTOR_POOL
+
             x_list, y_list = [x], [y]
-            i = 0
-            for _ in sorted(os.listdir(self.data_source), reverse=True):
-                if re.match(r'metric\.(\d{4}-\d{2}-\d{2})\.csv', _):
-                    file_path = self.data_source.joinpath(_)
-                    info = self.load_info_from_csv(file_path=file_path)
-                    _x, _y = self._prepare(info=info)
+            caches = FACTOR_POOL.locate_caches(market_date=kwargs.get('market_date'), size=int(look_back), exclude_current=True)
 
-                    x_list.append(x)
-                    y_list.append(y)
-                    i += 1
+            for file_path in caches:
+                info = self.load_info_from_csv(file_path=file_path)
+                _x, _y = self._prepare(info=info)
 
-                    if i >= self.calibration_params.look_back:
-                        break
-
+                x_list.append(_x)
+                y_list.append(_y)
             x, y = pd.concat(x_list), pd.concat(y_list)
 
         # step 2: fit the model
@@ -268,9 +266,13 @@ class LinearCore(DecisionCore):
     def decode_index_price(self, info: pd.DataFrame):
         for _ in info.iterrows():  # type: tuple[float, dict]
             ts, row = _
-            market_price = float(row['index_value'])
+            market_price = float(row.get('index_value', np.nan))
             market_time = datetime.datetime.fromtimestamp(ts, tz=TIME_ZONE)
             timestamp = market_time.timestamp()
+
+            # filter nan values
+            if not np.isfinite(market_price):
+                continue
 
             # filter non-trading hours
             if market_time.time() < datetime.time(9, 30) \
@@ -385,7 +387,7 @@ class LinearCore(DecisionCore):
     @classmethod
     def load_info_from_csv(cls, file_path: str | pathlib.Path):
         df = pd.read_csv(file_path, index_col=0)
-        df.index = [_.to_pydatetime().replace(tzinfo=TIME_ZONE).timestamp() for _ in pd.to_datetime(df.index)]
+        # df.index = [_.to_pydatetime().replace(tzinfo=TIME_ZONE).timestamp() for _ in pd.to_datetime(df.index)]
         return df
 
     @classmethod
@@ -418,6 +420,13 @@ class LinearCore(DecisionCore):
 
         fig.update_xaxes(rangebreaks=[dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 9.5], pattern="hour")])
         return fig
+
+    @property
+    def is_ready(self):
+        if self.coefficients is None:
+            return False
+
+        return True
 
 
 class LogLinearCore(LinearCore):
