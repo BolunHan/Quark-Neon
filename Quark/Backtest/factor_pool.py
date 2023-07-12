@@ -5,14 +5,32 @@ import csv
 import datetime
 import os.path
 import pathlib
+import re
 from typing import Iterable
+
+from AlgoEngine.Engine import MarketDataMonitor, MDS
+from PyQuantKit import MarketData
 
 from ..Base import GlobalStatics
 
+TIME_ZONE = GlobalStatics.TIME_ZONE
+
 
 class FactorPool(object):
+    FACTOR_MAPPING = {
+        'TradeFlow.EMA.Sum': 'Monitor.TradeFlow.EMA',
+        'Coherence.Price.Ratio.EMA': 'Monitor.Coherence.Price.EMA',
+        'Coherence.Volume': 'Monitor.Coherence.Volume',
+        'TA.MACD.Index': 'Monitor.TA.MACD',
+        'Aggressiveness.Net': 'Monitor.Aggressiveness',
+        'Aggressiveness.EMA.Net': 'Monitor.Aggressiveness.EMA',
+        'Entropy.Price': 'Monitor.Entropy.Price',
+        'Entropy.Price.EMA': 'Monitor.Entropy.Price.EMA',
+        'Volatility.Daily.Index': 'Monitor.Volatility.Daily'
+    }
+
     def __init__(self, **kwargs):
-        self.factor_dir = kwargs.get('factor_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY, 'Res', 'Factors'))
+        self.factor_dir = kwargs.get('factor_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'Factors'))
         self.log_interval = kwargs.get('log_interval', 5)
 
         self.storage: dict[datetime.date, dict[float, dict[str, float]]] = {}  # market_date -> timestamp -> entry_key -> entry_value
@@ -31,7 +49,7 @@ class FactorPool(object):
 
         self.storage[market_date] = storage
 
-    def batch_update(self, factors: dict[float, dict[str, float]]):
+    def batch_update(self, factors: dict[float, dict[str, float]], include_keys: list[str] = None, exclude_keys: list[str] = None):
         """
         batch update assume that the factors is from the same date.
         update the logs of factor pool
@@ -49,14 +67,24 @@ class FactorPool(object):
                 market_date = market_time.date()
 
                 if market_date not in self.storage:
-                    self._load(factor_dir=self.factor_dir, market_date=market_date)
+                    self.load(market_date=market_date)
 
-                storage = self.storage.get(market_date)
+                self.storage[market_date] = storage = self.storage.get(market_date, {})
 
-            storage[timestamp] = factors[timestamp]
+            factor_log = factors[timestamp]
+            selected_factor = storage.get(timestamp, {})
 
-        self.storage.pop(market_date)
-        self.dump(factor_dir=self.factor_dir)
+            for entry_name in factor_log:
+                if include_keys is not None and entry_name not in include_keys:
+                    continue
+
+                if exclude_keys is not None and entry_name in exclude_keys:
+                    continue
+
+                selected_factor[entry_name] = factor_log[timestamp]
+
+            if selected_factor:
+                storage[timestamp] = selected_factor
 
     @classmethod
     def locate_timestamp(cls, timestamp: float, key_range: Iterable[float] = None, step: float = None) -> float:
@@ -71,7 +99,13 @@ class FactorPool(object):
 
         return timestamp // step * step
 
-    def dump(self, factor_dir: str | pathlib.Path):
+    def dump(self, factor_dir: str | pathlib.Path = None):
+
+        if factor_dir is None:
+            factor_dir = self.factor_dir
+
+        if not os.path.isdir(factor_dir):
+            os.makedirs(factor_dir, exist_ok=True)
 
         for market_date, storage in self.storage.items():
             file_name = pathlib.Path(factor_dir, f'{market_date:%Y%m%d}.factor.csv')
@@ -93,11 +127,16 @@ class FactorPool(object):
                     row = [timestamp] + [factor_dict.get(column, '') for column in column_names]
                     writer.writerow(row)
 
-    def _load(self, factor_dir: str | pathlib.Path, market_date: datetime.date) -> dict[float, dict[str, float]]:
+    def load(self, market_date: datetime.date, factor_dir: str | pathlib.Path = None) -> dict[float, dict[str, float]]:
+
+        if factor_dir is None:
+            factor_dir = self.factor_dir
+
         file_name = pathlib.Path(factor_dir, f'{market_date:%Y%m%d}.factor.csv')
         storage = dict()
 
         if not os.path.isfile(file_name):
+            self.storage[market_date] = storage
             return storage
 
         with open(file_name, 'r', newline='') as csvfile:
@@ -122,11 +161,36 @@ class FactorPool(object):
         self.storage[market_date] = storage
         return storage
 
+    def locate_caches(self, market_date: datetime.date, size: int = 5, pattern: str = r"\d{8}\.factor\.csv", exclude_current: bool = False) -> list[pathlib.Path]:
+        closest_files = []
+
+        # Get all files in the directory
+        files = [f for f in os.listdir(self.factor_dir) if re.match(pattern, f)]
+
+        # Sort the files in increasing order
+        files.sort()
+
+        # Loop through the file names and compare with the market_date
+        for file_name in files:
+            file_date = datetime.datetime.strptime(file_name[:8], "%Y%m%d").date()
+
+            if market_date is not None and (file_date > market_date or (exclude_current and file_date == market_date)):
+                break
+
+            closest_files.append(file_name)
+
+        result = [pathlib.Path(self.factor_dir, _) for _ in closest_files[-size:]]
+
+        return result
+
+    def clear(self):
+        self.storage.clear()
+
     def factor_names(self, market_date: datetime.date) -> set[str]:
         column_names = set()
 
         if market_date not in self.storage:
-            storage = self._load(factor_dir=self.factor_dir, market_date=market_date)
+            storage = self.load(market_date=market_date)
         else:
             storage = self.storage[market_date]
 
@@ -135,6 +199,48 @@ class FactorPool(object):
 
         column_names = set(sorted(column_names))
         return column_names
+
+    def monitor_names(self, market_date: datetime.date) -> set[str]:
+        factor_name = self.factor_names(market_date=market_date)
+        monitor_name = set()
+
+        for _ in factor_name:
+            if _ in self.FACTOR_MAPPING:
+                monitor_name.add(self.FACTOR_MAPPING[_])
+
+        return monitor_name
+
+
+class FactorPoolDummyMonitor(MarketDataMonitor):
+    def __init__(self, factor_pool: FactorPool = None):
+        super().__init__(name='Monitor.FactorPool.Dummy', mds=MDS)
+
+        self.factor_pool = FACTOR_POOL if factor_pool is None else factor_pool
+        self._is_ready = True
+        self.timestamp = 0.
+
+    def __call__(self, market_data: MarketData, **kwargs):
+        self.timestamp = market_data.timestamp
+
+    @property
+    def value(self) -> dict[str, float]:
+        market_date = datetime.datetime.fromtimestamp(self.timestamp, tz=TIME_ZONE)
+        factor_storage = self.factor_pool.storage.get(market_date)
+
+        if factor_storage is None:
+            factor_storage = self.factor_pool.load(market_date=market_date)
+
+        key = self.factor_pool.locate_timestamp(
+            timestamp=self.timestamp,
+            key_range=list(factor_storage.keys())
+        )
+
+        value = factor_storage[key]
+        return value
+
+    @property
+    def is_ready(self) -> bool:
+        return self._is_ready
 
 
 FACTOR_POOL = FactorPool()
