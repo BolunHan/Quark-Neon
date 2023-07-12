@@ -237,8 +237,8 @@ class LinearCore(DecisionCore):
             end_ts = local_extreme[i + 1][1] if i + 1 < len(local_extreme) else None
             self.mark_info(info=info, start_ts=start_ts, end_ts=end_ts)
 
-        info['up_actual'] = info['local_max'] / info['index_value'] - 1
-        info['down_actual'] = info['local_min'] / info['index_value'] - 1
+        info['up_actual'] = info['local_max'] / info['SyntheticIndex.Price'] - 1
+        info['down_actual'] = info['local_min'] / info['SyntheticIndex.Price'] - 1
 
         # step 3: smooth out the breaking points
         info['up_smoothed'] = info['up_actual']
@@ -266,7 +266,7 @@ class LinearCore(DecisionCore):
     def decode_index_price(self, info: pd.DataFrame):
         for _ in info.iterrows():  # type: tuple[float, dict]
             ts, row = _
-            market_price = float(row.get('index_value', np.nan))
+            market_price = float(row.get('SyntheticIndex.Price', np.nan))
             market_time = datetime.datetime.fromtimestamp(ts, tz=TIME_ZONE)
             timestamp = market_time.timestamp()
 
@@ -294,13 +294,13 @@ class LinearCore(DecisionCore):
 
         if break_type == 1:  # approaching to local maximum, use downward profit is discontinuous, using "up_actual" to smooth out
             max_loss = (-smooth_range.up_actual[::-1]).cummin()[::-1]
-            potential = (next_extreme_price / smooth_range.index_value - 1).clip(None, 0)
+            potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(None, 0)
             hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
             smoothed = potential * hold_prob + smooth_range.down_actual * (1 - hold_prob)
             info['down_smoothed'].update(smoothed)
         elif break_type == -1:
             max_loss = smooth_range.down_actual[::-1].cummin()[::-1]
-            potential = (next_extreme_price / smooth_range.index_value - 1).clip(0, None)
+            potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(0, None)
             hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
             smoothed = potential * hold_prob + smooth_range.up_actual * (1 - hold_prob)
             info['up_smoothed'].update(smoothed)
@@ -375,8 +375,8 @@ class LinearCore(DecisionCore):
             info_selected = info.loc[start_ts:end_ts][::-1]
 
         # Step 2: Calculate cumulative minimum and maximum of "index_price"
-        info_selected['local_max'] = info_selected['index_value'].cummax()
-        info_selected['local_min'] = info_selected['index_value'].cummin()
+        info_selected['local_max'] = info_selected['SyntheticIndex.Price'].cummax()
+        info_selected['local_min'] = info_selected['SyntheticIndex.Price'].cummin()
 
         # Step 3: Merge the result back into the original DataFrame
         info['local_max'].update(info_selected['local_max'])
@@ -397,7 +397,7 @@ class LinearCore(DecisionCore):
         fig = go.Figure()
         x = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in info.index]
 
-        fig.add_trace(go.Scatter(x=x, y=info["index_value"], mode='lines', name='Index Value'))
+        fig.add_trace(go.Scatter(x=x, y=info["SyntheticIndex.Price"], mode='lines', name='Index Value'))
         fig.add_trace(go.Scatter(x=x, y=info["local_max"], mode='lines', name='Up'))
         fig.add_trace(go.Scatter(x=x, y=info["local_min"], mode='lines', name='Down'))
         fig.add_trace(go.Scatter(x=x, y=info["up_actual"], mode='lines', name='up_actual', yaxis='y2'))

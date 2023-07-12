@@ -175,6 +175,7 @@ class StrategyMetric(object):
         self.assets_value[timestamp] = factors.get(f'SyntheticIndex.Price')
 
         self.factor_value[timestamp] = {
+            'SyntheticIndex.Price': factors.get(f'SyntheticIndex.Price'),
             'TradeFlow.EMA.Sum': factors.get(f'TradeFlow.EMA.Sum'),
             'Coherence.Price.Up': factors.get(f'Coherence.Price.Up'),
             'Coherence.Price.Down': factors.get(f'Coherence.Price.Down'),
@@ -239,5 +240,4 @@ class StrategyMetric(object):
     @property
     def info(self) -> pd.DataFrame:
         info = pd.DataFrame(self.factor_value).T
-        info['index_value'] = pd.Series(self.assets_value)
         return info
