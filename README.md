@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 Optional: install optional requirements, these package are required for backtesting 
 ```shell
-pip install plotly pytz baostock
+pip install plotly pytz baostock, py7zr
 ```
 
 ## Run
@@ -71,8 +71,9 @@ env QUARK_CWD="Quark/runtime" python "Quark/__main__.py"
 
 To add new factor:
 - add monitor to `Quark/Strategy/data_core.py` for factor generation
-- add the parsing code to the `Quark/Strategy/metric` file, both `collect_factors` method and `log_factors` method
+- add the parsing code to the `Quark/Strategy/metric.py` file, both `collect_factors` method and `log_factors` method
 - update decision core in `Quark/Calibration`
+- add mapping in `Quark/Backtest/factor_pool.py`
 
 To implement new decision core
 - add new module in `Quark/Calibration`
