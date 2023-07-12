@@ -187,7 +187,11 @@ def eod(market_date: datetime.date = MARKET_DATE, **kwargs):
     os.makedirs(dump_dir, exist_ok=True)
 
     # EoD task 0: update FACTOR_POOL and serialize factors
-    FACTOR_POOL.batch_update(factors=STRATEGY.strategy_metric.factor_value, exclude_keys=FACTOR_POOL.factor_names(market_date=MARKET_DATE))
+    if OVERRIDE_FACTOR_CACHE:
+        FACTOR_POOL.batch_update(factors=STRATEGY.strategy_metric.factor_value)
+    else:
+        exclude_keys = FACTOR_POOL.factor_names(market_date=MARKET_DATE)
+        FACTOR_POOL.batch_update(factors=STRATEGY.strategy_metric.factor_value, exclude_keys=exclude_keys)
     FACTOR_POOL.dump()
 
     # EoD task 1: calibrate decision core
