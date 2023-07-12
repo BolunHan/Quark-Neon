@@ -73,6 +73,11 @@ class DecisionCore(object, metaclass=abc.ABCMeta):
             else:
                 raise FileNotFoundError(f'{file_pattern} does not exist at {os.path.realpath(file_dir)}!')
 
+    @property
+    @abc.abstractmethod
+    def is_ready(self):
+        ...
+
 
 class DummyDecisionCore(DecisionCore):
 
@@ -82,7 +87,10 @@ class DummyDecisionCore(DecisionCore):
     def trade_volume(self, position: PositionManagementService, cash: float, margin: float, timestamp: float, signal: int) -> float:
         return 1.
 
-    def calibrate(self, *args, **kwargs):
+    def calibrate(self, *args, **kwargs) -> dict:
+        """
+        calibrate decision core and gives a calibration report, in dict (like json)
+        """
         pass
 
     def clear(self):
@@ -94,3 +102,7 @@ class DummyDecisionCore(DecisionCore):
     @classmethod
     def from_json(cls, json_str: str | bytes | dict):
         pass
+
+    @property
+    def is_ready(self):
+        return True
