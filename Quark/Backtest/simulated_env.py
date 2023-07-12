@@ -76,7 +76,7 @@ def trade_calendar(start_date: datetime.date, end_date: datetime.date, market='S
 
 
 def query_index_weights(index_name: str, market_date: datetime.date):
-    df = pd.read_csv(pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f"weights.{index_name.split('.')[0]}.csv"))
+    df = pd.read_csv(pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f"index_weights.{index_name.split('.')[0]}.csv"))
     weights = {}
 
     for _, row in df.iterrows():
