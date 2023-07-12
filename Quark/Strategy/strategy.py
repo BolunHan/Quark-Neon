@@ -55,16 +55,16 @@ class Strategy(object):
     def get_underlying(self, ticker: str, side: int):
         return ticker
 
-    def register(self):
+    def register(self, **kwargs):
         from .data_core import register_monitor
         self.engine.multi_threading = False
-        self.monitors.update(register_monitor(index_name=self.index_ticker, index_weights=self.index_weights))
+        self.monitors.update(register_monitor(index_name=self.index_ticker, index_weights=self.index_weights, factors=kwargs.get('factors')))
 
-        if 'Monitor.Decoder.Index' in self.monitors:
-            self.monitors['Monitor.Decoder.Index'].register_callback(self.strategy_metric.log_wavelet)
+        # if 'Monitor.Decoder.Index' in self.monitors:
+        #     self.monitors['Monitor.Decoder.Index'].register_callback(self.strategy_metric.log_wavelet)
 
-        self.engine.add_handler(on_market_data=self._on_market_data)
-        self.engine.add_handler(_on_order=self._on_order)
+        self.engine.add_handler_safe(on_market_data=self._on_market_data)
+        self.engine.add_handler_safe(on_order=self._on_order)
         self.status = StrategyStatus.working
         return self.monitors
 
@@ -179,3 +179,20 @@ class Strategy(object):
     def _on_order(self, order: TradeInstruction, **kwargs):
         if order.order_state == OrderState.Rejected:
             self.status = StrategyStatus.error
+
+    def clear(self):
+        self.engine.remove_handler_safe(on_market_data=self._on_market_data)
+        self.engine.remove_handler_safe(on_order=self._on_order)
+
+        self.position_tracker.clear()
+        self.strategy_metric.clear()
+        self.mds.clear()
+        self.monitors.clear()
+
+        self.status = StrategyStatus.idle
+        self.subscription = self.engine.subscription
+        self.eod_status.update({'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.})
+        self.decision_core.clear()
+
+        self._last_update_ts = 0.
+        self._sampling_interval = 5.
