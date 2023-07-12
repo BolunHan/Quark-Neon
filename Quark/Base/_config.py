@@ -72,3 +72,6 @@ if os.path.isfile(CWD.joinpath('config.ini')):
     from_ini(CWD.joinpath('config.ini'))
 else:
     raise FileNotFoundError(f'{CWD.joinpath("config.ini")} not found!')
+
+# update some entries in GS
+GlobalStatics.DEBUG_MODE = CONFIG.Telemetric.DEBUG_MODE
