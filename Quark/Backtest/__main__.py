@@ -31,7 +31,7 @@ TEST_ID_SHORT = TEST_ID.split('-')[0]
 IS_INITIALIZED = False
 EPOCH_TS = 0.
 CALENDAR = simulated_env.trade_calendar(start_date=START_DATE, end_date=END_DATE)
-FACTORS = ['Monitor.TradeFlow.EMA', 'Monitor.Coherence.Price.EMA', 'Monitor.Coherence.Volume', 'Monitor.SyntheticIndex', 'Monitor.TA.MACD', 'Monitor.Aggressiveness.EMA', 'Monitor.Entropy.Price.EMA']
+FACTORS = ['SyntheticIndex.Price', 'Monitor.TradeFlow.EMA', 'Monitor.Coherence.Price.EMA', 'Monitor.Coherence.Volume', 'Monitor.SyntheticIndex', 'Monitor.TA.MACD', 'Monitor.Aggressiveness.EMA', 'Monitor.Entropy.Price.EMA']
 FACTOR_POOL = factor_pool.FACTOR_POOL
 STRATEGY = Strategy(
     index_ticker=INDEX_NAME,
