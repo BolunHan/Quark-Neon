@@ -5,6 +5,7 @@ import pathlib
 import time
 from collections.abc import Iterable
 
+import numpy as np
 from PyQuantKit import TradeData
 
 from . import LOGGER
@@ -13,6 +14,7 @@ from ..Base import GlobalStatics
 ARCHIVE_DIR = pathlib.Path.home().joinpath('Documents', 'TradeDataArchive')
 DATA_DIR = pathlib.Path.home().joinpath('Documents', 'TradeData')
 TIME_ZONE = GlobalStatics.TIME_ZONE
+DEBUG_MODE = GlobalStatics.DEBUG_MODE
 
 
 def unzip(market_date: datetime.date, ticker: str):
@@ -95,6 +97,16 @@ def load_trade_data(market_date: datetime.date, ticker: str) -> list[TradeData]:
             trade_data.additional['sell_order_id'] = int(row['SaleOrderID'])
             trade_data.additional['buy_order_id'] = int(row['BuyOrderID'])
             trade_data_list.append(trade_data)
+
+            if DEBUG_MODE:
+                if not np.isfinite(trade_data.volume):
+                    raise ValueError(f'Invalid trade data {trade_data}, volume = {trade_data.volume}')
+
+                if not np.isfinite(trade_data.price) or trade_data.price < 0:
+                    raise ValueError(f'Invalid trade data {trade_data}, price = {trade_data.price}')
+
+                if trade_data.side.value == 0:
+                    raise ValueError(f'Invalid trade data {trade_data}, side = {trade_data.side}')
 
     LOGGER.info(f'{market_date} {ticker} trade data loaded, {len(trade_data_list):,} entries in {time.time() - ts:.3f}s.')
 
