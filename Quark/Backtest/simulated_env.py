@@ -33,11 +33,16 @@ class Login(object):
             raise ValueError(f'BaoStock login failed, {traceback.format_exc()}')
 
     def __call__(self, function: callable):
-        if self.login_type == 'bs':
-            self.bs_login()
-        else:
-            raise NotImplementedError(f'Invalid login type {self.login_type}')
-        return function
+
+        def wrapper(*args, **kwargs):
+            if self.login_type == 'bs':
+                self.bs_login()
+            else:
+                raise NotImplementedError(f'Invalid login type {self.login_type}')
+
+            return function(*args, **kwargs)
+
+        return wrapper
 
 
 class Cache(object):
