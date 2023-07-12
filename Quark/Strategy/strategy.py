@@ -9,7 +9,7 @@ from .decision_core import DummyDecisionCore
 from . import STRATEGY_ENGINE
 from .data_core import IndexWeight
 from .metric import StrategyMetric
-
+from ..Base import CONFIG
 
 class StrategyStatus(enum.Enum):
     error = -1
@@ -47,10 +47,10 @@ class Strategy(object):
 
         self.profile = SimpleNamespace(
             clear_on_eod=True,
+            sampling_interval=CONFIG.Statistics.FACTOR_SAMPLING_INTERVAL
         )
 
         self._last_update_ts = 0.
-        self._sampling_interval = 5.
 
     def get_underlying(self, ticker: str, side: int):
         return ticker
@@ -114,9 +114,9 @@ class Strategy(object):
         timestamp = market_data.timestamp
 
         if self.mode == 'sampling':
-            if self._last_update_ts + self._sampling_interval > timestamp:
+            if self._last_update_ts + self.profile.sampling_interval > timestamp:
                 return
-            self._last_update_ts = timestamp // self._sampling_interval * self._sampling_interval
+            self._last_update_ts = timestamp // self.profile.sampling_interval * self.profile.sampling_interval
 
         # market_price = market_data.market_price
         # ticker = market_data.ticker
@@ -195,4 +195,3 @@ class Strategy(object):
         self.decision_core.clear()
 
         self._last_update_ts = 0.
-        self._sampling_interval = 5.

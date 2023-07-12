@@ -11,7 +11,7 @@ from typing import Iterable
 from AlgoEngine.Engine import MarketDataMonitor, MDS
 from PyQuantKit import MarketData
 
-from ..Base import GlobalStatics
+from ..Base import GlobalStatics, CONFIG
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
 
@@ -32,7 +32,7 @@ class FactorPool(object):
 
     def __init__(self, **kwargs):
         self.factor_dir = kwargs.get('factor_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'Factors'))
-        self.log_interval = kwargs.get('log_interval', 5)
+        self.log_interval = kwargs.get('log_interval', CONFIG.Statistics.FACTOR_SAMPLING_INTERVAL)
 
         self.storage: dict[datetime.date, dict[float, dict[str, float]]] = {}  # market_date -> timestamp -> entry_key -> entry_value
 
@@ -236,7 +236,8 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
 
         key = self.factor_pool.locate_timestamp(
             timestamp=self.timestamp,
-            key_range=list(factor_storage.keys())
+            key_range=list(factor_storage.keys()),
+            step=self.factor_pool.log_interval
         )
 
         value = factor_storage[key]
