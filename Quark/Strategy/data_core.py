@@ -15,6 +15,7 @@ from .decoder import OnlineDecoder, Wavelet
 from ..Base import GlobalStatics
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
+DEBUG_MODE = GlobalStatics.DEBUG_MODE
 
 
 class IndexWeight(dict):
@@ -62,7 +63,7 @@ class EMA(metaclass=abc.ABCMeta):
         _ = self.ema[name] = {}
         return _
 
-    def _update_ema(self, ticker: str, timestamp: float = None, **update_data: float):
+    def _update_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **update_data: float):
         if timestamp:
             last_discount = self._last_discount_ts.get(ticker, 0.)
 
@@ -84,11 +85,11 @@ class EMA(metaclass=abc.ABCMeta):
                     memory = self._history[entry_name].get(ticker)
 
                     if memory is None:
-                        self.ema[entry_name][ticker] = np.nan
+                        self.ema[entry_name][ticker] = replace_na * self.alpha + current * (1 - self.alpha)
                     else:
                         self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
-    def _accumulate_ema(self, ticker: str, timestamp: float = None, **accumulative_data: float):
+    def _accumulate_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **accumulative_data: float):
         if timestamp:
             last_discount = self._last_discount_ts.get(ticker, 0.)
 
@@ -106,7 +107,7 @@ class EMA(metaclass=abc.ABCMeta):
                             memory = self._history[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) + _ * alpha
 
                             if memory is None:
-                                self.ema[entry_name][ticker] = np.nan
+                                self.ema[entry_name][ticker] = replace_na * self.alpha + current * (1 - self.alpha)
                             else:
                                 self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
@@ -125,7 +126,7 @@ class EMA(metaclass=abc.ABCMeta):
                     memory = self._history[entry_name].get(ticker)
 
                     if memory is None:
-                        self.ema[entry_name][ticker] = np.nan
+                        self.ema[entry_name][ticker] = replace_na * self.alpha + current * (1 - self.alpha)
                     else:
                         self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
@@ -852,22 +853,28 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA):
 
         self.normalized = normalized
 
-        self._aggressive_buy: dict[str, float] = self._register_ema(name='aggressive_buy')
-        self._aggressive_sell: dict[str, float] = self._register_ema(name='aggressive_sell')
-        self._trade_volume = self._register_ema(name='trade_volume')
+        self._aggressive_buy: dict[str, float] = self._register_ema(name='aggressive_buy')  # ema of the aggressiveness buy volume
+        self._aggressive_sell: dict[str, float] = self._register_ema(name='aggressive_sell')  # ema of the aggressiveness sell volume
+        self._trade_volume: dict[str, float] = self._register_ema(name='trade_volume')  # ema of the total volume
 
     def _update_aggressiveness(self, ticker: str, volume: float, side: int, timestamp: float):
-        total_volume = self._trade_volume[ticker]
-        adjusted_volume = volume / total_volume if total_volume else 0.
 
         if side > 0:
-            self._accumulate_ema(ticker=ticker, timestamp=timestamp, aggressive_buy=adjusted_volume, aggressive_sell=0.)
+            self._accumulate_ema(ticker=ticker, timestamp=timestamp, replace_na=0., aggressive_buy=volume, aggressive_sell=0.)
         else:
-            self._accumulate_ema(ticker=ticker, timestamp=timestamp, aggressive_buy=0., aggressive_sell=adjusted_volume)
+            self._accumulate_ema(ticker=ticker, timestamp=timestamp, replace_na=0., aggressive_buy=0., aggressive_sell=volume)
+
+        if DEBUG_MODE:
+            total_volume = self._trade_volume[ticker]
+            aggressiveness_volume = self._aggressive_buy[ticker] if side > 0 else self._aggressive_sell[ticker]
+            adjusted_volume_ratio = aggressiveness_volume / total_volume if total_volume else 0.
+
+            if not (0 <= adjusted_volume_ratio <= 1):
+                raise ValueError(f'{ticker} {self.__class__.__name__} encounter invalid value, total_volume={total_volume}, aggressiveness={aggressiveness_volume}, side={side}')
 
     def _on_trade(self, trade_data: TradeData):
         ticker = trade_data.ticker
-        self._accumulate_ema(ticker=ticker, trade_volume=trade_data.volume)  # to avoid redundant calculation, timestamp is not passed-in, so that the discount function will not be triggered
+        self._accumulate_ema(ticker=ticker, trade_volume=trade_data.volume, replace_na=0.)  # to avoid redundant calculation, timestamp is not passed-in, so that the discount function will not be triggered
         super()._on_trade(trade_data=trade_data)
 
     def __call__(self, market_data: MarketData, **kwargs):
@@ -878,6 +885,18 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA):
         self._discount_all(timestamp=timestamp)
 
         return super().__call__(market_data=market_data, **kwargs)
+
+    @property
+    def value(self) -> tuple[dict[str, float], dict[str, float]]:
+        aggressive_buy = {}
+        aggressive_sell = {}
+
+        for ticker, volume in self._trade_volume.items():
+            if volume:
+                aggressive_buy[ticker] = self._aggressive_buy.get(ticker, 0.) / volume
+                aggressive_sell[ticker] = self._aggressive_sell.get(ticker, 0.) / volume
+
+        return aggressive_buy, aggressive_sell
 
 
 class EntropyMonitor(CoherenceMonitor):
