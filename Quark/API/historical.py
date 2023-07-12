@@ -10,8 +10,8 @@ from PyQuantKit import TradeData
 from . import LOGGER
 from ..Base import GlobalStatics
 
-ARCHIVE_DIR = rf'{os.path.expanduser("~")}/TradeDataArchive'
-DATA_DIR = rf'{os.path.expanduser("~")}/TradeData'
+ARCHIVE_DIR = pathlib.Path.home().joinpath('Documents', 'TradeDataArchive')
+DATA_DIR = pathlib.Path.home().joinpath('Documents', 'TradeData')
 TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
