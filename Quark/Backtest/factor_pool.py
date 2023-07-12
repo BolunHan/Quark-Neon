@@ -18,6 +18,7 @@ TIME_ZONE = GlobalStatics.TIME_ZONE
 
 class FactorPool(object):
     FACTOR_MAPPING = {
+        'index_value': 'Monitor.SyntheticIndex',
         'TradeFlow.EMA.Sum': 'Monitor.TradeFlow.EMA',
         'Coherence.Price.Ratio.EMA': 'Monitor.Coherence.Price.EMA',
         'Coherence.Volume': 'Monitor.Coherence.Volume',
@@ -81,7 +82,7 @@ class FactorPool(object):
                 if exclude_keys is not None and entry_name in exclude_keys:
                     continue
 
-                selected_factor[entry_name] = factor_log[timestamp]
+                selected_factor[entry_name] = factor_log[entry_name]
 
             if selected_factor:
                 storage[timestamp] = selected_factor
@@ -128,6 +129,9 @@ class FactorPool(object):
                     writer.writerow(row)
 
     def load(self, market_date: datetime.date, factor_dir: str | pathlib.Path = None) -> dict[float, dict[str, float]]:
+
+        if not isinstance(market_date, datetime.date):
+            raise TypeError(f'Expect datetime.date, got {market_date}')
 
         if factor_dir is None:
             factor_dir = self.factor_dir
@@ -224,7 +228,7 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
 
     @property
     def value(self) -> dict[str, float]:
-        market_date = datetime.datetime.fromtimestamp(self.timestamp, tz=TIME_ZONE)
+        market_date = datetime.datetime.fromtimestamp(self.timestamp, tz=TIME_ZONE).date()
         factor_storage = self.factor_pool.storage.get(market_date)
 
         if factor_storage is None:
