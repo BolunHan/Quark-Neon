@@ -77,7 +77,7 @@ class Cache(object):
 def trade_calendar(start_date: datetime.date, end_date: datetime.date, market='SSE') -> list[datetime.date]:
     calendar = exchange_calendars.get_calendar(market)
     sessions = calendar.sessions_in_range(start_date, end_date)
-    return [_.date() for _ in sessions]
+    return sorted([_.date() for _ in sessions])
 
 
 def query_index_weights(index_name: str, market_date: datetime.date):
