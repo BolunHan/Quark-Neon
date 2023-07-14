@@ -12,9 +12,8 @@ TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
 class StrategyMetric(object):
-    def __init__(self, sample_interval: int, index_weights: dict[str, float]):
+    def __init__(self, sample_interval: int):
         self.sample_interval = sample_interval
-        self.index_weights = index_weights
 
         self._last_update = 0.
         self.factor_value = {}
@@ -26,6 +25,8 @@ class StrategyMetric(object):
             'current_pnl': {},
             'current_cash_flow': {},
             'signal_count': {},
+            'current_price': {},
+            'signal': {}
         }
 
         self.signal = 0
@@ -51,16 +52,7 @@ class StrategyMetric(object):
 
         if monitor := monitors.get('Monitor.TradeFlow.EMA'):
             if monitor.is_ready:
-                value = monitor.value
-                weighted_sum = 0.
-
-                for ticker in value:
-                    factors[f'TradeFlow.EMA.{ticker}'] = value[ticker]
-
-                    if ticker in self.index_weights:
-                        weighted_sum += value[ticker] * self.index_weights[ticker]
-
-                factors[f'TradeFlow.EMA.Sum'] = weighted_sum
+                factors[f'TradeFlow.EMA.Sum'] = monitor.index_value
 
         if monitor := monitors.get('Monitor.Coherence.Price'):
             if monitor.is_ready:
@@ -100,7 +92,7 @@ class StrategyMetric(object):
                 for ticker in value:
                     factors[f'TA.MACD.{ticker}'] = value[ticker]
 
-                factors[f'TA.MACD.Index'] = monitor.weighted_index
+                factors[f'TA.MACD.Index'] = monitor.index_value
 
         if monitor := monitors.get('Monitor.Aggressiveness'):
             if monitor.is_ready:
@@ -116,7 +108,6 @@ class StrategyMetric(object):
         if monitor := monitors.get('Monitor.Aggressiveness.EMA'):
             if monitor.is_ready:
                 aggressive_buy, aggressive_sell = monitor.value
-                weighted_sum = 0.
 
                 for ticker in aggressive_buy:
                     factors[f'Aggressiveness.EMA.Buy.{ticker}'] = aggressive_buy[ticker]
@@ -124,10 +115,7 @@ class StrategyMetric(object):
                 for ticker in aggressive_sell:
                     factors[f'Aggressiveness.EMA.Sell.{ticker}'] = aggressive_sell[ticker]
 
-                for ticker in self.index_weights:
-                    weighted_sum += (aggressive_buy.get(ticker, 0.) - aggressive_sell.get(ticker, 0.)) * self.index_weights[ticker]
-
-                factors[f'Aggressiveness.EMA.Net'] = weighted_sum
+                factors[f'Aggressiveness.EMA.Net'] = monitor.index_value
 
         if monitor := monitors.get('Monitor.Entropy.Price'):
             if monitor.is_ready:
@@ -199,7 +187,6 @@ class StrategyMetric(object):
 
     def collect_signal(self, signal: int, timestamp: float):
         self.signal = signal
-        self.signal_accumulated += signal
 
         if not self.signal_accumulated:
             self.last_cash_flow = 0.
@@ -216,6 +203,8 @@ class StrategyMetric(object):
         self.metrics['current_pnl'][timestamp] = self.last_cash_flow + self.signal_accumulated * self.last_assets_price
         self.metrics['current_cash_flow'][timestamp] = self.last_cash_flow
         self.metrics['signal_count'][timestamp] = self.signal_count
+        self.metrics['signal'][timestamp] = signal
+        self.metrics['current_price'][timestamp] = self.last_assets_price
 
     def clear(self):
 
@@ -229,6 +218,8 @@ class StrategyMetric(object):
         self.metrics['current_pnl'].clear()
         self.metrics['current_cash_flow'].clear()
         self.metrics['signal_count'].clear()
+        self.metrics['signal'].clear()
+        self.metrics['current_price'].clear()
 
         self.signal = 0
         self.signal_accumulated = 0
@@ -241,3 +232,6 @@ class StrategyMetric(object):
     def info(self) -> pd.DataFrame:
         info = pd.DataFrame(self.factor_value).T
         return info
+
+
+__all__ = ['StrategyMetric']
