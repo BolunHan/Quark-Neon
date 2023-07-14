@@ -19,12 +19,24 @@ TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
 class LinearCore(DecisionCore):
-    def __init__(self, ticker: str, decode_level: int = 4, **kwargs):
+    def __init__(self, ticker: str, **kwargs):
         super().__init__()
 
         self.ticker = ticker
-        self.decode_level = decode_level
+
+        self.decode_level = kwargs.get('decode_level', 4)
         self.data_source = kwargs.get('data_source', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res'))
+        self.smooth_params = SimpleNamespace(
+            alpha=kwargs.get('smooth_alpha', 0.008),
+            look_back=kwargs.get('smooth_look_back', 0.008)
+        )
+        self.decision_params = SimpleNamespace(
+            gain_threshold=kwargs.get('gain_threshold', 0.008),
+            risk_threshold=kwargs.get('gain_threshold', 0.004)
+        )
+        self.calibration_params = SimpleNamespace(
+            trace_back=kwargs.get('calibration_days', 5),  # use previous caches to train the model
+        )
 
         self.decoder = RecursiveDecoder(level=self.decode_level)
         self.inputs_var = ['TradeFlow.EMA.Sum', 'Coherence.Price.Up', 'Coherence.Price.Down',
@@ -32,17 +44,6 @@ class LinearCore(DecisionCore):
                            'Aggressiveness.EMA.Net', 'Entropy.Price.EMA',
                            'Dummies.IsOpening', 'Dummies.IsClosing']
         self.pred_var = ['up_smoothed', 'down_smoothed']
-        self.smooth_params = SimpleNamespace(
-            alpha=0.004,
-            look_back=5 * 60
-        )
-        self.decision_params = SimpleNamespace(
-            gain_threshold=0.004,
-            risk_threshold=0.002
-        )
-        self.calibration_params = SimpleNamespace(
-            trace_back=5,  # use previous caches to train the model
-        )
         self.coefficients: pd.DataFrame | None = None
 
     def __str__(self):
@@ -502,10 +503,11 @@ class LogLinearCore(LinearCore):
 
 
 class RidgeCore(LogLinearCore):
-    def __init__(self, ticker: str, alpha: float = 1, decode_level: int = 4, **kwargs):
-        super().__init__(ticker=ticker, decode_level=decode_level, **kwargs)
+    def __init__(self, ticker: str, **kwargs):
+        self.alpha = kwargs.get('ridge_alpha', 1)
 
-        self.alpha = alpha
+        super().__init__(ticker=ticker, **kwargs)
+
         self.scaler: pd.DataFrame | None = None
         self.pred_cutoff = 0.01
 
