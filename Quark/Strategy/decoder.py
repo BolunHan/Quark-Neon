@@ -358,3 +358,17 @@ class RecursiveDecoder(Decoder):
         local_extreme.sort(key=lambda _: _[1])
 
         return local_extreme
+
+    def clear(self):
+        super().clear()
+
+        self._local_maximum.clear()
+        self._local_minimum.clear()
+        self._last_marking.clear()
+        self._last_maximum.clear()
+        self._last_minimum.clear()
+        self._last_extreme.clear()
+        self._recursive_wavelet.clear()
+
+
+__all__ = ['WaveletFlag', 'Wavelet', 'Decoder', 'OnlineDecoder', 'RecursiveDecoder']
