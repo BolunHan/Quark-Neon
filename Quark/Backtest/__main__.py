@@ -16,8 +16,7 @@ from ..API import historical
 from ..Base import GlobalStatics
 from ..Calibration.linear import LinearCore
 from ..Misc import helper
-from ..Strategy.data_core import SyntheticIndexMonitor, VolatilityMonitor, MDS
-from ..Strategy.strategy import Strategy
+from ..Strategy import SyntheticIndexMonitor, VolatilityMonitor, MDS, Strategy
 
 # params
 INDEX_NAME = '000016.SH'
