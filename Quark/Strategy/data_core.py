@@ -193,11 +193,25 @@ class EMA(metaclass=abc.ABCMeta):
 
 class Synthetic(metaclass=abc.ABCMeta):
     def __init__(self, weights: dict[str, float]):
-        self.weights = weights
+        self.weights: IndexWeight = weights if isinstance(weights, IndexWeight) else IndexWeight(index_name='synthetic', **weights)
+        self.weights.normalize()
 
         self.base_price: dict[str, float] = {}
         self.last_price: dict[str, float] = {}
         self.synthetic_base_price = 1.
+
+    def composite(self, values: dict[str, float], replace_na: float = 0.):
+        weighted_sum = 0.
+
+        for ticker, weight in self.weights.items():
+            value = values.get(ticker, replace_na)
+
+            if np.isnan(value):
+                weighted_sum += replace_na * self.weights[ticker]
+            else:
+                weighted_sum += value * self.weights[ticker]
+
+        return weighted_sum
 
     def _update_synthetic(self, ticker: str, market_price: float):
         if ticker not in self.weights:
@@ -209,7 +223,7 @@ class Synthetic(metaclass=abc.ABCMeta):
         self.last_price[ticker] = market_price
 
     @property
-    def synthetic_price(self):
+    def synthetic_index(self):
         price_list = []
         weight_list = []
 
@@ -221,8 +235,12 @@ class Synthetic(metaclass=abc.ABCMeta):
             else:
                 price_list.append(1.)
 
-        synthetic_price = np.average(price_list, weights=weight_list) * self.synthetic_base_price
-        return synthetic_price
+        synthetic_index = np.average(price_list, weights=weight_list) * self.synthetic_base_price
+        return synthetic_index
+
+    @property
+    def composited_index(self) -> float:
+        return self.composite(self.last_price)
 
 
 class TradeFlowMonitor(MarketDataMonitor):
@@ -259,7 +277,7 @@ class TradeFlowMonitor(MarketDataMonitor):
         return self._is_ready
 
 
-class TradeFlowEMAMonitor(TradeFlowMonitor, EMA):
+class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
     """
     ema discounted trade flow
     Note that the discount process is triggered by on_trade_data. Upon discount, there should be a discontinuity of index value.
@@ -268,9 +286,10 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA):
     trade flow is a relative stable indication. a large positive aggressiveness indicates market is in an upward ongoing trend
     """
 
-    def __init__(self, discount_interval: float, alpha: float, normalized: bool = True, name: str = 'Monitor.TradeFlow.EMA', monitor_id: str = None):
+    def __init__(self, discount_interval: float, alpha: float, weights: dict[str, float], normalized: bool = True, name: str = 'Monitor.TradeFlow.EMA', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id)
         EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
+        Synthetic.__init__(self=self, weights=weights)
 
         self.normalized = normalized
 
@@ -312,6 +331,10 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA):
             return normalized_trade_flow
         else:
             return super().value
+
+    @property
+    def index_value(self) -> float:
+        return self.composite(self.value)
 
 
 class CoherenceMonitor(MarketDataMonitor):
@@ -584,7 +607,7 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
         if ticker not in self.weights:
             return
 
-        index_price = self.synthetic_price
+        index_price = self.synthetic_index
 
         if self._active_bar_data is None or timestamp >= self._active_bar_data.timestamp:
             self._last_bar_data = self._active_bar_data
@@ -626,14 +649,14 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
 
     @property
     def index_price(self) -> float:
-        return self.synthetic_price
+        return self.synthetic_index
 
     @property
     def active_bar(self):
         return self._active_bar_data
 
 
-class MACDMonitor(MarketDataMonitor):
+class MACDMonitor(MarketDataMonitor, Synthetic):
     """
     as the name suggest, it gives a realtime macd value
     """
@@ -686,11 +709,11 @@ class MACDMonitor(MarketDataMonitor):
         def get_macd_values(self):
             return self.macd_line, self.signal_line, self.macd_histogram
 
-    def __init__(self, update_interval: float, weights: dict[str, float] = None, name: str = 'Monitor.TA.MACD', monitor_id: str = None):
+    def __init__(self, update_interval: float, weights: dict[str, float], name: str = 'Monitor.TA.MACD', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id)
+        Synthetic.__init__(self=self, weights=weights)
 
         self.update_interval = update_interval
-        self.weights = weights
 
         self._macd: dict[str, MACDMonitor.MACD] = {}
         self._price = {}
@@ -727,17 +750,8 @@ class MACDMonitor(MarketDataMonitor):
         return macd_value
 
     @property
-    def weighted_index(self) -> float:
-        macd_value = self.value
-        weighted_index = 0.
-
-        if self.weights is not None:
-            for ticker in self.weights:
-                weighted_index += macd_value.get(ticker, 0.) * self.weights[ticker]
-        else:
-            weighted_index = np.nanmean(macd_value.values())
-
-        return weighted_index
+    def index_value(self) -> float:
+        return self.composite(self.value)
 
     @property
     def is_ready(self) -> bool:
@@ -836,7 +850,7 @@ class AggressivenessMonitor(MarketDataMonitor):
         return self._is_ready
 
 
-class AggressivenessEMAMonitor(AggressivenessMonitor, EMA):
+class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
     """
     ema average of aggressiveness buying / selling volume.
 
@@ -847,9 +861,10 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA):
     aggressiveness is a relative stable indication. a large positive aggressiveness indicates market is in an upward ongoing trend
     """
 
-    def __init__(self, discount_interval: float, alpha: float, normalized: bool = True, name: str = 'Monitor.Aggressiveness.EMA', monitor_id: str = None):
+    def __init__(self, discount_interval: float, alpha: float, weights: dict[str, float], normalized: bool = True, name: str = 'Monitor.Aggressiveness.EMA', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id)
         EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
+        Synthetic.__init__(self=self, weights=weights)
 
         self.normalized = normalized
 
@@ -897,6 +912,16 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA):
                 aggressive_sell[ticker] = self._aggressive_sell.get(ticker, 0.) / volume
 
         return aggressive_buy, aggressive_sell
+
+    @property
+    def index_value(self) -> float:
+        aggressive_buy, aggressive_sell = self.value
+        values = {}
+
+        for ticker in set(aggressive_buy) | set(aggressive_sell):
+            values[ticker] = aggressive_buy.get(ticker, 0) - aggressive_sell.get(ticker, 0.)
+
+        return self.composite(values)
 
 
 class EntropyMonitor(CoherenceMonitor):
@@ -1080,7 +1105,7 @@ class VolatilityMonitor(MarketDataMonitor, Synthetic):
         for ticker in self.weights:
             weighted_index += volatility_adjusted.get(ticker, 0.) * self.weights[ticker]
 
-        index_volatility_range = (self.synthetic_price / self.synthetic_base_price - 1) / weighted_volatility
+        index_volatility_range = (self.synthetic_index / self.synthetic_base_price - 1) / weighted_volatility
 
         if not index_volatility_range:
             return 0.
@@ -1135,7 +1160,7 @@ class IndexDecoderMonitor(DecoderMonitor, Synthetic):
 
     def __call__(self, market_data: MarketData, **kwargs):
         self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
-        self.update_decoder(ticker='synthetic', market_price=self.synthetic_price, timestamp=market_data.timestamp)
+        self.update_decoder(ticker='synthetic', market_price=self.synthetic_index, timestamp=market_data.timestamp)
 
     @property
     def value(self) -> list[Wavelet]:
@@ -1172,7 +1197,7 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None, fa
     check_and_add(TradeFlowMonitor())
 
     # trade flow ema monitor
-    check_and_add(TradeFlowEMAMonitor(discount_interval=1, alpha=alpha_0))
+    check_and_add(TradeFlowEMAMonitor(discount_interval=1, alpha=alpha_0, weights=index_weights))
 
     # price coherence monitor
     check_and_add(CoherenceMonitor(update_interval=60, sample_interval=1, weights=index_weights))
@@ -1193,7 +1218,7 @@ def register_monitor(index_name: str, index_weights: dict[str, float] = None, fa
     check_and_add(AggressivenessMonitor())
 
     # aggressiveness ema monitor
-    check_and_add(AggressivenessEMAMonitor(discount_interval=1, alpha=alpha_4))
+    check_and_add(AggressivenessEMAMonitor(discount_interval=1, alpha=alpha_4, weights=index_weights))
 
     # price coherence monitor
     check_and_add(EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights))
