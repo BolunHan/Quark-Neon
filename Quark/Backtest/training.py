@@ -18,12 +18,114 @@ from ..Calibration.linear import *
 from ..Strategy import StrategyMetric
 
 DATA_SOURCE = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res')
-DATA_CORE = RidgeCore(ticker='Synthetic')
+DATA_CORE = LinearCore(ticker='Synthetic')
 
 START_DATE = datetime.date(2023, 1, 1)
 END_DATE = datetime.date(2023, 6, 1)
 CALENDAR = simulated_env.trade_calendar(start_date=START_DATE, end_date=END_DATE)
 FACTOR_POOL = factor_pool.FACTOR_POOL
+
+
+class TradeMetrics(object):
+    def __init__(self):
+        self.trades = []
+        self.trade_batch = []
+
+        self.exposure = 0.
+        self.cash_flow = 0.
+        self.pnl = 0.
+
+        self.current_trade_batch = {}
+        self.current_price = None
+
+    def add_trades(self, volume: float, price: float, trade_time: datetime.datetime):
+
+        if not volume:
+            return
+
+        self.exposure += volume
+        self.cash_flow -= volume * price
+        self.pnl = self.exposure * price + self.cash_flow
+        self.current_price = price
+
+        self.trades.append(
+            dict(
+                trade_time=trade_time,
+                volume=volume,
+                price=price,
+                exposure=self.exposure,
+                cash_flow=self.cash_flow,
+                pnl=self.pnl,
+            )
+        )
+
+        self.current_trade_batch['cash_flow'] = self.current_trade_batch.get('cash_flow', 0.) - volume * price
+        self.current_trade_batch['pnl'] = self.current_trade_batch.get('pnl', 0.) + self.exposure * price + self.current_trade_batch['cash_flow']
+        self.current_trade_batch['turnover'] = self.current_trade_batch.get('turnover', 0.) + abs(volume) * price
+
+        if not self.exposure:
+            self.trade_batch.append(self.current_trade_batch)
+            self.current_trade_batch = {}
+
+    def add_trades_batch(self, trade_logs: pd.DataFrame):
+        for timestamp, row in trade_logs.iterrows():  # type: float, dict
+            price = row['current_price']
+            volume = row['signal']
+            trade_time = datetime.datetime.fromtimestamp(timestamp)
+
+            self.add_trades(volume=volume, price=price, trade_time=trade_time)
+
+    @property
+    def info(self):
+
+        info_dict = dict(
+            total_gain=0.,
+            total_loss=0.,
+            trade_count=0,
+            win_count=0,
+            lose_count=0,
+            turnover=0.,
+        )
+
+        for trade_batch in self.trade_batch:
+            if trade_batch['pnl'] > 0:
+                info_dict['total_gain'] += trade_batch['pnl']
+                info_dict['trade_count'] += 1
+                info_dict['win_count'] += 1
+                info_dict['turnover'] += trade_batch['turnover']
+            else:
+                info_dict['total_loss'] += trade_batch['pnl']
+                info_dict['trade_count'] += 1
+                info_dict['lose_count'] += 1
+                info_dict['turnover'] += trade_batch['turnover']
+
+        info_dict['win_rate'] = info_dict['win_count'] / info_dict['trade_count'] if info_dict['trade_count'] else 0.
+        info_dict['average_gain'] = info_dict['total_gain'] / info_dict['win_count'] / self.current_price if info_dict['win_count'] else 0.
+        info_dict['average_loss'] = info_dict['total_loss'] / info_dict['lose_count'] / self.current_price if info_dict['lose_count'] else 0.
+        info_dict['gain_loss_ratio'] = -info_dict['average_gain'] / info_dict['average_loss'] if info_dict['average_loss'] else 1.
+
+        return info_dict
+
+    def to_string(self) -> str:
+        metric_info = self.info
+
+        fmt_dict = {
+            'total_gain': f'{metric_info["total_gain"]:,.3f}',
+            'total_loss': f'{metric_info["total_loss"]:,.3f}',
+            'trade_count': f'{metric_info["trade_count"]:,}',
+            'win_count': f'{metric_info["win_count"]:,}',
+            'lose_count': f'{metric_info["lose_count"]:,}',
+            'turnover': f'{metric_info["turnover"]:,.3f}',
+            'win_rate': f'{metric_info["win_rate"]:.2%}',
+            'average_gain': f'{metric_info["average_gain"]:,.4%}',
+            'average_loss': f'{metric_info["average_loss"]:,.4%}',
+            'gain_loss_ratio': f'{metric_info["gain_loss_ratio"]:,.3%}'
+        }
+
+        return 'Trade Metrics Report:\n' + pd.Series(fmt_dict).to_string()
+
+
+TRADE_METRICS = TradeMetrics()
 
 
 def training(market_date: datetime.date, trace_back: int = 5):
@@ -88,7 +190,7 @@ def annotate_signals(fig, strategy_metric):
     metrics_df = pd.DataFrame(strategy_metric.metrics)
 
     # add some annotations
-    for timestamp, row in metrics_df.iterrows():
+    for timestamp, row in metrics_df.iterrows():  # type: float, dict
         price = row['current_price']
         action = row['signal']
 
@@ -140,10 +242,13 @@ def main():
         training(market_date=previous_market_date)
         strategy_metric = metric_signal(market_date=market_date)
         fig = validate(market_date=market_date)
+        TRADE_METRICS.add_trades_batch(pd.DataFrame(strategy_metric.metrics))
         html_content = annotate_signals(fig=fig, strategy_metric=strategy_metric)
 
         with open(os.path.realpath(f'{market_date}.validation.html'), 'w', encoding="utf-8") as file:
             file.write(html_content)
+
+        LOGGER.info(f'\n{TRADE_METRICS.to_string()}')
 
 
 if __name__ == '__main__':
