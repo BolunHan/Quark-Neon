@@ -11,6 +11,7 @@ from .data_core import IndexWeight
 from .metric import StrategyMetric
 from ..Base import CONFIG
 
+
 class StrategyStatus(enum.Enum):
     error = -1
     idle = 0
@@ -32,7 +33,7 @@ class Strategy(object):
         self.index_weights = IndexWeight(index_name=self.index_ticker, **index_weights)
         self.engine = strategy_engine if strategy_engine is not None else STRATEGY_ENGINE
         self.position_tracker = self.engine.position_tracker
-        self.strategy_metric = metric if metric is not None else StrategyMetric(sample_interval=1, index_weights=self.index_weights)
+        self.strategy_metric = metric if metric is not None else StrategyMetric(sample_interval=1)
         self.mds = self.engine.mds
         self.monitors: dict[str, MarketDataMonitor] = {}
         self.mode = kwargs.pop('mode', 'production')
@@ -195,3 +196,6 @@ class Strategy(object):
         self.decision_core.clear()
 
         self._last_update_ts = 0.
+
+
+__all__ = ['StrategyStatus', 'Strategy']

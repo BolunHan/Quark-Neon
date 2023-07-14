@@ -106,3 +106,6 @@ class DummyDecisionCore(DecisionCore):
     @property
     def is_ready(self):
         return True
+
+
+__all__ = ['DecisionCore', 'DummyDecisionCore']
