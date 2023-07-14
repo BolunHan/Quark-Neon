@@ -13,9 +13,7 @@ from AlgoEngine.Engine import PositionManagementService
 
 from . import LOGGER
 from ..Base import GlobalStatics
-from ..Strategy.decision_core import DecisionCore
-from ..Strategy.decoder import RecursiveDecoder
-from ..Strategy.metric import StrategyMetric
+from ..Strategy import DecisionCore, RecursiveDecoder, StrategyMetric
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
 
@@ -39,11 +37,11 @@ class LinearCore(DecisionCore):
             look_back=5 * 60
         )
         self.decision_params = SimpleNamespace(
-            gain_threshold=0.005,
+            gain_threshold=0.004,
             risk_threshold=0.002
         )
         self.calibration_params = SimpleNamespace(
-            look_back=5,
+            trace_back=5,  # use previous caches to train the model
         )
         self.coefficients: pd.DataFrame | None = None
 
@@ -116,8 +114,13 @@ class LinearCore(DecisionCore):
         prediction = self.predict(factor=factor, timestamp=timestamp)
         pred_up = prediction['up_smoothed']
         pred_down = prediction['down_smoothed']
-        exposure_volume = position.exposure_volume
-        working_volume = position.working_volume
+
+        if position is None:
+            LOGGER.warning('position not given, assuming no position. NOTE: Only gives empty position in BACKTEST mode!', norepeat=True)
+            exposure_volume = working_volume = 0
+        else:
+            exposure_volume = position.exposure_volume
+            working_volume = position.working_volume
 
         exposure = exposure_volume.get(self.ticker, 0.)
         working_long = working_volume['Long'].get(self.ticker, 0.)
@@ -133,7 +136,12 @@ class LinearCore(DecisionCore):
         # logic 1.3: unwind short position when overall prediction is up, or risk is too high
         elif exposure < 0 and (pred_up + pred_down > 0 or pred_up > self.decision_params.risk_threshold):
             action = 1
+        # logic 1.4: fully unwind if market is about to close
+        elif exposure and datetime.datetime.fromtimestamp(timestamp).time() >= datetime.time(14, 55):
+            action = -exposure
         # logic 2.1: only open position when no exposure
+        elif exposure:
+            action = 0
         # logic 2.2: open long position when gain is high and risk is low
         elif pred_up > self.decision_params.gain_threshold and pred_down > -self.decision_params.risk_threshold:
             action = 1
@@ -152,48 +160,61 @@ class LinearCore(DecisionCore):
     def trade_volume(self, position: PositionManagementService, cash: float, margin: float, timestamp: float, signal: int) -> float:
         return 1.
 
-    def calibrate(self, metric: StrategyMetric = None, info: pd.DataFrame = None, *args, **kwargs):
+    def calibrate(self, metric: StrategyMetric = None, factor_cache: pd.DataFrame | list[pd.DataFrame] = None, trace_back: int = None, *args, **kwargs):
         report = {'start_ts': time.time()}
+        metric_info = None
+        x_list, y_list = [], []
 
-        # step 0: collect data
-        if info is None:
-            info = metric.info
+        if metric is not None:
+            metric_info = metric.info
+            _x, _y = self._prepare(factors=metric_info)
+            x_list.append(_x)
+            y_list.append(_y)
 
-        LOGGER.info('Calibrating with factor data\n' + info.to_string())
+        # step 0: collect data from metric
+        if factor_cache is not None:
+            if isinstance(factor_cache, pd.DataFrame):
+                cache_list = [factor_cache]
+            else:
+                cache_list = factor_cache
 
-        # step 1: prepare the data
-        x, y = self._prepare(info=info)
+            for _ in cache_list:
+                _x, _y = self._prepare(factors=_)
+                x_list.append(_x)
+                y_list.append(_y)
 
         # Optional step 1.1: load data from previous sessions
-        if (look_back := self.calibration_params.look_back) > 0:
+        if (trace_back := trace_back if trace_back is not None else self.calibration_params.trace_back) > 0:
             from ..Backtest.factor_pool import FACTOR_POOL
 
-            x_list, y_list = [x], [y]
-            caches = FACTOR_POOL.locate_caches(market_date=kwargs.get('market_date'), size=int(look_back), exclude_current=True)
+            caches = FACTOR_POOL.locate_caches(market_date=kwargs.get('market_date'), size=int(trace_back), exclude_current=True)
 
             for file_path in caches:
                 info = self.load_info_from_csv(file_path=file_path)
-                _x, _y = self._prepare(info=info)
+                _x, _y = self._prepare(factors=info)
 
                 x_list.append(_x)
                 y_list.append(_y)
-            x, y = pd.concat(x_list), pd.concat(y_list)
+
+        x, y = pd.concat(x_list), pd.concat(y_list)
 
         # step 2: fit the model
-        coefficients, residuals = self.fit(x.to_numpy(), y.to_numpy())
+        coefficients, residuals = self.fit(x, y)
         report.update(data_entries=x.shape, residuals=residuals)
 
         # step 3: store the coefficient matrix
-        self.coefficients = pd.DataFrame(data=coefficients, columns=x.columns, index=self.pred_var).T
-
-        # step 4: validate matrix
-        self._validate(info=info)
+        # self.coefficients = pd.DataFrame(data=coefficients, columns=x.columns, index=self.pred_var).T
         report.update(coefficient='\n' + self.coefficients.to_string())
 
+        # step 4: validate matrix
+        if metric_info is not None:
+            self._validate(info=metric_info)
+
         # step 5: dump fig
-        fig = self.plot(info=info, decoder=self.decoder)
-        fig.write_html(file := os.path.realpath(f'{self}.html'))
-        report.update(fig_dump=file, end_ts=time.time(), time_cost=f"{time.time() - report['start_ts']:,.3f}s")
+        if metric_info is not None:
+            fig = self.plot(info=metric_info, decoder=self.decoder)
+            fig.write_html(file := os.path.realpath(f'{self}.html'))
+            report.update(fig_dump=file, end_ts=time.time(), time_cost=f"{time.time() - report['start_ts']:,.3f}s")
 
         return report
 
@@ -203,7 +224,7 @@ class LinearCore(DecisionCore):
 
     def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
         self.session_dummies(timestamp=timestamp, inplace=factor)
-        x = {factor[_] for _ in self.inputs_var}  # to ensure the order of input data
+        x = {_: factor[_] for _ in self.inputs_var}  # to ensure the order of input data
         x = self._generate_x_features(x)
 
         prediction = {_: 0. for _ in self.pred_var}
@@ -211,6 +232,10 @@ class LinearCore(DecisionCore):
         for pred_name in self.pred_var:
             coefficient = self.coefficients[pred_name]
             for var_name in x:
+
+                if var_name not in coefficient.index:
+                    continue
+
                 prediction[pred_name] += coefficient[var_name] * x[var_name]
 
         return prediction
@@ -223,38 +248,39 @@ class LinearCore(DecisionCore):
 
         return pd.DataFrame(prediction, columns=self.pred_var, index=x.index)
 
-    def _prepare(self, info: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def _prepare(self, factors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         # step 1: decode metric based on the
-        self.decode_index_price(info=info)
+        self.decoder.clear()
+        self.decode_index_price(factors=factors)
 
         # step 2: mark the ups and down for each data point
         local_extreme = self.decoder.local_extremes(ticker='Synthetic', level=self.decode_level)
-        info['local_max'] = np.nan
-        info['local_min'] = np.nan
+        factors['local_max'] = np.nan
+        factors['local_min'] = np.nan
 
         for i in range(len(local_extreme)):
             start_ts = local_extreme[i][1]
             end_ts = local_extreme[i + 1][1] if i + 1 < len(local_extreme) else None
-            self.mark_info(info=info, start_ts=start_ts, end_ts=end_ts)
+            self.mark_factors(factors=factors, start_ts=start_ts, end_ts=end_ts)
 
-        info['up_actual'] = info['local_max'] / info['SyntheticIndex.Price'] - 1
-        info['down_actual'] = info['local_min'] / info['SyntheticIndex.Price'] - 1
+        factors['up_actual'] = factors['local_max'] / factors['SyntheticIndex.Price'] - 1
+        factors['down_actual'] = factors['local_min'] / factors['SyntheticIndex.Price'] - 1
 
         # step 3: smooth out the breaking points
-        info['up_smoothed'] = info['up_actual']
-        info['down_smoothed'] = info['down_actual']
+        factors['up_smoothed'] = factors['up_actual']
+        factors['down_smoothed'] = factors['down_actual']
 
         for i in range(len(local_extreme) - 1):
             previous_extreme = local_extreme[i - 1] if i > 0 else None
             break_point = local_extreme[i]
             next_extreme = local_extreme[i + 1]
-            self.smooth_out(info=info, previous_extreme=previous_extreme, break_point=break_point, next_extreme=next_extreme)
+            self.smooth_out(factors=factors, previous_extreme=previous_extreme, break_point=break_point, next_extreme=next_extreme)
 
         # step 4: assigning dummies
-        self.session_dummies(info.index, inplace=info)
+        self.session_dummies(factors.index, inplace=factors)
 
         # step 5: generate inputs for linear regression
-        x, y = self.generate_inputs(info)
+        x, y = self.generate_inputs(factors)
 
         return x, y
 
@@ -263,8 +289,8 @@ class LinearCore(DecisionCore):
         info['up_pred'] = prediction['up_smoothed']
         info['down_pred'] = prediction['down_smoothed']
 
-    def decode_index_price(self, info: pd.DataFrame):
-        for _ in info.iterrows():  # type: tuple[float, dict]
+    def decode_index_price(self, factors: pd.DataFrame):
+        for _ in factors.iterrows():  # type: tuple[float, dict]
             ts, row = _
             market_price = float(row.get('SyntheticIndex.Price', np.nan))
             market_time = datetime.datetime.fromtimestamp(ts, tz=TIME_ZONE)
@@ -282,7 +308,7 @@ class LinearCore(DecisionCore):
 
             self.decoder.update_decoder(ticker='Synthetic', market_price=market_price, timestamp=timestamp)
 
-    def smooth_out(self, info: pd.DataFrame, previous_extreme: tuple[float, float, int] | None, break_point: tuple[float, float, int], next_extreme: tuple[float, float, int]):
+    def smooth_out(self, factors: pd.DataFrame, previous_extreme: tuple[float, float, int] | None, break_point: tuple[float, float, int], next_extreme: tuple[float, float, int]):
         look_back: float = self.smooth_params.look_back
         next_extreme_price = next_extreme[0]
         break_ts = break_point[1]
@@ -290,35 +316,35 @@ class LinearCore(DecisionCore):
         start_ts = max(previous_extreme[1], break_ts - look_back) if previous_extreme else break_ts - look_back
         end_ts = break_ts
 
-        smooth_range = info.loc[start_ts:end_ts]
+        smooth_range = factors.loc[start_ts:end_ts]
 
         if break_type == 1:  # approaching to local maximum, use downward profit is discontinuous, using "up_actual" to smooth out
             max_loss = (-smooth_range.up_actual[::-1]).cummin()[::-1]
             potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(None, 0)
             hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
             smoothed = potential * hold_prob + smooth_range.down_actual * (1 - hold_prob)
-            info['down_smoothed'].update(smoothed)
+            factors['down_smoothed'].update(smoothed)
         elif break_type == -1:
             max_loss = smooth_range.down_actual[::-1].cummin()[::-1]
             potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(0, None)
             hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
             smoothed = potential * hold_prob + smooth_range.up_actual * (1 - hold_prob)
-            info['up_smoothed'].update(smoothed)
+            factors['up_smoothed'].update(smoothed)
         else:
             return
 
-    def generate_inputs(self, info: pd.DataFrame):
-        filtered = info.dropna()
+    def generate_inputs(self, factors: pd.DataFrame):
+        filtered = factors.dropna()
 
         x = filtered[self.inputs_var]  # to ensure the order of input data
         x = self._generate_x_features(x=x)
         y = filtered[self.pred_var]
         return x, y
 
-    @classmethod
-    def fit(cls, x: np.ndarray, y: np.ndarray):
-        coefficients, residuals, *_ = np.linalg.lstsq(x, y, rcond=None)
-        return coefficients.T, residuals
+    def fit(self, x: pd.DataFrame, y: pd.DataFrame):
+        coefficients, residuals, *_ = np.linalg.lstsq(x.to_numpy(), y.to_numpy(), rcond=None)
+        self.coefficients = pd.DataFrame(data=coefficients.T, columns=x.columns, index=self.pred_var).T
+        return self.coefficients, residuals
 
     @classmethod
     def session_dummies(cls, timestamp: float | list[float], inplace: dict[str, float | list[float]] | pd.DataFrame = None):
@@ -353,36 +379,39 @@ class LinearCore(DecisionCore):
                 x_columns[keys[i] + " * " + keys[j]] = x[keys[i]] * x[keys[j]]
 
         # Append bias sequence (filled with 1)
-        x_columns["Bias"] = 1
 
         # Convert the dictionary to a DataFrame if the input is a DataFrame
         if isinstance(x, pd.DataFrame):
             x_matrix = pd.DataFrame(x_columns)
+            x_matrix = x_matrix.loc[:, x_matrix.nunique() > 1]
+            x_matrix["Bias"] = 1.
+
         else:
             x_matrix = x_columns
+            x_matrix["Bias"] = 1.
 
         return x_matrix
 
     @classmethod
-    def mark_info(cls, info: pd.DataFrame, start_ts: float, end_ts: float = None):
+    def mark_factors(cls, factors: pd.DataFrame, start_ts: float, end_ts: float = None):
 
         # Step 1: Reverse the selected DataFrame
         if start_ts is None:
-            info_selected = info.loc[:end_ts][::-1]
+            info_selected = factors.loc[:end_ts][::-1]
         elif end_ts is None:
-            info_selected = info.loc[start_ts:][::-1]
+            info_selected = factors.loc[start_ts:][::-1]
         else:
-            info_selected = info.loc[start_ts:end_ts][::-1]
+            info_selected = factors.loc[start_ts:end_ts][::-1]
 
         # Step 2: Calculate cumulative minimum and maximum of "index_price"
         info_selected['local_max'] = info_selected['SyntheticIndex.Price'].cummax()
         info_selected['local_min'] = info_selected['SyntheticIndex.Price'].cummin()
 
         # Step 3: Merge the result back into the original DataFrame
-        info['local_max'].update(info_selected['local_max'])
-        info['local_min'].update(info_selected['local_min'])
+        factors['local_max'].update(info_selected['local_max'])
+        factors['local_min'].update(info_selected['local_min'])
 
-        return info
+        return factors
 
     @classmethod
     def load_info_from_csv(cls, file_path: str | pathlib.Path):
@@ -430,19 +459,27 @@ class LinearCore(DecisionCore):
 
 
 class LogLinearCore(LinearCore):
-    def fit(self, x: np.ndarray, y: np.ndarray):
-        # Apply log transformation to the first column of y array
+
+    @classmethod
+    def drop_na(cls, x: pd.DataFrame | np.ndarray, y: pd.DataFrame | np.ndarray):
+        x_valid_index = np.where(np.isfinite(x).all(axis=1))[0]
+        y_valid_index = np.where(np.isfinite(y).all(axis=1))[0]
+
+        # Merge the indices
+        valid_index = np.intersect1d(x_valid_index, y_valid_index)
+        x = x[valid_index]
+        y = y[valid_index]
+
+        return x, y
+
+    def fit(self, x: pd.DataFrame, y: pd.DataFrame):
         y[:, 0] = np.log(y[:, 0])
-        # Apply log transformation with negative sign to the second column of y array
         y[:, 1] = np.log(-y[:, 1])
 
-        # Drop rows with NaN values in both x and y arrays
-        valid_rows = np.logical_not(np.isnan(x).any(axis=1)) & np.logical_not(np.isnan(y).any(axis=1))
-        x = x[valid_rows]
-        y = y[valid_rows]
+        x, y = self.drop_na(x=x, y=y)
 
-        # Perform the linear regression
         coefficients, residuals = super().fit(x, y)
+        self.coefficients = pd.DataFrame(data=coefficients.T, columns=x.columns, index=self.pred_var).T
         return coefficients, residuals
 
     def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
@@ -462,3 +499,116 @@ class LogLinearCore(LinearCore):
         prediction[self.pred_var[1]] = -np.exp(prediction[self.pred_var[1]])
 
         return prediction
+
+
+class RidgeCore(LogLinearCore):
+    def __init__(self, ticker: str, alpha: float = 1, decode_level: int = 4, **kwargs):
+        super().__init__(ticker=ticker, decode_level=decode_level, **kwargs)
+
+        self.alpha = alpha
+        self.scaler: pd.DataFrame | None = None
+        self.pred_cutoff = 0.01
+
+    def to_json(self, fmt='dict') -> dict | str:
+        json_dict = super().to_json(fmt='dict')
+
+        if self.scaler is not None:
+            json_dict['scaler'] = self.scaler.to_dict()
+
+        if fmt == 'dict':
+            return json_dict
+        else:
+            return json.dumps(json_dict)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        self = super().from_json(json_dict)
+
+        if 'scaler' in json_dict:
+            self.scaler = pd.DataFrame(json_dict['scaler'])
+
+        return self
+
+    @classmethod
+    def standardization_scaler(cls, x: pd.DataFrame):
+        scaler = pd.DataFrame(index=['mean', 'std'], columns=x.columns)
+
+        for col in x.columns:
+            if col == 'Bias':
+                scaler.loc['mean', col] = 0
+                scaler.loc['std', col] = 1
+            else:
+                valid_values = x[col][np.isfinite(x[col])]
+                scaler.loc['mean', col] = np.mean(valid_values)
+                scaler.loc['std', col] = np.std(valid_values)
+
+        return scaler
+
+    def fit(self, x: pd.DataFrame, y: pd.DataFrame):
+        input_columns = x.columns
+        scaler = self.standardization_scaler(x)
+        x = (x - scaler.loc['mean']) / scaler.loc['std']
+        y = np.log(np.abs(y))
+
+        x, y = self.drop_na(x=x.astype(np.float64).to_numpy(), y=y.astype(np.float64).to_numpy())
+
+        # Compute coefficients using ridge regression formula
+        x_transpose = np.transpose(x)
+        xtx = np.dot(x_transpose, x)
+        xty = np.dot(x_transpose, y)
+        lambda_identity = self.alpha * np.identity(len(xtx))
+        coefficients = np.dot(np.linalg.inv(xtx + lambda_identity), xty)
+        residuals = y - np.dot(x, coefficients)
+        mse = np.mean(residuals ** 2, axis=0)
+
+        self.scaler = scaler
+        self.coefficients = pd.DataFrame(data=coefficients.T, columns=input_columns, index=self.pred_var).T
+        return coefficients.T, mse
+
+    def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
+        self.session_dummies(timestamp=timestamp, inplace=factor)
+        x = {_: factor[_] for _ in self.inputs_var}  # to ensure the order of input data
+        x = self._generate_x_features(x)
+
+        prediction = {_: 0. for _ in self.pred_var}
+
+        for pred_name in self.pred_var:
+            coefficient = self.coefficients[pred_name]
+            for var_name in x:
+
+                if var_name not in coefficient.index:
+                    continue
+
+                prediction[pred_name] += coefficient[var_name] * (x[var_name] - self.scaler.at['mean', var_name]) / self.scaler.at['std', var_name]
+
+        prediction[self.pred_var[0]] = np.exp(prediction[self.pred_var[0]])
+        prediction[self.pred_var[1]] = -np.exp(prediction[self.pred_var[1]])
+
+        for _ in prediction:
+            if np.abs(prediction[_]) > self.pred_cutoff:
+                prediction[_] = np.nan
+
+        return prediction
+
+    def predict_batch(self, x: pd.DataFrame):
+        x = self._generate_x_features(x)
+
+        # Perform the prediction using the regression coefficients
+        prediction = np.dot((x - self.scaler.loc['mean']) / self.scaler.loc['std'], self.coefficients)
+        prediction = pd.DataFrame(prediction, columns=self.pred_var, index=x.index)
+        prediction[self.pred_var[0]] = np.exp(prediction.astype(np.float64)[self.pred_var[0]])
+        prediction[self.pred_var[1]] = -np.exp(prediction.astype(np.float64)[self.pred_var[1]])
+
+        prediction = prediction.applymap(lambda _: _ if -self.pred_cutoff < _ < self.pred_cutoff else np.nan)
+
+        return prediction
+
+
+__all__ = ['LinearCore', 'LogLinearCore', 'RidgeCore']
