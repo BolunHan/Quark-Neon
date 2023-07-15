@@ -240,7 +240,7 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
             step=self.factor_pool.log_interval
         )
 
-        value = factor_storage[key]
+        value = factor_storage.get(key, {})
         return value
 
     @property
