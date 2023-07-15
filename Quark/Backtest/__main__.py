@@ -23,6 +23,7 @@ INDEX_NAME = '000016.SH'
 MARKET_DATE = START_DATE = datetime.date(2023, 1, 1)
 END_DATE = datetime.date(2023, 6, 1)
 OVERRIDE_FACTOR_CACHE = False
+DUMMY_CORE = True
 TEST_ID = str(uuid.uuid4())
 
 # status
@@ -163,7 +164,8 @@ def bod(market_date: datetime.date, **kwargs):
         monitor.synthetic_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
 
     # startup task 3: initialize decision core
-    STRATEGY.decision_core = LinearCore(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
+    if not DUMMY_CORE:
+        STRATEGY.decision_core = LinearCore(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
     try:
         STRATEGY.decision_core.load(file_dir=dump_dir, file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json')
     except Exception as _:
