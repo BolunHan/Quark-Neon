@@ -1,10 +1,12 @@
 __package__ = 'Quark.Backtest'
 
 import datetime
+import json
 import os
 import pathlib
 import sys
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from AlgoEngine.Strategies import STRATEGY_ENGINE
@@ -18,7 +20,8 @@ from ..Calibration.linear import *
 from ..Strategy import StrategyMetric
 
 DATA_SOURCE = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res')
-DATA_CORE = LinearCore(ticker='Synthetic')
+DATA_CORE = RidgeDecodingCore(ticker='Synthetic', ridge_alpha=100, pred_length=30 * 60, smooth_look_back=0)
+EXPORT_DIR = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'{DATA_CORE.__class__.__name__}')
 
 START_DATE = datetime.date(2023, 1, 1)
 END_DATE = datetime.date(2023, 6, 1)
@@ -58,6 +61,9 @@ class TradeMetrics(object):
                 pnl=self.pnl,
             )
         )
+
+        if 'init_side' not in self.current_trade_batch:
+            self.current_trade_batch['init_side'] = 1 if volume > 0 else -1
 
         self.current_trade_batch['cash_flow'] = self.current_trade_batch.get('cash_flow', 0.) - volume * price
         self.current_trade_batch['pnl'] = self.current_trade_batch.get('pnl', 0.) + self.exposure * price + self.current_trade_batch['cash_flow']
@@ -103,6 +109,8 @@ class TradeMetrics(object):
         info_dict['average_gain'] = info_dict['total_gain'] / info_dict['win_count'] / self.current_price if info_dict['win_count'] else 0.
         info_dict['average_loss'] = info_dict['total_loss'] / info_dict['lose_count'] / self.current_price if info_dict['lose_count'] else 0.
         info_dict['gain_loss_ratio'] = -info_dict['average_gain'] / info_dict['average_loss'] if info_dict['average_loss'] else 1.
+        info_dict['long_avg_pnl'] = np.average([_['pnl'] for _ in long_trades]) / self.current_price if (long_trades := [_ for _ in self.trade_batch if _['init_side'] == 1]) else np.nan
+        info_dict['short_avg_pnl'] = np.average([_['pnl'] for _ in short_trades]) / self.current_price if (short_trades := [_ for _ in self.trade_batch if _['init_side'] == -1]) else np.nan
 
         return info_dict
 
@@ -119,6 +127,8 @@ class TradeMetrics(object):
             'win_rate': f'{metric_info["win_rate"]:.2%}',
             'average_gain': f'{metric_info["average_gain"]:,.4%}',
             'average_loss': f'{metric_info["average_loss"]:,.4%}',
+            'long_avg_pnl': f'{metric_info["long_avg_pnl"]:,.4%}',
+            'short_avg_pnl': f'{metric_info["short_avg_pnl"]:,.4%}',
             'gain_loss_ratio': f'{metric_info["gain_loss_ratio"]:,.3%}'
         }
 
@@ -128,7 +138,7 @@ class TradeMetrics(object):
 TRADE_METRICS = TradeMetrics()
 
 
-def training(market_date: datetime.date, trace_back: int = 5):
+def training(market_date: datetime.date, trace_back: int = 30):
     """
     train the data core with factor collected from {market_date} and {trace_back} days before
     """
@@ -145,7 +155,7 @@ def training(market_date: datetime.date, trace_back: int = 5):
 
     report = DATA_CORE.calibrate(factor_cache=data_list, trace_back=0)
 
-    LOGGER.info(f'{DATA_SOURCE} calibration report:\n' + '\n'.join([f"{_}: {report[_]}" for _ in report]))
+    return report
 
 
 def metric_signal(market_date: datetime.date, fake_trades: bool = True):
@@ -182,7 +192,7 @@ def validate(market_date: datetime.date):
     info_df = DATA_CORE.load_info_from_csv(file_path=caches[0])
     DATA_CORE._prepare(factors=info_df)
     DATA_CORE._validate(info=info_df)
-    fig = DATA_CORE.plot(info=info_df, decoder=DATA_CORE.decoder)
+    fig = DATA_CORE.plot(info=info_df)
     return fig
 
 
@@ -218,9 +228,13 @@ def annotate_signals(fig, strategy_metric):
     if not metrics_df.empty:
         metrics_df = metrics_df.loc[metrics_df['signal'] != 0]
         metrics_df['signal_time'] = [datetime.datetime.fromtimestamp(_) for _ in metrics_df.index]
+        formatted_df = metrics_df.applymap(lambda x:
+                                           f"{x:.3f}" if isinstance(x, float) else
+                                           f"{x:%H:%M:%S}" if isinstance(x, datetime.datetime) else
+                                           x)
         table = go.Table(
-            header=dict(values=list(metrics_df.columns)),
-            cells=dict(values=[metrics_df[col] for col in metrics_df.columns])
+            header=dict(values=list(formatted_df.columns)),
+            cells=dict(values=[formatted_df[col] for col in formatted_df.columns])
         )
         table_html = go.Figure(data=[table]).to_html(full_html=False)
 
@@ -231,6 +245,8 @@ def annotate_signals(fig, strategy_metric):
 
 
 def main():
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+
     for market_date in CALENDAR:
         calendar_index = CALENDAR.index(market_date)
 
@@ -239,16 +255,24 @@ def main():
 
         previous_market_date = CALENDAR[calendar_index - 1]
 
-        training(market_date=previous_market_date)
+        cal_report = training(market_date=previous_market_date)
         strategy_metric = metric_signal(market_date=market_date)
         fig = validate(market_date=market_date)
         TRADE_METRICS.add_trades_batch(pd.DataFrame(strategy_metric.metrics))
         html_content = annotate_signals(fig=fig, strategy_metric=strategy_metric)
 
-        with open(os.path.realpath(f'{market_date}.validation.html'), 'w', encoding="utf-8") as file:
+        with open(EXPORT_DIR.joinpath(f'{market_date}.validation.html'), 'w', encoding="utf-8") as file:
             file.write(html_content)
 
+        LOGGER.info(f'Factor cache: {DATA_SOURCE}\ncalibration report:\n' + '\n'.join([f"{_}: {cal_report[_]}" for _ in cal_report]))
         LOGGER.info(f'\n{TRADE_METRICS.to_string()}')
+        result = DATA_CORE.to_json(fmt='dict')
+        result.update(TRADE_METRICS.info)
+
+        with open(EXPORT_DIR.joinpath(f'{market_date}.{DATA_CORE.__class__.__name__}.json'), 'w', encoding="utf-8") as file:
+            file.write(json.dumps(result))
+
+        DATA_CORE.clear()
 
 
 if __name__ == '__main__':
