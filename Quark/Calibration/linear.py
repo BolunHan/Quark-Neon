@@ -18,54 +18,83 @@ from ..Strategy import DecisionCore, RecursiveDecoder, StrategyMetric
 TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
-class LinearCore(DecisionCore):
+class Scaler(object):
+    def __init__(self):
+        self.scaler: pd.DataFrame | None = None
+
+    def standardization_scaler(self, x: pd.DataFrame):
+        scaler = pd.DataFrame(index=['mean', 'std'], columns=x.columns)
+
+        for col in x.columns:
+            if col == 'Bias':
+                scaler.loc['mean', col] = 0
+                scaler.loc['std', col] = 1
+            else:
+                valid_values = x[col][np.isfinite(x[col])]
+                scaler.loc['mean', col] = np.mean(valid_values)
+                scaler.loc['std', col] = np.std(valid_values)
+
+        self.scaler = scaler
+        return scaler
+
+    def transform(self, x: pd.DataFrame | dict[str, float]) -> pd.DataFrame | dict[str, float]:
+        if self.scaler is None:
+            raise ValueError('scaler not initialized!')
+
+        if isinstance(x, pd.DataFrame):
+            x = (x - self.scaler.loc['mean']) / self.scaler.loc['std']
+        elif isinstance(x, dict):
+            for var_name in x:
+
+                if var_name not in self.scaler.columns:
+                    # LOGGER.warning(f'{var_name} is not in scaler')
+                    continue
+
+                x[var_name] = (x[var_name] - self.scaler.at['mean', var_name]) / self.scaler.at['std', var_name]
+        else:
+            raise TypeError(f'Invalid x type {type(x)}, expect dict or pd.DataFrame')
+
+        return x
+
+
+class LinearRegressionCore(DecisionCore):
     def __init__(self, ticker: str, **kwargs):
         super().__init__()
 
         self.ticker = ticker
-
-        self.decode_level = kwargs.get('decode_level', 4)
         self.data_source = kwargs.get('data_source', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res'))
-        self.smooth_params = SimpleNamespace(
-            alpha=kwargs.get('smooth_alpha', 0.008),
-            look_back=kwargs.get('smooth_look_back', 0.008)
-        )
+
         self.decision_params = SimpleNamespace(
-            gain_threshold=kwargs.get('gain_threshold', 0.008),
-            risk_threshold=kwargs.get('gain_threshold', 0.004)
+            gain_threshold=kwargs.get('gain_threshold', 0.005),
+            risk_threshold=kwargs.get('gain_threshold', 0.002)
         )
         self.calibration_params = SimpleNamespace(
+            pred_length=kwargs.get('pred_length', 15 * 60),
             trace_back=kwargs.get('calibration_days', 5),  # use previous caches to train the model
         )
 
-        self.decoder = RecursiveDecoder(level=self.decode_level)
         self.inputs_var = ['TradeFlow.EMA.Sum', 'Coherence.Price.Up', 'Coherence.Price.Down',
                            'Coherence.Price.Ratio.EMA', 'Coherence.Volume', 'TA.MACD.Index',
                            'Aggressiveness.EMA.Net', 'Entropy.Price.EMA',
                            'Dummies.IsOpening', 'Dummies.IsClosing']
-        self.pred_var = ['up_smoothed', 'down_smoothed']
+        self.pred_var = ['pct_chg']
         self.coefficients: pd.DataFrame | None = None
 
     def __str__(self):
-        return f'DecisionCore.Linear.{id(self)}(ready={self.is_ready})'
+        return f'DecisionCore.Linear.{self.__class__.__name__}(ready={self.is_ready})'
 
     def to_json(self, fmt='dict') -> dict | str:
         json_dict = dict(
             ticker=self.ticker,
-            decode_level=self.decode_level,
             data_source=str(self.data_source),
             inputs_var=self.inputs_var,
             pred_var=self.pred_var,
-            smooth_params=dict(
-                alpha=self.smooth_params.alpha,
-                look_back=self.smooth_params.look_back
-            ),
             decision_params=dict(
                 gain_threshold=self.decision_params.gain_threshold,
                 risk_threshold=self.decision_params.risk_threshold,
             ),
             calibration_params=dict(
-                look_back=self.calibration_params.look_back
+                trace_back=self.calibration_params.trace_back
             ),
             coefficients=self.coefficients.to_dict() if self.coefficients is not None else None
         )
@@ -84,11 +113,7 @@ class LinearCore(DecisionCore):
         else:
             raise TypeError(f'{cls.__name__} can not load from json {json_str}')
 
-        self = cls(
-            ticker=json_dict['ticker'],
-            decode_level=json_dict['decode_level'],
-            data_source=pathlib.Path(json_dict['data_source'])
-        )
+        self = cls(ticker=json_dict['ticker'])
 
         self.inputs_var.clear()
         self.inputs_var.extend(json_dict['inputs_var'])
@@ -96,11 +121,10 @@ class LinearCore(DecisionCore):
         self.pred_var.clear()
         self.pred_var.extend(json_dict['pred_var'])
 
-        self.smooth_params.alpha = json_dict['smooth_params']['alpha']
-        self.smooth_params.look_back = json_dict['smooth_params']['look_back']
+        self.data_source = pathlib.Path(json_dict['data_source'])
         self.decision_params.gain_threshold = json_dict['decision_params']['gain_threshold']
         self.decision_params.risk_threshold = json_dict['decision_params']['risk_threshold']
-        self.calibration_params.look_back = json_dict['calibration_params']['look_back']
+        self.calibration_params.trace_back = json_dict['calibration_params']['trace_back']
 
         if json_dict['coefficients']:
             self.coefficients = pd.DataFrame(json_dict['coefficients'])
@@ -113,11 +137,10 @@ class LinearCore(DecisionCore):
             return 0
 
         prediction = self.predict(factor=factor, timestamp=timestamp)
-        pred_up = prediction['up_smoothed']
-        pred_down = prediction['down_smoothed']
+        pred = prediction['pct_chg']
 
         if position is None:
-            LOGGER.warning('position not given, assuming no position. NOTE: Only gives empty position in BACKTEST mode!', norepeat=True)
+            LOGGER.warning('position not given, assuming no position. NOTE: Only gives empty position in BACKTEST mode!')
             exposure_volume = working_volume = 0
         else:
             exposure_volume = position.exposure_volume
@@ -132,10 +155,10 @@ class LinearCore(DecisionCore):
             return 0
         # logic 1.1: no winding, only unwind position
         # logic 1.2: unwind long position when overall prediction is down, or risk is too high
-        elif exposure > 0 and (pred_up + pred_down < 0 or pred_down < -self.decision_params.risk_threshold):
+        elif exposure > 0 and (pred < self.decision_params.risk_threshold):
             action = -1
         # logic 1.3: unwind short position when overall prediction is up, or risk is too high
-        elif exposure < 0 and (pred_up + pred_down > 0 or pred_up > self.decision_params.risk_threshold):
+        elif exposure < 0 and (pred > -self.decision_params.risk_threshold):
             action = 1
         # logic 1.4: fully unwind if market is about to close
         elif exposure and datetime.datetime.fromtimestamp(timestamp).time() >= datetime.time(14, 55):
@@ -143,11 +166,15 @@ class LinearCore(DecisionCore):
         # logic 2.1: only open position when no exposure
         elif exposure:
             action = 0
+        # logic 2.1.1: only open position after 10:00
+        elif datetime.datetime.fromtimestamp(timestamp).time() < datetime.time(10, 00):
+            action = 0
         # logic 2.2: open long position when gain is high and risk is low
-        elif pred_up > self.decision_params.gain_threshold and pred_down > -self.decision_params.risk_threshold:
+        elif pred > self.decision_params.gain_threshold:
             action = 1
         # logic 2.3: open short position when gain is high and risk is low
-        elif pred_up < self.decision_params.risk_threshold and pred_down < -self.decision_params.gain_threshold:
+        # logic 2.4: disable short opening for now, the short pred is not stable
+        elif pred < -self.decision_params.gain_threshold:
             action = -1
         # logic 3.1: hold still if unwind condition is not triggered
         # logic 3.2: no action when open condition is not triggered
@@ -204,7 +231,6 @@ class LinearCore(DecisionCore):
         report.update(data_entries=x.shape, residuals=residuals)
 
         # step 3: store the coefficient matrix
-        # self.coefficients = pd.DataFrame(data=coefficients, columns=x.columns, index=self.pred_var).T
         report.update(coefficient='\n' + self.coefficients.to_string())
 
         # step 4: validate matrix
@@ -213,69 +239,81 @@ class LinearCore(DecisionCore):
 
         # step 5: dump fig
         if metric_info is not None:
-            fig = self.plot(info=metric_info, decoder=self.decoder)
+            fig = self.plot(info=metric_info)
             fig.write_html(file := os.path.realpath(f'{self}.html'))
             report.update(fig_dump=file, end_ts=time.time(), time_cost=f"{time.time() - report['start_ts']:,.3f}s")
 
         return report
 
     def clear(self):
-        self.decoder.clear()
         self.coefficients = None
 
     def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
         self.session_dummies(timestamp=timestamp, inplace=factor)
         x = {_: factor[_] for _ in self.inputs_var}  # to ensure the order of input data
         x = self._generate_x_features(x)
-
-        prediction = {_: 0. for _ in self.pred_var}
-
-        for pred_name in self.pred_var:
-            coefficient = self.coefficients[pred_name]
-            for var_name in x:
-
-                if var_name not in coefficient.index:
-                    continue
-
-                prediction[pred_name] += coefficient[var_name] * x[var_name]
-
+        prediction = self._pred(x=x)
         return prediction
 
-    def predict_batch(self, x: pd.DataFrame):
-        x = self._generate_x_features(x)
+    def predict_batch(self, factor: pd.DataFrame):
+        x = self._generate_x_features(factor)
 
         # Perform the prediction using the regression coefficients
-        prediction = np.dot(x, self.coefficients)
+        prediction = self._pred(x=x)
 
         return pd.DataFrame(prediction, columns=self.pred_var, index=x.index)
 
+    def _pred(self, x: np.ndarray | pd.DataFrame | dict[str, float]) -> np.ndarray | dict[str, float]:
+        if isinstance(x, np.ndarray):
+            prediction = np.dot(x, self.coefficients)
+        elif isinstance(x, pd.DataFrame):
+            prediction = pd.DataFrame(data=0., index=x.index, columns=self.pred_var)
+            for pred_name in self.pred_var:
+                for var_name in self.coefficients.index:
+                    prediction[pred_name] += x[var_name] * self.coefficients.at[var_name, pred_name]
+        elif isinstance(x, dict):
+            prediction = {_: 0. for _ in self.pred_var}
+
+            for pred_name in self.pred_var:
+                coefficient = self.coefficients[pred_name]
+                for var_name in x:
+
+                    if var_name not in coefficient.index:
+                        continue
+
+                    prediction[pred_name] += coefficient[var_name] * x[var_name]
+        else:
+            raise TypeError(f'Invalid x type {type(x)}')
+
+        return prediction
+
     def _prepare(self, factors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-        # step 1: decode metric based on the
-        self.decoder.clear()
-        self.decode_index_price(factors=factors)
 
-        # step 2: mark the ups and down for each data point
-        local_extreme = self.decoder.local_extremes(ticker='Synthetic', level=self.decode_level)
-        factors['local_max'] = np.nan
-        factors['local_min'] = np.nan
+        factors['pct_chg'] = None  # Create a new column to store the percentage changes
+        for ts, row in factors.iterrows():  # type: float, dict
+            t0 = ts
+            t1 = ts + self.calibration_params.pred_length
 
-        for i in range(len(local_extreme)):
-            start_ts = local_extreme[i][1]
-            end_ts = local_extreme[i + 1][1] if i + 1 < len(local_extreme) else None
-            self.mark_factors(factors=factors, start_ts=start_ts, end_ts=end_ts)
+            closest_index = None
+            for index in factors.index:
+                if index >= t1:
+                    closest_index = index
+                    break
 
-        factors['up_actual'] = factors['local_max'] / factors['SyntheticIndex.Price'] - 1
-        factors['down_actual'] = factors['local_min'] / factors['SyntheticIndex.Price'] - 1
+            if closest_index is None:
+                continue
 
-        # step 3: smooth out the breaking points
-        factors['up_smoothed'] = factors['up_actual']
-        factors['down_smoothed'] = factors['down_actual']
+            # Find the closest index greater or equal to ts + window
+            closest_index = factors.index[factors.index >= t1].min()
 
-        for i in range(len(local_extreme) - 1):
-            previous_extreme = local_extreme[i - 1] if i > 0 else None
-            break_point = local_extreme[i]
-            next_extreme = local_extreme[i + 1]
-            self.smooth_out(factors=factors, previous_extreme=previous_extreme, break_point=break_point, next_extreme=next_extreme)
+            # Get the prices at ts and ts + window
+            p0 = row['SyntheticIndex.Price']
+            p1 = factors.at[closest_index, 'SyntheticIndex.Price']
+
+            # Calculate the percentage change and assign it to the 'pct_chg' column
+            factors.at[t0, 'pct_chg'] = (p1 / p0) - 1
+
+        factors['pct_chg'] = factors['pct_chg'].astype(float)
 
         # step 4: assigning dummies
         self.session_dummies(factors.index, inplace=factors)
@@ -287,52 +325,7 @@ class LinearCore(DecisionCore):
 
     def _validate(self, info: pd.DataFrame):
         prediction = self.predict_batch(info[self.inputs_var])
-        info['up_pred'] = prediction['up_smoothed']
-        info['down_pred'] = prediction['down_smoothed']
-
-    def decode_index_price(self, factors: pd.DataFrame):
-        for _ in factors.iterrows():  # type: tuple[float, dict]
-            ts, row = _
-            market_price = float(row.get('SyntheticIndex.Price', np.nan))
-            market_time = datetime.datetime.fromtimestamp(ts, tz=TIME_ZONE)
-            timestamp = market_time.timestamp()
-
-            # filter nan values
-            if not np.isfinite(market_price):
-                continue
-
-            # filter non-trading hours
-            if market_time.time() < datetime.time(9, 30) \
-                    or datetime.time(11, 30) < market_time.time() < datetime.time(13, 0) \
-                    or datetime.time(15, 0) < market_time.time():
-                continue
-
-            self.decoder.update_decoder(ticker='Synthetic', market_price=market_price, timestamp=timestamp)
-
-    def smooth_out(self, factors: pd.DataFrame, previous_extreme: tuple[float, float, int] | None, break_point: tuple[float, float, int], next_extreme: tuple[float, float, int]):
-        look_back: float = self.smooth_params.look_back
-        next_extreme_price = next_extreme[0]
-        break_ts = break_point[1]
-        break_type = break_point[2]
-        start_ts = max(previous_extreme[1], break_ts - look_back) if previous_extreme else break_ts - look_back
-        end_ts = break_ts
-
-        smooth_range = factors.loc[start_ts:end_ts]
-
-        if break_type == 1:  # approaching to local maximum, use downward profit is discontinuous, using "up_actual" to smooth out
-            max_loss = (-smooth_range.up_actual[::-1]).cummin()[::-1]
-            potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(None, 0)
-            hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
-            smoothed = potential * hold_prob + smooth_range.down_actual * (1 - hold_prob)
-            factors['down_smoothed'].update(smoothed)
-        elif break_type == -1:
-            max_loss = smooth_range.down_actual[::-1].cummin()[::-1]
-            potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(0, None)
-            hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
-            smoothed = potential * hold_prob + smooth_range.up_actual * (1 - hold_prob)
-            factors['up_smoothed'].update(smoothed)
-        else:
-            return
+        info['pred'] = prediction['pct_chg']
 
     def generate_inputs(self, factors: pd.DataFrame):
         filtered = factors.dropna()
@@ -342,10 +335,22 @@ class LinearCore(DecisionCore):
         y = filtered[self.pred_var]
         return x, y
 
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame):
-        coefficients, residuals, *_ = np.linalg.lstsq(x.to_numpy(), y.to_numpy(), rcond=None)
-        self.coefficients = pd.DataFrame(data=coefficients.T, columns=x.columns, index=self.pred_var).T
+    def fit(self, x: pd.DataFrame, y: pd.DataFrame, input_cols: list[str] = None):
+        if input_cols is None:
+            input_cols = x.columns
+
+        if isinstance(x, pd.DataFrame):
+            x = x.to_numpy()
+
+        if isinstance(y, pd.DataFrame):
+            y = y.to_numpy()
+        coefficients, residuals = self._fit(x=x, y=y)
+        self.coefficients = pd.DataFrame(data=coefficients, columns=self.pred_var, index=input_cols)
         return self.coefficients, residuals
+
+    def _fit(self, x: np.ndarray, y: np.ndarray):
+        coefficients, residuals, *_ = np.linalg.lstsq(x, y, rcond=None)
+        return coefficients, residuals
 
     @classmethod
     def session_dummies(cls, timestamp: float | list[float], inplace: dict[str, float | list[float]] | pd.DataFrame = None):
@@ -421,6 +426,234 @@ class LinearCore(DecisionCore):
         return df
 
     @classmethod
+    def plot(cls, info: pd.DataFrame):
+        import plotly.graph_objects as go
+
+        fig = go.Figure()
+        x = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in info.index]
+
+        fig.add_trace(go.Scatter(x=x, y=info["SyntheticIndex.Price"], mode='lines', name='Index Value'))
+        fig.add_trace(go.Scatter(x=x, y=info["pct_chg"], mode='lines', name='pct_chg', yaxis='y2'))
+        fig.add_trace(go.Scatter(x=x, y=info["pred"], mode='lines', name='pct_pred', yaxis='y2'))
+
+        fig.update_layout(
+            title=f'Linear action core',
+            xaxis=dict(title='X-axis'),
+            yaxis=dict(title="Price"),
+            yaxis2=dict(title="Percentage", overlaying="y", side="right"),
+        )
+
+        fig.update_xaxes(rangebreaks=[dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 9.5], pattern="hour")])
+        return fig
+
+    @property
+    def is_ready(self):
+        if self.coefficients is None:
+            return False
+
+        return True
+
+
+class LinearDecodingCore(LinearRegressionCore):
+    def __init__(self, ticker: str, **kwargs):
+        super().__init__(ticker=ticker, **kwargs)
+
+        self.decode_level = kwargs.get('decode_level', 4)
+        self.smooth_params = SimpleNamespace(
+            alpha=kwargs.get('smooth_alpha', 0.008),
+            look_back=kwargs.get('smooth_look_back', 5 * 60)
+        )
+
+        self.decoder = RecursiveDecoder(level=self.decode_level)
+        self.pred_var = ['up_smoothed', 'down_smoothed']
+
+    def to_json(self, fmt='dict') -> dict | str:
+
+        json_dict = super().to_json(fmt='dict')
+
+        json_dict.update(
+            decode_level=self.decode_level,
+            smooth_params=dict(
+                alpha=self.smooth_params.alpha,
+                look_back=self.smooth_params.look_back
+            )
+        )
+
+        if fmt == 'dict':
+            return json_dict
+        else:
+            return json.dumps(json_dict)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        # noinspection PyTypeChecker
+        self = super().from_json(json_dict)  # type: LinearDecodingCore
+
+        if 'decode_level' in json_dict:
+            self.decode_level = json_dict['decode_level']
+
+        if 'smooth_params' in json_dict:
+            self.smooth_params.alpha = json_dict['smooth_params']['alpha']
+            self.smooth_params.look_back = json_dict['smooth_params']['look_back']
+
+        return self
+
+    def signal(self, position: PositionManagementService, factor: dict[str, float], timestamp: float) -> int:
+
+        if not self.is_ready:
+            return 0
+
+        prediction = self.predict(factor=factor, timestamp=timestamp)
+        pred_up = prediction['up_smoothed']
+        pred_down = prediction['down_smoothed']
+
+        if position is None:
+            LOGGER.warning('position not given, assuming no position. NOTE: Only gives empty position in BACKTEST mode!')
+            exposure_volume = working_volume = 0
+        else:
+            exposure_volume = position.exposure_volume
+            working_volume = position.working_volume
+
+        exposure = exposure_volume.get(self.ticker, 0.)
+        working_long = working_volume['Long'].get(self.ticker, 0.)
+        working_short = working_volume['Short'].get(self.ticker, 0.)
+
+        # condition 0: no more action when having working orders
+        if working_long or working_short:
+            return 0
+        # logic 1.1: no winding, only unwind position
+        # logic 1.2: unwind long position when overall prediction is down, or risk is too high
+        elif exposure > 0 and (pred_up + pred_down < 0 or pred_down < -self.decision_params.risk_threshold):
+            action = -1
+        # logic 1.3: unwind short position when overall prediction is up, or risk is too high
+        elif exposure < 0 and (pred_up + pred_down > 0 or pred_up > self.decision_params.risk_threshold):
+            action = 1
+        # logic 1.4: fully unwind if market is about to close
+        elif exposure and datetime.datetime.fromtimestamp(timestamp).time() >= datetime.time(14, 55):
+            action = -exposure
+        # logic 2.1: only open position when no exposure
+        elif exposure:
+            action = 0
+        # logic 2.1.1: only open position after 10:00
+        elif datetime.datetime.fromtimestamp(timestamp).time() < datetime.time(10, 00):
+            action = 0
+        # logic 2.2: open long position when gain is high and risk is low
+        elif pred_up > self.decision_params.gain_threshold and pred_down > -self.decision_params.risk_threshold:
+            action = 1
+        # logic 2.3: open short position when gain is high and risk is low
+        # logic 2.4: disable short opening for now, the short pred is not stable
+        # elif pred_up < self.decision_params.risk_threshold and pred_down < -self.decision_params.gain_threshold:
+        #     action = -1
+        # logic 3.1: hold still if unwind condition is not triggered
+        # logic 3.2: no action when open condition is not triggered
+        # logic 3.3: no action if prediction is not valid (containing nan)
+        # logic 3.4: no action if not in valid trading hours (in this scenario, every hour is valid trading hour), this logic can be overridden by strategy's closing / eod behaviors.
+        else:
+            action = 0
+
+        return action
+
+    def trade_volume(self, position: PositionManagementService, cash: float, margin: float, timestamp: float, signal: int) -> float:
+        return 1.
+
+    def clear(self):
+        super().clear()
+        self.decoder.clear()
+
+    def _prepare(self, factors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        # step 1: decode metric based on the
+        self.decoder.clear()
+        self.decode_index_price(factors=factors)
+
+        # step 2: mark the ups and down for each data point
+        local_extreme = self.decoder.local_extremes(ticker='Synthetic', level=self.decode_level)
+        factors['local_max'] = np.nan
+        factors['local_min'] = np.nan
+
+        for i in range(len(local_extreme)):
+            start_ts = local_extreme[i][1]
+            end_ts = local_extreme[i + 1][1] if i + 1 < len(local_extreme) else None
+            self.mark_factors(factors=factors, start_ts=start_ts, end_ts=end_ts)
+
+        factors['up_actual'] = factors['local_max'] / factors['SyntheticIndex.Price'] - 1
+        factors['down_actual'] = factors['local_min'] / factors['SyntheticIndex.Price'] - 1
+
+        # step 3: smooth out the breaking points
+        factors['up_smoothed'] = factors['up_actual']
+        factors['down_smoothed'] = factors['down_actual']
+
+        for i in range(len(local_extreme) - 1):
+            previous_extreme = local_extreme[i - 1] if i > 0 else None
+            break_point = local_extreme[i]
+            next_extreme = local_extreme[i + 1]
+            self.smooth_out(factors=factors, previous_extreme=previous_extreme, break_point=break_point, next_extreme=next_extreme)
+
+        # step 4: assigning dummies
+        self.session_dummies(factors.index, inplace=factors)
+
+        # step 5: generate inputs for linear regression
+        x, y = self.generate_inputs(factors)
+
+        return x, y
+
+    def _validate(self, info: pd.DataFrame):
+        prediction = self.predict_batch(info[self.inputs_var])
+        info['up_pred'] = prediction['up_smoothed']
+        info['down_pred'] = prediction['down_smoothed']
+
+    def decode_index_price(self, factors: pd.DataFrame):
+        for _ in factors.iterrows():  # type: tuple[float, dict]
+            ts, row = _
+            market_price = float(row.get('SyntheticIndex.Price', np.nan))
+            market_time = datetime.datetime.fromtimestamp(ts, tz=TIME_ZONE)
+            timestamp = market_time.timestamp()
+
+            # filter nan values
+            if not np.isfinite(market_price):
+                continue
+
+            # filter non-trading hours
+            if market_time.time() < datetime.time(9, 30) \
+                    or datetime.time(11, 30) < market_time.time() < datetime.time(13, 0) \
+                    or datetime.time(15, 0) < market_time.time():
+                continue
+
+            self.decoder.update_decoder(ticker='Synthetic', market_price=market_price, timestamp=timestamp)
+
+    def smooth_out(self, factors: pd.DataFrame, previous_extreme: tuple[float, float, int] | None, break_point: tuple[float, float, int], next_extreme: tuple[float, float, int]):
+        # LOGGER.info(f'{self.__class__.__name__} smoothing actual up/down with {self.smooth_params}')
+        look_back: float = self.smooth_params.look_back
+        next_extreme_price = next_extreme[0]
+        break_ts = break_point[1]
+        break_type = break_point[2]
+        start_ts = max(previous_extreme[1], break_ts - look_back) if previous_extreme else break_ts - look_back
+        end_ts = break_ts
+
+        smooth_range = factors.loc[start_ts:end_ts]
+
+        if break_type == 1:  # approaching to local maximum, use downward profit is discontinuous, using "up_actual" to smooth out
+            max_loss = (-smooth_range.up_actual[::-1]).cummin()[::-1]
+            potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(None, 0)
+            hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
+            smoothed = potential * hold_prob + smooth_range.down_actual * (1 - hold_prob)
+            factors['down_smoothed'].update(smoothed)
+        elif break_type == -1:
+            max_loss = smooth_range.down_actual[::-1].cummin()[::-1]
+            potential = (next_extreme_price / smooth_range['SyntheticIndex.Price'] - 1).clip(0, None)
+            hold_prob = (-max_loss).apply(lambda _: 1 - _ / self.smooth_params.alpha if _ < self.smooth_params.alpha else 0)
+            smoothed = potential * hold_prob + smooth_range.up_actual * (1 - hold_prob)
+            factors['up_smoothed'].update(smoothed)
+        else:
+            return
+
+    @classmethod
     def plot(cls, info: pd.DataFrame, decoder: RecursiveDecoder = None):
         import plotly.graph_objects as go
 
@@ -451,15 +684,11 @@ class LinearCore(DecisionCore):
         fig.update_xaxes(rangebreaks=[dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 9.5], pattern="hour")])
         return fig
 
-    @property
-    def is_ready(self):
-        if self.coefficients is None:
-            return False
 
-        return True
-
-
-class LogLinearCore(LinearCore):
+class LogLinearCore(LinearDecodingCore):
+    def __init__(self, ticker: str, **kwargs):
+        super().__init__(ticker=ticker, **kwargs)
+        self.pred_cutoff = 0.01
 
     @classmethod
     def drop_na(cls, x: pd.DataFrame | np.ndarray, y: pd.DataFrame | np.ndarray):
@@ -473,15 +702,15 @@ class LogLinearCore(LinearCore):
 
         return x, y
 
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame):
-        y[:, 0] = np.log(y[:, 0])
-        y[:, 1] = np.log(-y[:, 1])
+    def fit(self, x: pd.DataFrame, y: pd.DataFrame, input_cols: list[str] = None):
+        if input_cols is None:
+            input_cols = x.columns
 
-        x, y = self.drop_na(x=x, y=y)
-
-        coefficients, residuals = super().fit(x, y)
-        self.coefficients = pd.DataFrame(data=coefficients.T, columns=x.columns, index=self.pred_var).T
-        return coefficients, residuals
+        y = np.log(np.abs(y))
+        x, y = self.drop_na(x=x.astype(np.float64).to_numpy(), y=y.astype(np.float64).to_numpy())
+        coefficients, residuals = self._fit(x=x, y=y)
+        self.coefficients = pd.DataFrame(data=coefficients, columns=self.pred_var, index=input_cols)
+        return self.coefficients, residuals
 
     def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
         prediction = super().predict(factor, timestamp)
@@ -490,25 +719,29 @@ class LogLinearCore(LinearCore):
         prediction[self.pred_var[0]] = np.exp(prediction[self.pred_var[0]])
         prediction[self.pred_var[1]] = -np.exp(prediction[self.pred_var[1]])
 
+        prediction = {key: np.nan if abs(value) > self.pred_cutoff else value for key, value in prediction.items()}
+
         return prediction
 
     def predict_batch(self, x: pd.DataFrame):
         prediction = super().predict_batch(x)
-
+        prediction = prediction.astype(np.float64)
         # Apply exponential transformation to the prediction results
         prediction[self.pred_var[0]] = np.exp(prediction[self.pred_var[0]])
         prediction[self.pred_var[1]] = -np.exp(prediction[self.pred_var[1]])
 
+        prediction = prediction.applymap(lambda value: np.nan if abs(value) > self.pred_cutoff else value)
+
         return prediction
 
 
-class RidgeCore(LogLinearCore):
+class RidgeLinearCore(LinearRegressionCore, Scaler):
     def __init__(self, ticker: str, **kwargs):
         self.alpha = kwargs.get('ridge_alpha', 1)
 
         super().__init__(ticker=ticker, **kwargs)
+        Scaler.__init__(self)
 
-        self.scaler: pd.DataFrame | None = None
         self.pred_cutoff = 0.01
 
     def to_json(self, fmt='dict') -> dict | str:
@@ -538,79 +771,53 @@ class RidgeCore(LogLinearCore):
 
         return self
 
-    @classmethod
-    def standardization_scaler(cls, x: pd.DataFrame):
-        scaler = pd.DataFrame(index=['mean', 'std'], columns=x.columns)
+    def fit(self, x: pd.DataFrame, y: pd.DataFrame, input_cols: list[str] = None):
+        self.standardization_scaler(x)
+        x = self.transform(x)
+        return super().fit(x=x, y=y, input_cols=input_cols)
 
-        for col in x.columns:
-            if col == 'Bias':
-                scaler.loc['mean', col] = 0
-                scaler.loc['std', col] = 1
-            else:
-                valid_values = x[col][np.isfinite(x[col])]
-                scaler.loc['mean', col] = np.mean(valid_values)
-                scaler.loc['std', col] = np.std(valid_values)
+    def _fit(self, x: np.ndarray, y: np.ndarray):
+        x = x.astype(np.float64)
+        y = y.astype(np.float64)
 
-        return scaler
-
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame):
-        input_columns = x.columns
-        scaler = self.standardization_scaler(x)
-        x = (x - scaler.loc['mean']) / scaler.loc['std']
-        y = np.log(np.abs(y))
-
-        x, y = self.drop_na(x=x.astype(np.float64).to_numpy(), y=y.astype(np.float64).to_numpy())
-
-        # Compute coefficients using ridge regression formula
-        x_transpose = np.transpose(x)
+        x_transpose = x.T
         xtx = np.dot(x_transpose, x)
         xty = np.dot(x_transpose, y)
-        lambda_identity = self.alpha * np.identity(len(xtx))
-        coefficients = np.dot(np.linalg.inv(xtx + lambda_identity), xty)
+        identity_matrix = np.identity(x.shape[1])  # or np.identity(len(xtx))
+        regularization_term = self.alpha * identity_matrix
+        xtx_plus_reg = xtx + regularization_term
+        xtx_inv = np.linalg.inv(xtx_plus_reg)
+        coefficients = np.dot(xtx_inv, xty)
         residuals = y - np.dot(x, coefficients)
         mse = np.mean(residuals ** 2, axis=0)
 
-        self.scaler = scaler
-        self.coefficients = pd.DataFrame(data=coefficients.T, columns=input_columns, index=self.pred_var).T
-        return coefficients.T, mse
+        return coefficients, mse
 
-    def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
-        self.session_dummies(timestamp=timestamp, inplace=factor)
-        x = {_: factor[_] for _ in self.inputs_var}  # to ensure the order of input data
-        x = self._generate_x_features(x)
-
-        prediction = {_: 0. for _ in self.pred_var}
-
-        for pred_name in self.pred_var:
-            coefficient = self.coefficients[pred_name]
-            for var_name in x:
-
-                if var_name not in coefficient.index:
-                    continue
-
-                prediction[pred_name] += coefficient[var_name] * (x[var_name] - self.scaler.at['mean', var_name]) / self.scaler.at['std', var_name]
-
-        prediction[self.pred_var[0]] = np.exp(prediction[self.pred_var[0]])
-        prediction[self.pred_var[1]] = -np.exp(prediction[self.pred_var[1]])
-
-        for _ in prediction:
-            if np.abs(prediction[_]) > self.pred_cutoff:
-                prediction[_] = np.nan
-
-        return prediction
-
-    def predict_batch(self, x: pd.DataFrame):
-        x = self._generate_x_features(x)
-
-        # Perform the prediction using the regression coefficients
-        prediction = np.dot((x - self.scaler.loc['mean']) / self.scaler.loc['std'], self.coefficients)
-        prediction = pd.DataFrame(prediction, columns=self.pred_var, index=x.index)
-        prediction[self.pred_var[0]] = np.exp(prediction.astype(np.float64)[self.pred_var[0]])
-        prediction[self.pred_var[1]] = -np.exp(prediction.astype(np.float64)[self.pred_var[1]])
-
-        prediction = prediction.applymap(lambda _: _ if -self.pred_cutoff < _ < self.pred_cutoff else np.nan)
-
-        return prediction
+    def _pred(self, x: np.ndarray | pd.DataFrame | dict[str, float]) -> np.ndarray | dict[str, float]:
+        x = self.transform(x)
+        return super()._pred(x=x)
 
 
-__all__ = ['LinearCore', 'LogLinearCore', 'RidgeCore']
+class RidgeDecodingCore(LogLinearCore, RidgeLinearCore):
+    def __init__(self, ticker: str, **kwargs):
+        super(LogLinearCore, self).__init__(ticker=ticker, **kwargs)
+        super(RidgeLinearCore, self).__init__(ticker=ticker, **kwargs)
+
+    def to_json(self, fmt='dict') -> dict | str:
+        return super(RidgeLinearCore, self).to_json(fmt=fmt)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+        return super(RidgeLinearCore, cls).from_json(json_str=json_str)
+
+    def fit(self, x: pd.DataFrame, y: pd.DataFrame, input_cols: list[str] = None):
+        return super(RidgeLinearCore, self).fit(x=x, y=y, input_cols=input_cols)
+
+    def _fit(self, x: np.ndarray, y: np.ndarray):
+        return super(RidgeLinearCore, self)._fit(x=x, y=y)
+
+    def _pred(self, x: np.ndarray | pd.DataFrame | dict[str, float]) -> np.ndarray | dict[str, float]:
+        return super(RidgeLinearCore, self)._pred(x=x)
+
+
+__all__ = ['LinearRegressionCore', 'LinearDecodingCore', 'LogLinearCore', 'RidgeLinearCore', 'RidgeDecodingCore']
