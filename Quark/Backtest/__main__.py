@@ -14,7 +14,7 @@ from . import factor_pool
 from . import simulated_env
 from ..API import historical
 from ..Base import GlobalStatics
-from ..Calibration.linear import LinearCore
+from ..DecisionCore.Linear import LinearDecodingCore as Core
 from ..Misc import helper
 from ..Strategy import SyntheticIndexMonitor, VolatilityMonitor, MDS, Strategy
 
@@ -165,7 +165,7 @@ def bod(market_date: datetime.date, **kwargs):
 
     # startup task 3: initialize decision core
     if not DUMMY_CORE:
-        STRATEGY.decision_core = LinearCore(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
+        STRATEGY.decision_core = Core(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
     try:
         STRATEGY.decision_core.load(file_dir=dump_dir, file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json')
     except Exception as _:

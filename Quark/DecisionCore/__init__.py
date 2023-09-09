@@ -1,3 +1,7 @@
+from .. import LOGGER
+
+__all__ = ['LOGGER']
+
 import abc
 import json
 import os.path
@@ -5,7 +9,8 @@ import pathlib
 import re
 
 from AlgoEngine.Engine import PositionManagementService
-from . import LOGGER
+
+LOGGER = LOGGER.getChild('DecisionCore')
 
 
 class DecisionCore(object, metaclass=abc.ABCMeta):

@@ -1,5 +1,3 @@
-__package__ = 'Quark.Calibration'
-
 import datetime
 import json
 import os
@@ -12,49 +10,11 @@ import pandas as pd
 from AlgoEngine.Engine import PositionManagementService
 
 from . import LOGGER
-from ..Base import GlobalStatics
-from ..Strategy import DecisionCore, RecursiveDecoder, StrategyMetric
+from .. import DecisionCore
+from ...Base import GlobalStatics
+from ...Strategy import RecursiveDecoder, StrategyMetric
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
-
-
-class Scaler(object):
-    def __init__(self):
-        self.scaler: pd.DataFrame | None = None
-
-    def standardization_scaler(self, x: pd.DataFrame):
-        scaler = pd.DataFrame(index=['mean', 'std'], columns=x.columns)
-
-        for col in x.columns:
-            if col == 'Bias':
-                scaler.loc['mean', col] = 0
-                scaler.loc['std', col] = 1
-            else:
-                valid_values = x[col][np.isfinite(x[col])]
-                scaler.loc['mean', col] = np.mean(valid_values)
-                scaler.loc['std', col] = np.std(valid_values)
-
-        self.scaler = scaler
-        return scaler
-
-    def transform(self, x: pd.DataFrame | dict[str, float]) -> pd.DataFrame | dict[str, float]:
-        if self.scaler is None:
-            raise ValueError('scaler not initialized!')
-
-        if isinstance(x, pd.DataFrame):
-            x = (x - self.scaler.loc['mean']) / self.scaler.loc['std']
-        elif isinstance(x, dict):
-            for var_name in x:
-
-                if var_name not in self.scaler.columns:
-                    # LOGGER.warning(f'{var_name} is not in scaler')
-                    continue
-
-                x[var_name] = (x[var_name] - self.scaler.at['mean', var_name]) / self.scaler.at['std', var_name]
-        else:
-            raise TypeError(f'Invalid x type {type(x)}, expect dict or pd.DataFrame')
-
-        return x
 
 
 class LinearRegressionCore(DecisionCore):
@@ -213,7 +173,7 @@ class LinearRegressionCore(DecisionCore):
 
         # Optional step 1.1: load data from previous sessions
         if (trace_back := trace_back if trace_back is not None else self.calibration_params.trace_back) > 0:
-            from ..Backtest.factor_pool import FACTOR_POOL
+            from Quark.Backtest.factor_pool import FACTOR_POOL
 
             caches = FACTOR_POOL.locate_caches(market_date=kwargs.get('market_date'), size=int(trace_back), exclude_current=True)
 
@@ -735,89 +695,4 @@ class LogLinearCore(LinearDecodingCore):
         return prediction
 
 
-class RidgeLinearCore(LinearRegressionCore, Scaler):
-    def __init__(self, ticker: str, **kwargs):
-        self.alpha = kwargs.get('ridge_alpha', 1)
-
-        super().__init__(ticker=ticker, **kwargs)
-        Scaler.__init__(self)
-
-        self.pred_cutoff = 0.01
-
-    def to_json(self, fmt='dict') -> dict | str:
-        json_dict = super().to_json(fmt='dict')
-
-        if self.scaler is not None:
-            json_dict['scaler'] = self.scaler.to_dict()
-
-        if fmt == 'dict':
-            return json_dict
-        else:
-            return json.dumps(json_dict)
-
-    @classmethod
-    def from_json(cls, json_str: str | bytes | dict):
-        if isinstance(json_str, (str, bytes)):
-            json_dict = json.loads(json_str)
-        elif isinstance(json_str, dict):
-            json_dict = json_str
-        else:
-            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
-
-        self = super().from_json(json_dict)
-
-        if 'scaler' in json_dict:
-            self.scaler = pd.DataFrame(json_dict['scaler'])
-
-        return self
-
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame, input_cols: list[str] = None):
-        self.standardization_scaler(x)
-        x = self.transform(x)
-        return super().fit(x=x, y=y, input_cols=input_cols)
-
-    def _fit(self, x: np.ndarray, y: np.ndarray):
-        x = x.astype(np.float64)
-        y = y.astype(np.float64)
-
-        x_transpose = x.T
-        xtx = np.dot(x_transpose, x)
-        xty = np.dot(x_transpose, y)
-        identity_matrix = np.identity(x.shape[1])  # or np.identity(len(xtx))
-        regularization_term = self.alpha * identity_matrix
-        xtx_plus_reg = xtx + regularization_term
-        xtx_inv = np.linalg.inv(xtx_plus_reg)
-        coefficients = np.dot(xtx_inv, xty)
-        residuals = y - np.dot(x, coefficients)
-        mse = np.mean(residuals ** 2, axis=0)
-
-        return coefficients, mse
-
-    def _pred(self, x: np.ndarray | pd.DataFrame | dict[str, float]) -> np.ndarray | dict[str, float]:
-        x = self.transform(x)
-        return super()._pred(x=x)
-
-
-class RidgeDecodingCore(LogLinearCore, RidgeLinearCore):
-    def __init__(self, ticker: str, **kwargs):
-        super(LogLinearCore, self).__init__(ticker=ticker, **kwargs)
-        super(RidgeLinearCore, self).__init__(ticker=ticker, **kwargs)
-
-    def to_json(self, fmt='dict') -> dict | str:
-        return super(RidgeLinearCore, self).to_json(fmt=fmt)
-
-    @classmethod
-    def from_json(cls, json_str: str | bytes | dict):
-        return super(RidgeLinearCore, cls).from_json(json_str=json_str)
-
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame, input_cols: list[str] = None):
-        return super(RidgeLinearCore, self).fit(x=x, y=y, input_cols=input_cols)
-
-    def _fit(self, x: np.ndarray, y: np.ndarray):
-        return super(RidgeLinearCore, self)._fit(x=x, y=y)
-
-    def _pred(self, x: np.ndarray | pd.DataFrame | dict[str, float]) -> np.ndarray | dict[str, float]:
-        return super(RidgeLinearCore, self)._pred(x=x)
-
-
-__all__ = ['LinearRegressionCore', 'LinearDecodingCore', 'LogLinearCore', 'RidgeLinearCore', 'RidgeDecodingCore']
+__all__ = ['LinearRegressionCore', 'LinearDecodingCore', 'LogLinearCore']

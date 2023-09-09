@@ -6,7 +6,6 @@ from .. import LOGGER
 LOGGER = LOGGER.getChild('Strategy')
 
 from .data_core import *
-from .decision_core import *
 from .decoder import *
 from .metric import *
 from .strategy import *
@@ -18,8 +17,6 @@ __all__ = [
     'IndexWeight', 'Synthetic', 'EMA', 'TradeFlowMonitor', 'TradeFlowEMAMonitor', 'CoherenceMonitor', 'CoherenceEMAMonitor', 'TradeCoherenceMonitor',
     'SyntheticIndexMonitor', 'MACDMonitor', 'AggressivenessMonitor', 'AggressivenessEMAMonitor', 'EntropyMonitor', 'EntropyEMAMonitor',
     'VolatilityMonitor', 'DecoderMonitor', 'IndexDecoderMonitor', 'register_monitor',
-    # names from .decision_core
-    'DecisionCore', 'DummyDecisionCore',
     # names from .decoder
     'WaveletFlag', 'Wavelet', 'Decoder', 'OnlineDecoder', 'RecursiveDecoder',
     # names from .metric

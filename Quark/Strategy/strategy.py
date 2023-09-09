@@ -5,11 +5,11 @@ from types import SimpleNamespace
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TransactionSide, TradeInstruction, OrderState
 
-from .decision_core import DummyDecisionCore
 from . import STRATEGY_ENGINE
 from .data_core import IndexWeight
 from .metric import StrategyMetric
 from ..Base import CONFIG
+from ..DecisionCore import DummyDecisionCore
 
 
 class StrategyStatus(enum.Enum):

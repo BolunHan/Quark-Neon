@@ -16,11 +16,11 @@ sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
 from . import LOGGER, simulated_env, factor_pool
 from ..Base import GlobalStatics
-from ..Calibration.linear import *
+from ..DecisionCore.Linear import *
 from ..Strategy import StrategyMetric
 
 DATA_SOURCE = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res')
-DATA_CORE = RidgeDecodingCore(ticker='Synthetic', ridge_alpha=100, pred_length=30 * 60, smooth_look_back=0)
+DATA_CORE = RidgeLinearCore(ticker='Synthetic', ridge_alpha=100, pred_length=30 * 60, smooth_look_back=0)
 EXPORT_DIR = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'{DATA_CORE.__class__.__name__}')
 
 START_DATE = datetime.date(2023, 1, 1)
