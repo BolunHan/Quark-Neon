@@ -1,7 +1,3 @@
-from .. import LOGGER
-
-__all__ = ['LOGGER']
-
 import abc
 import json
 import os.path
@@ -9,6 +5,8 @@ import pathlib
 import re
 
 from AlgoEngine.Engine import PositionManagementService
+
+from .. import LOGGER
 
 LOGGER = LOGGER.getChild('DecisionCore')
 
@@ -113,4 +111,4 @@ class DummyDecisionCore(DecisionCore):
         return True
 
 
-__all__ = ['DecisionCore', 'DummyDecisionCore']
+__all__ = ['DecisionCore', 'DummyDecisionCore', 'LOGGER']
