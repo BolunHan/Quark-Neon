@@ -109,7 +109,7 @@ class BootstrapLinearRegression:
             coefficient = np.linalg.lstsq(x_sampled, y_sampled, rcond=None)[0]
             self.bootstrap_coefficients.append(coefficient)
 
-    def predict(self, x, alpha=0.05):
+    def predict(self, x: list | np.ndarray, alpha=0.05):
         """
         Make predictions with prediction intervals.
 
@@ -118,30 +118,37 @@ class BootstrapLinearRegression:
             alpha (float): Significance level for the prediction interval.
 
         Returns:
-            Tuple(numpy.ndarray, numpy.ndarray): Predicted values and prediction interval.
+            Tuple(numpy.ndarray, numpy.ndarray, numpy.ndarray): Predicted values, prediction interval, and bootstrap residuals.
         """
-        # For single input, X might be a 1D array
-        if len(x.shape) == 1:
-            x = x.reshape(1, -1)
+        x = np.array(x)
 
         # Compute mean predictions and intervals for all input sets
         y_pred = np.dot(x, self.coefficient)
 
         if not self.bootstrap_coefficients:
-            return y_pred, []
+            return y_pred, None, None, np.nan
 
-        residuals = []
+        bootstrap_residuals = []
         for bootstrap_coefficient in self.bootstrap_coefficients:
             y_bootstrap = np.dot(x, bootstrap_coefficient)
             residual = y_bootstrap - y_pred
-            residuals.append(residual)
+            bootstrap_residuals.append(residual)
 
-        residuals = np.array(residuals)
-        lower_bound = np.quantile(residuals, alpha / 2, axis=0)
-        upper_bound = np.quantile(residuals, 1 - alpha / 2, axis=0)
+        bootstrap_residuals = np.array(bootstrap_residuals).T
+
+        # For single input, X might be a 1D array
+        if len(x.shape) == 1:
+            lower_bound = np.quantile(bootstrap_residuals, alpha / 2)
+            upper_bound = np.quantile(bootstrap_residuals, 1 - alpha / 2)
+            variance = np.var(bootstrap_residuals)
+        else:
+            lower_bound = np.quantile(bootstrap_residuals, alpha / 2, axis=1)
+            upper_bound = np.quantile(bootstrap_residuals, 1 - alpha / 2, axis=1)
+            variance = np.var(bootstrap_residuals, axis=1, ddof=1)
+
         interval = np.array([lower_bound, upper_bound]).T
 
-        return y_pred, interval
+        return y_pred, interval, bootstrap_residuals, variance
 
     def plot(self, x, y, x_axis, alpha=0.05, **kwargs):
         """
@@ -163,39 +170,69 @@ class BootstrapLinearRegression:
             plotly.graph_objects.Figure: Plotly figure object.
         """
 
-        y_pred, interval = self.predict(x, alpha)
+        y_pred, interval, _, variance = self.predict(x, alpha)
 
         fig = go.Figure()
 
         # Scatter plot for data
-        fig.add_trace(go.Scatter(x=x_axis, y=y, mode='markers', name=kwargs.get('data_name', "Data")))
+        fig.add_trace(
+            go.Scatter(
+                x=x_axis,
+                y=y,
+                mode='markers',
+                name=kwargs.get('data_name', "Data"),
+                yaxis='y1'
+            )
+        )
 
         # Line plot for fitted line
-        fig.add_trace(go.Scatter(x=x_axis, y=y_pred, mode='lines', name=kwargs.get('model_name', "Fitted Line"), line=dict(color='red')))
+        fig.add_trace(
+            go.Scatter(
+                x=x_axis,
+                y=y_pred,
+                mode='lines',
+                name=kwargs.get('model_name', "Fitted Line"),
+                line=dict(color='red'),
+                yaxis='y1'
+            )
+        )
 
         # Fill the area between the prediction intervals
         if self.bootstrap_coefficients:
             fig.add_trace(
                 go.Scatter(
-                    name=f'{alpha:.2%} Upper Bound',
+                    name=f'Upper Bound',
                     x=x_axis,
                     y=y_pred + interval[:, 1],
                     mode='lines',
                     line=dict(color='red', dash='dash'),
-                    showlegend=False
+                    showlegend=False,
+                    yaxis='y1'
                 )
             )
 
             fig.add_trace(
                 go.Scatter(
-                    name=f'{alpha:.2%} Lower Bound',
+                    name=f'Lower Bound',
                     x=x_axis,
                     y=y_pred + interval[:, 0],
                     line=dict(color='red', dash='dash'),
                     mode='lines',
                     fillcolor='rgba(255,0,0,0.3)',
                     fill='tonexty',
-                    showlegend=False
+                    showlegend=False,
+                    yaxis='y1'
+                )
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=x_axis,
+                    y=np.sqrt(variance),
+                    mode='lines',
+                    name="Estimated Variance",
+                    line=dict(color='blue'),
+                    yaxis='y2'  # Use the secondary y-axis
                 )
             )
 
@@ -205,6 +242,16 @@ class BootstrapLinearRegression:
             xaxis_title=kwargs.get('x_name', "Index"),
             yaxis_title=kwargs.get('y_name', "Y"),
             hovermode="x unified",  # Enable hover for the x-axis
+            template='simple_white',
+            yaxis=dict(
+                showspikes=True
+            ),
+            yaxis2=dict(
+                title="Variance",
+                overlaying='y',
+                side='right',
+                showgrid=False
+            )
         )
 
         return fig
