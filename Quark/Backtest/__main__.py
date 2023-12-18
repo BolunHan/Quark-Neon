@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import time
+import traceback
 import uuid
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
@@ -14,9 +15,10 @@ from . import factor_pool
 from . import simulated_env
 from ..API import historical
 from ..Base import GlobalStatics
-from ..DecisionCore.Linear import LinearDecodingCore as Core
+from ..DecisionCore.Linear import LinearDecisionCore as Core
 from ..Misc import helper
-from ..Strategy import SyntheticIndexMonitor, VolatilityMonitor, MDS, Strategy
+from ..Factor import SyntheticIndexMonitor, VolatilityMonitor
+from ..Strategy import Strategy, MDS
 
 # params
 INDEX_NAME = '000016.SH'
@@ -96,7 +98,6 @@ def bod(market_date: datetime.date, **kwargs):
     if factor_existed and not OVERRIDE_FACTOR_CACHE:
         LOGGER.info(f'FACTOR_POOL loaded factors {factor_existed}, using local caches!')
         factor_tasks = [_ for _ in FACTORS if _ not in factor_existed]
-
     else:
         factor_tasks = FACTORS
 
@@ -165,12 +166,15 @@ def bod(market_date: datetime.date, **kwargs):
 
     # startup task 3: initialize decision core
     if not DUMMY_CORE:
-        STRATEGY.decision_core = Core(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
-    try:
-        STRATEGY.decision_core.load(file_dir=dump_dir, file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json')
-    except Exception as _:
-        # STRATEGY.decision_core = DummyDecisionCore()  # in production mode, just throw the error and stop the program
-        LOGGER.warning(f'{market_date} failed to load decision core!')
+        if not IS_INITIALIZED:
+            STRATEGY.decision_core = Core(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
+        else:
+            try:
+                # the decision core is not available in backtest env, for the index tick data is not found.
+                STRATEGY.decision_core = STRATEGY.decision_core.load(file_dir=dump_dir, file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json')
+            except Exception as _:
+                # STRATEGY.decision_core = DummyDecisionCore()  # in production mode, just throw the error and stop the program
+                LOGGER.warning(f'{market_date} failed to load decision core! traceback: {traceback.format_exc()}')
 
     # backtest-specific codes
     if not IS_INITIALIZED:

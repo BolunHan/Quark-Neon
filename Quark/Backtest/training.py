@@ -20,7 +20,8 @@ from ..DecisionCore.Linear import *
 from ..Strategy import StrategyMetric
 
 DATA_SOURCE = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res')
-DATA_CORE = RidgeLinearCore(ticker='Synthetic', ridge_alpha=100, pred_length=30 * 60, smooth_look_back=0)
+DECISION_CORE = LinearDecisionCore(ticker='Synthetic', ridge_alpha=100, pred_length=30 * 60, smooth_look_back=0)
+DATA_CORE = DECISION_CORE.data_lore
 EXPORT_DIR = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'{DATA_CORE.__class__.__name__}')
 
 START_DATE = datetime.date(2023, 1, 1)
@@ -174,7 +175,7 @@ def metric_signal(market_date: datetime.date, fake_trades: bool = True):
             continue
 
         index_price = strategy_metric.last_assets_price = row['SyntheticIndex.Price']
-        signal = DATA_CORE.signal(position=position_tracker, factor=row.to_dict(), timestamp=timestamp)
+        signal = DECISION_CORE.signal(position=position_tracker, factor=row.to_dict(), timestamp=timestamp)
         strategy_metric.collect_signal(signal=signal, timestamp=timestamp)
 
         if fake_trades and signal:
@@ -228,10 +229,12 @@ def annotate_signals(fig, strategy_metric):
     if not metrics_df.empty:
         metrics_df = metrics_df.loc[metrics_df['signal'] != 0]
         metrics_df['signal_time'] = [datetime.datetime.fromtimestamp(_) for _ in metrics_df.index]
-        formatted_df = metrics_df.applymap(lambda x:
-                                           f"{x:.3f}" if isinstance(x, float) else
-                                           f"{x:%H:%M:%S}" if isinstance(x, datetime.datetime) else
-                                           x)
+        formatted_df = metrics_df.map(
+            lambda x:
+            f"{x:.3f}" if isinstance(x, float) else
+            f"{x:%H:%M:%S}" if isinstance(x, datetime.datetime) else
+            x
+        )
         table = go.Table(
             header=dict(values=list(formatted_df.columns)),
             cells=dict(values=[formatted_df[col] for col in formatted_df.columns])

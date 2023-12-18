@@ -216,6 +216,11 @@ class FactorPool(object):
 
 
 class FactorPoolDummyMonitor(MarketDataMonitor):
+    """
+    query factor value from local storage, by given timestamp
+
+    Note: the factor value may have some missing values
+    """
     def __init__(self, factor_pool: FactorPool = None):
         super().__init__(name='Monitor.FactorPool.Dummy', mds=MDS)
 
