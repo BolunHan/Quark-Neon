@@ -6,10 +6,10 @@ from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TransactionSide, TradeInstruction, OrderState
 
 from . import STRATEGY_ENGINE
-from .data_core import IndexWeight
 from .metric import StrategyMetric
 from ..Base import CONFIG
 from ..DecisionCore import DummyDecisionCore
+from ..Factor import IndexWeight
 
 
 class StrategyStatus(enum.Enum):
@@ -57,7 +57,7 @@ class Strategy(object):
         return ticker
 
     def register(self, **kwargs):
-        from .data_core import register_monitor
+        from ..Factor import register_monitor
         self.engine.multi_threading = False
         self.monitors.update(register_monitor(index_name=self.index_ticker, index_weights=self.index_weights, factors=kwargs.get('factors')))
 
