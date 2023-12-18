@@ -1,3 +1,9 @@
+# Core function
 PyQuantKit
 pandas
 numpy
+
+# for back test
+py7zr  # historical data api
+baostock  # minute bar data api
+plotly  # plotting support
