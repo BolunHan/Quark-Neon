@@ -3,8 +3,8 @@ from .Base import GlobalStatics
 import pathlib
 from .Strategy.strategy import Strategy, StrategyStatus
 from .Misc import helper
-from .Strategy.data_core import *
-from .Calibration.linear import LinearCore
+from .Factor import *
+from .DecisionCore.Linear import LinearDecisionCore as DecisionCore
 
 MARKET_DATE = datetime.date.today()
 INDEX_NAME = '000016.SH'
@@ -26,7 +26,7 @@ def init_strategy(index_weights: dict[str, float]):
 
     # startup task 3: initialize decision core
     try:
-        STRATEGY.decision_core = LinearCore(ticker=INDEX_NAME, decode_level=3)
+        STRATEGY.decision_core = DecisionCore(ticker=INDEX_NAME, decode_level=3)
         STRATEGY.decision_core.load(file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'decision_core.{MARKET_DATE:%Y%m%d}.json'))
     except Exception as _:
         LOGGER.warning('decision core not loaded, using dummy core!')

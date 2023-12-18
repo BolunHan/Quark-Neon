@@ -1,3 +1,4 @@
+import abc
 import datetime
 import json
 import os
@@ -7,12 +8,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
-from AlgoEngine.Engine import PositionManagementService
 
 from . import LOGGER
-from .. import DecisionCore
 from ...Base import GlobalStatics
-from ...Strategy import RecursiveDecoder, StrategyMetric
+from ...Strategy import StrategyMetric
+from .bootstrap import BootstrapLinearRegression
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
 
@@ -51,7 +51,33 @@ def fix_prediction_target(factors: pd.DataFrame, pred_length: float) -> pd.Serie
     return pd.Series(target).astype(float)
 
 
-class LinearLore(object):
+class DataLore(object, metaclass=abc.ABCMeta):
+
+    @abc.abstractmethod
+    def calibrate(self, factors: pd.DataFrame | dict[str, list[float] | np.ndarray], **kwargs): ...
+
+    @abc.abstractmethod
+    def predict(self, factors: dict[str, float], **kwargs): ...
+
+    @abc.abstractmethod
+    def predict_batch(self, factors: pd.DataFrame | dict[str, list[float] | np.ndarray], **kwargs): ...
+
+    @abc.abstractmethod
+    def clear(self): ...
+
+    @abc.abstractmethod
+    def to_json(self, fmt='dict') -> dict | str: ...
+
+    @classmethod
+    @abc.abstractmethod
+    def from_json(cls, json_str: str | bytes | dict): ...
+
+    @property
+    def is_ready(self):
+        return True
+
+
+class LinearLore(DataLore):
     """
     Linear Data Lore
 
@@ -73,6 +99,8 @@ class LinearLore(object):
         self.pred_var = ['pct_chg']
         self.coefficients: pd.DataFrame | None = None
 
+        self.model = {_: BootstrapLinearRegression(bootstrap_samples=kwargs.get('bootstrap_samples', 100), bootstrap_block_size=kwargs.get('bootstrap_samples', 0.05)) for _ in self.pred_var}
+
     def __str__(self):
         return f'Lore.Linear.{self.ticker}'
 
@@ -85,7 +113,8 @@ class LinearLore(object):
                 trace_back=self.calibration_params.trace_back,
                 pred_length=self.calibration_params.pred_length
             ),
-            coefficients=self.coefficients.to_dict() if self.coefficients is not None else None
+            coefficients=self.coefficients.to_dict() if self.coefficients is not None else None,
+            model={_: self.model[_].to_json(fmt='dict') for _ in self.model}
         )
 
         if fmt == 'dict':
@@ -110,9 +139,9 @@ class LinearLore(object):
         self.pred_var.clear()
         self.pred_var.extend(json_dict['pred_var'])
 
-        self.data_source = pathlib.Path(json_dict['data_source'])
         self.calibration_params.trace_back = json_dict['calibration_params']['trace_back']
         self.calibration_params.pred_length = json_dict['calibration_params']['pred_length']
+        self.model.update({key: BootstrapLinearRegression.from_json(value) for key, value in json_dict['model'].items()})
 
         if json_dict['coefficients']:
             self.coefficients = pd.DataFrame(json_dict['coefficients'])
@@ -179,14 +208,14 @@ class LinearLore(object):
     def clear(self):
         self.coefficients = None
 
-    def predict(self, factor: dict[str, float], timestamp: float) -> dict[str, float]:
-        self.session_dummies(timestamp=timestamp, inplace=factor)
-        x = {_: factor[_] for _ in self.inputs_var}  # to ensure the order of input data
+    def predict(self, factor: dict[str, float], **kwargs) -> dict[str, float]:
+        self.session_dummies(timestamp=kwargs.get('timestamp', time.time()), inplace=factor)
+        x = {_: factor.get(_, kwargs.get('replace_nan', np.nan)) for _ in self.inputs_var}  # to ensure the order of input data
         x = self._generate_x_features(x)
         prediction = self._pred(x=x)
         return prediction
 
-    def predict_batch(self, factor: pd.DataFrame):
+    def predict_batch(self, factor: pd.DataFrame, **kwargs):
         x = self._generate_x_features(factor)
 
         # Perform the prediction using the regression coefficients
@@ -194,29 +223,19 @@ class LinearLore(object):
 
         return pd.DataFrame(prediction, columns=self.pred_var, index=x.index)
 
-    def _pred(self, x: np.ndarray | pd.DataFrame | dict[str, float]) -> np.ndarray | dict[str, float]:
+    def _pred(self, x: np.ndarray | pd.DataFrame | dict[str, float]) -> np.ndarray | pd.DataFrame | dict[str, float]:
         if isinstance(x, np.ndarray):
-            prediction = np.dot(x, self.coefficients)
+            predictions = np.ndarray([self.model[key].predict(x)[0] for key in self.pred_var])
         elif isinstance(x, pd.DataFrame):
-            prediction = pd.DataFrame(data=0., index=x.index, columns=self.pred_var)
-            for pred_name in self.pred_var:
-                for var_name in self.coefficients.index:
-                    prediction[pred_name] += x[var_name] * self.coefficients.at[var_name, pred_name]
+            x_rearranged = np.array([x[_] for _ in self.coefficients.index]).T
+            predictions = pd.DataFrame({key: self.model[key].predict(x_rearranged)[0] for key in self.pred_var})
         elif isinstance(x, dict):
-            prediction = {_: 0. for _ in self.pred_var}
-
-            for pred_name in self.pred_var:
-                coefficient = self.coefficients[pred_name]
-                for var_name in x:
-
-                    if var_name not in coefficient.index:
-                        continue
-
-                    prediction[pred_name] += coefficient[var_name] * x[var_name]
+            x_rearranged = np.array([x[_] for _ in self.coefficients.index]).T
+            predictions = {key: self.model[key].predict(x_rearranged)[0] for key in self.pred_var}
         else:
             raise TypeError(f'Invalid x type {type(x)}')
 
-        return prediction
+        return predictions
 
     def _prepare(self, factors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
@@ -257,13 +276,25 @@ class LinearLore(object):
 
         if isinstance(y, pd.DataFrame):
             y = y.to_numpy()
+
         coefficients, residuals = self._fit(x=x, y=y)
         self.coefficients = pd.DataFrame(data=coefficients, columns=self.pred_var, index=input_cols)
         return self.coefficients, residuals
 
     def _fit(self, x: np.ndarray, y: np.ndarray):
-        coefficients, residuals, *_ = np.linalg.lstsq(x, y, rcond=None)
-        return coefficients, residuals
+        coefficients = []
+        residuals = []
+
+        # Fit BootstrapLinearRegression models for each prediction target
+
+        for i, pred_name in zip(range(len(self.pred_var)), self.pred_var):
+            model = self.model[pred_name]
+            coefficient, residual = model.fit(x, y.T[i], use_bootstrap=True, method='block')
+
+            coefficients.append(coefficient)
+            residuals.append(residual)
+
+        return np.array(coefficients).T, np.array(residuals).T
 
     @classmethod
     def session_dummies(cls, timestamp: float | list[float], inplace: dict[str, float | list[float]] | pd.DataFrame = None):

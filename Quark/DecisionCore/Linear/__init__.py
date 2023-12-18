@@ -46,9 +46,7 @@ class Scaler(object):
 
 
 from .linear import *
-from .ridge import *
+# from .ridge import *
 from .kelly import *
 
-__all__ = ['LOGGER',
-           'LinearRegressionCore', 'LinearDecodingCore', 'LogLinearCore',
-           'RidgeLinearCore', 'RidgeDecodingCore']
+__all__ = ['LOGGER', 'LinearDecisionCore']

@@ -1,6 +1,6 @@
 import json
+
 import numpy as np
-import plotly.graph_objects as go
 
 
 class BootstrapLinearRegression:
@@ -56,7 +56,7 @@ class BootstrapLinearRegression:
         Returns:
             None
         """
-        self.coefficient = np.linalg.lstsq(x, y, rcond=None)[0]
+        coefficient, residuals, *_ = np.linalg.lstsq(x, y, rcond=None)
 
         if use_bootstrap:
             if method == 'standard':
@@ -65,6 +65,10 @@ class BootstrapLinearRegression:
                 self.bootstrap_block(x, y)
             else:
                 raise ValueError("Invalid bootstrap method. Use 'standard' or 'block'.")
+
+        self.coefficient = coefficient
+
+        return coefficient, residuals
 
     def bootstrap_standard(self, x, y):
         """
@@ -169,6 +173,7 @@ class BootstrapLinearRegression:
         Returns:
             plotly.graph_objects.Figure: Plotly figure object.
         """
+        import plotly.graph_objects as go
 
         y_pred, interval, _, variance = self.predict(x, alpha)
 

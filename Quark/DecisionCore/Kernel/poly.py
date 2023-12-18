@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 
-def poly_features(data: pd.DataFrame | dict[str, list | np.ndarray], degree: int = 3):
+def poly_features(data: pd.DataFrame | dict[str, list | np.ndarray], degree: int = 3) -> dict[str, np.ndarray]:
     names = data.keys()
 
     for _ in names:
