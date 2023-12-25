@@ -2,7 +2,7 @@ from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData
 
 from .. import MDS, Synthetic
-from ...Strategy.decoder import OnlineDecoder, Wavelet
+from ..decoder import OnlineDecoder, Wavelet
 
 
 class DecoderMonitor(MarketDataMonitor, OnlineDecoder):

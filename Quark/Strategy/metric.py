@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 from AlgoEngine.Engine import MarketDataMonitor
 
-from .decoder import Wavelet
 from ..Base import GlobalStatics
+from ..Factor.decoder import Wavelet
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
 

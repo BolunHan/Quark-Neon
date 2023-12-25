@@ -11,6 +11,7 @@ from . import LOGGER
 from ..Base import GlobalStatics
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
+LOGGER = LOGGER.getChild('Decoder')
 
 
 class WaveletFlag(enum.Enum):

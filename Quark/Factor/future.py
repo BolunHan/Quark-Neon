@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from . import LOGGER, TIME_ZONE
-from ..Strategy.decoder import RecursiveDecoder
+from .decoder import RecursiveDecoder
 
 LOGGER = LOGGER.getChild('future')
 
