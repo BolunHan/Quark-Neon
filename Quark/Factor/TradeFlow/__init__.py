@@ -9,3 +9,5 @@ add_monitor(TradeFlowEMAMonitor(discount_interval=1, alpha=ALPHA_05, weights=IND
 
 add_monitor(AggressivenessMonitor(), monitors=MONITOR, register=False)
 add_monitor(AggressivenessEMAMonitor(discount_interval=1, alpha=ALPHA_0001, weights=INDEX_WEIGHTS), monitors=MONITOR, register=False)
+
+__all__ = ['AggressivenessMonitor', 'AggressivenessEMAMonitor', 'TradeFlowMonitor', 'TradeFlowEMAMonitor']
