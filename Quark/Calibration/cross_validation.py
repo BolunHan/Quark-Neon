@@ -2,17 +2,19 @@ import numpy as np
 
 
 class CrossValidation:
-    def __init__(self, model, folds=5, shuffle=True, **kwargs):
+    def __init__(self, model, folds=5, strict_no_future: bool = True, shuffle: bool = True, **kwargs):
         """
         Initialize the CrossValidation object.
 
         Args:
             model: Regression model object (e.g., BootstrapLinearRegression).
             folds (int): Number of folds for cross-validation.
-            shuffle (bool): Whether to use random data split or not.
+            strict_no_future (bool): training data must be prier to ALL the validation data
+            shuffle (bool): shuffle the training and validation index
         """
         self.model = model
         self.folds = folds
+        self.strict_no_future = strict_no_future
         self.shuffle = shuffle
 
         self.fit_kwargs = kwargs
@@ -36,6 +38,43 @@ class CrossValidation:
         mse = np.mean(residuals ** 2)
         return mse, residuals, prediction_interval
 
+    @classmethod
+    def _select_data(cls, x: np.ndarray, y: np.ndarray, indices: np.ndarray, fold: int, n_folds: int, shuffle: bool = False):
+        n = len(x)
+        start_idx = n // n_folds * fold
+        end_idx = n // n_folds * (fold + 1) if fold < n_folds - 1 else n
+
+        val_indices = indices[start_idx:end_idx].copy()
+        train_indices = np.setdiff1d(indices, val_indices).copy()
+
+        if shuffle:
+            np.random.shuffle(val_indices)
+            np.random.shuffle(train_indices)
+
+        x_train, y_train, x_val, y_val = x[train_indices], y[train_indices], x[val_indices], y[val_indices]
+
+        return x_train, y_train, x_val, y_val, val_indices
+
+    @classmethod
+    def _select_data_sequential(cls, x: np.ndarray, y: np.ndarray, indices: np.ndarray, fold: int, n_folds: int, shuffle: bool = False):
+        n = len(x)
+        if fold == 0:
+            start_idx = n // (n_folds * 2)
+            end_idx = n // n_folds
+        else:
+            start_idx = n // n_folds * fold
+            end_idx = n // n_folds * (fold + 1) if fold < n_folds - 1 else n
+
+        train_indices = indices[0: start_idx].copy()
+        val_indices = indices[start_idx:end_idx].copy()
+
+        if shuffle:
+            np.random.shuffle(val_indices)
+            np.random.shuffle(train_indices)
+
+        x_train, y_train, x_val, y_val = x[train_indices], y[train_indices], x[val_indices], y[val_indices]
+        return x_train, y_train, x_val, y_val, val_indices
+
     def validate(self, x: np.ndarray, y: np.ndarray):
         """
         Perform cross-validation and store the results in the metrics attribute.
@@ -50,17 +89,16 @@ class CrossValidation:
         n = len(x)
         indices = np.arange(n)
 
-        if self.shuffle:
+        if not self.strict_no_future:
             np.random.shuffle(indices)
 
         fold_metrics = {'mse': [], 'residuals': [], 'y_actual': [], 'y_pred': [], 'index': [], 'prediction_interval': []}
 
         for fold in range(self.folds):
-            start_idx = n // self.folds * fold
-            end_idx = n // self.folds * (fold + 1) if fold < self.folds - 1 else n
-            val_indices = indices[start_idx:end_idx]
-            train_indices = np.setdiff1d(indices, val_indices)
-            x_train, y_train, x_val, y_val = x[train_indices], y[train_indices], x[val_indices], y[val_indices]
+            if self.strict_no_future:
+                x_train, y_train, x_val, y_val, val_indices = self._select_data_sequential(x=x, y=y, indices=indices, fold=fold, n_folds=self.folds, shuffle=self.shuffle)
+            else:
+                x_train, y_train, x_val, y_val, val_indices = self._select_data(x=x, y=y, indices=indices, fold=fold, n_folds=self.folds, shuffle=self.shuffle)
 
             self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
 
