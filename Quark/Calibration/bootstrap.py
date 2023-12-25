@@ -2,8 +2,10 @@ import json
 
 import numpy as np
 
+from . import Regression
 
-class BootstrapLinearRegression:
+
+class BootstrapLinearRegression(Regression):
     """
     BootstrapLinearRegression class for performing linear regression with bootstrapping.
 
