@@ -113,6 +113,10 @@ class CoherenceMonitor(MarketDataMonitor):
 
         return self.regression(y=y, x=x)
 
+    def clear(self):
+        self._historical_price.clear()
+        self._price_change_pct.clear()
+
     @property
     def value(self) -> tuple[float, float]:
         up_dispersion = self.collect_dispersion(side=1)
@@ -149,6 +153,10 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
         if self.last_update + self.update_interval < timestamp:
             _ = self.value
             self.last_update = timestamp // self.update_interval * self.update_interval
+
+    def clear(self):
+        super().clear()
+        EMA.clear(self)
 
     @property
     def value(self) -> tuple[float, float, float]:

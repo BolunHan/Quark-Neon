@@ -139,6 +139,10 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
             _ = self.value
             self.last_update = timestamp // self.update_interval * self.update_interval
 
+    def clear(self):
+        super().clear()
+        EMA.clear(self)
+
     @property
     def value(self) -> float:
         entropy = super().value

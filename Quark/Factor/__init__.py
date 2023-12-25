@@ -186,6 +186,13 @@ class EMA(metaclass=abc.ABCMeta):
         for _ in self._check_discontinuity(timestamp=timestamp, tolerance=1):
             self._discount_ema(ticker=_, timestamp=timestamp)
 
+    def clear(self):
+        self._last_discount_ts.clear()
+        self._history.clear()
+        self._current.clear()
+        self._window.clear()
+        self.ema.clear()
+
 
 class Synthetic(metaclass=abc.ABCMeta):
     def __init__(self, weights: dict[str, float]):
@@ -218,6 +225,10 @@ class Synthetic(metaclass=abc.ABCMeta):
 
         self.last_price[ticker] = market_price
 
+    def clear(self):
+        self.base_price.clear()
+        self.last_price.clear()
+
     @property
     def synthetic_index(self):
         price_list = []
@@ -242,6 +253,7 @@ class Synthetic(metaclass=abc.ABCMeta):
 def add_monitor(monitor: MarketDataMonitor, **kwargs) -> dict[str, MarketDataMonitor]:
     monitors = kwargs.get('monitors', {})
     factors = kwargs.get('factors', None)
+    register = kwargs.get('register', True)
 
     if factors is None:
         is_pass_check = True
@@ -254,7 +266,9 @@ def add_monitor(monitor: MarketDataMonitor, **kwargs) -> dict[str, MarketDataMon
 
     if is_pass_check:
         monitors[monitor.name] = monitor
-        MDS.add_monitor(monitor)
+
+        if register:
+            MDS.add_monitor(monitor)
 
     return monitors
 

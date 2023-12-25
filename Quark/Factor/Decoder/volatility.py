@@ -19,6 +19,11 @@ class VolatilityMonitor(MarketDataMonitor, Synthetic):
     def __call__(self, market_data: MarketData, **kwargs):
         self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
 
+    def clear(self):
+        self.daily_volatility.clear()
+        self.index_volatility = np.nan
+        Synthetic.clear(self)
+
     @property
     def value(self) -> dict[str, float]:
         volatility_adjusted = {}

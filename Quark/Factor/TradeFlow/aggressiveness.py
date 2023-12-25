@@ -87,6 +87,12 @@ class AggressivenessMonitor(MarketDataMonitor):
         else:
             self._aggressive_sell[ticker] = self._aggressive_sell.get(ticker, 0.) + volume
 
+    def clear(self):
+        self._last_update.clear()
+        self._trade_price.clear()
+        self._aggressive_buy.clear()
+        self._aggressive_sell.clear()
+
     @property
     def value(self) -> tuple[dict[str, float], dict[str, float]]:
         return self._aggressive_buy, self._aggressive_sell
@@ -146,6 +152,11 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         self._discount_all(timestamp=timestamp)
 
         return super().__call__(market_data=market_data, **kwargs)
+
+    def clear(self):
+        super().clear()
+        EMA.clear(self)
+        Synthetic.clear(self)
 
     @property
     def value(self) -> tuple[dict[str, float], dict[str, float]]:

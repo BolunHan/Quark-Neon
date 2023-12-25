@@ -10,45 +10,12 @@ import numpy as np
 import pandas as pd
 
 from . import LOGGER
-from ...Base import GlobalStatics
-from ...Strategy import StrategyMetric
 from .bootstrap import BootstrapLinearRegression
+from ...Base import GlobalStatics
+from ...Factor.validation import fix_prediction_target
+from ...Strategy import StrategyMetric
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
-
-
-def fix_prediction_target(factors: pd.DataFrame, pred_length: float) -> pd.Series:
-    """
-    Given a factor dataframe (StrategyMetric.info), return the prediction target, with fixed prediction length.
-
-    This function does not take the market (session) breaks into account, as intended.
-    And may return a series with Nan values.
-    """
-    target = dict()
-    for ts, row in factors.iterrows():  # type: float, dict
-        t0 = ts
-        t1 = ts + pred_length
-
-        closest_index = None
-        for index in factors.index:
-            if index >= t1:
-                closest_index = index
-                break
-
-        if closest_index is None:
-            continue
-
-        # Find the closest index greater or equal to ts + window
-        closest_index = factors.index[factors.index >= t1].min()
-
-        # Get the prices at ts and ts + window
-        p0 = row['SyntheticIndex.Price']
-        p1 = factors.at[closest_index, 'SyntheticIndex.Price']
-
-        # Calculate the percentage change and assign it to the 'pct_chg' column
-        target[t0] = (p1 / p0) - 1
-
-    return pd.Series(target).astype(float)
 
 
 class DataLore(object, metaclass=abc.ABCMeta):
@@ -242,8 +209,10 @@ class LinearLore(DataLore):
         # step 1: generating prediction target (y)
         factors['pct_chg'] = fix_prediction_target(
             factors=factors,
-            pred_length=self.calibration_params.pred_length
-        )
+            pred_length=self.calibration_params.pred_length,
+            key='SyntheticIndex.Price',
+            inplace=False
+        )['pct_change']
 
         # step 2: assigning session dummies
         self.session_dummies(factors.index, inplace=factors)

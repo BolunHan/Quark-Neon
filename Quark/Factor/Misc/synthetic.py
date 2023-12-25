@@ -63,6 +63,11 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
         bar_data.high_price = max(bar_data.high_price, index_price)
         bar_data.low_price = min(bar_data.low_price, index_price)
 
+    def clear(self):
+        self._active_bar_data = None
+        self._last_bar_data = None
+        self._value.clear()
+
     @property
     def is_ready(self) -> bool:
         if self._last_bar_data is None:

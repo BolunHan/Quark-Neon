@@ -74,6 +74,11 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
 
         super().__call__(market_data=market_data, **kwargs)
 
+    def clear(self):
+        super().clear()
+        EMA.clear(self)
+        Synthetic.clear(self)
+
     @property
     def value(self) -> dict[str, float]:
         if self.normalized:

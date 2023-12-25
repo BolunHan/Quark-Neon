@@ -29,6 +29,9 @@ class DecoderMonitor(MarketDataMonitor, OnlineDecoder):
 
         self.update_decoder(ticker=ticker, market_price=market_price, timestamp=timestamp)
 
+    def clear(self):
+        OnlineDecoder.clear(self)
+
     @property
     def value(self) -> dict[str, list[Wavelet]]:
         return self.state_history
@@ -46,6 +49,10 @@ class IndexDecoderMonitor(DecoderMonitor, Synthetic):
     def __call__(self, market_data: MarketData, **kwargs):
         self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
         self.update_decoder(ticker='synthetic', market_price=self.synthetic_index, timestamp=market_data.timestamp)
+
+    def clear(self):
+        super().clear()
+        Synthetic.clear(self)
 
     @property
     def value(self) -> list[Wavelet]:

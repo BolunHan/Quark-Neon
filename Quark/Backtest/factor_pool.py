@@ -221,6 +221,7 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
 
     Note: the factor value may have some missing values
     """
+
     def __init__(self, factor_pool: FactorPool = None):
         super().__init__(name='Monitor.FactorPool.Dummy', mds=MDS)
 
@@ -230,6 +231,11 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
 
     def __call__(self, market_data: MarketData, **kwargs):
         self.timestamp = market_data.timestamp
+
+    def clear(self) -> None:
+
+        if self.factor_pool is not None:
+            self.factor_pool.clear()
 
     @property
     def value(self) -> dict[str, float]:
