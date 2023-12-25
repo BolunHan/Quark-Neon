@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 
 from . import LOGGER
-from .bootstrap import BootstrapLinearRegression
 from ...Base import GlobalStatics
-from ...Factor.validation import fix_prediction_target
+from ...Calibration.bootstrap import BootstrapLinearRegression
+from ...Factor.future import fix_prediction_target
 from ...Strategy import StrategyMetric
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
