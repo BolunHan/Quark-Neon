@@ -349,7 +349,7 @@ __all__ = [
     # from Decoder module
     'DecoderMonitor', 'IndexDecoderMonitor', 'VolatilityMonitor',
     # from LowPass module
-    'MACDMonitor',
+    'MACDMonitor', 'MACDTriggerMonitor', 'IndexMACDTriggerMonitor',
     # from Misc module
     'SyntheticIndexMonitor',
     # from TradeFlow module

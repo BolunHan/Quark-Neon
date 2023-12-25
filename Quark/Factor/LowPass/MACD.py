@@ -151,9 +151,13 @@ class MACDTriggerMonitor(MarketDataMonitor):
             LOGGER.warning(f'{self.name} should have a positive update_interval')
 
     def __call__(self, market_data: MarketData, **kwargs):
-        ticker = market_data.ticker
-        market_price = market_data.market_price
-        timestamp = market_data.timestamp
+        self._update_macd(
+            ticker=market_data.ticker,
+            market_price=market_data.market_price,
+            timestamp=market_data.timestamp
+        )
+
+    def _update_macd(self, ticker: str, market_price: float, timestamp: float):
 
         if ticker in self._macd:
             macd = self._macd[ticker]
@@ -224,3 +228,19 @@ class MACDTriggerMonitor(MarketDataMonitor):
     @property
     def is_ready(self) -> bool:
         return self._is_ready
+
+
+class IndexMACDTriggerMonitor(MACDTriggerMonitor, Synthetic):
+
+    def __init__(self, weights: dict[str, float], update_interval: float, observation_window: int, confirmation_threshold: float, name: str = 'Monitor.MACD.Index.Trigger', monitor_id: str = None):
+        super().__init__(update_interval=update_interval, observation_window=observation_window, confirmation_threshold=confirmation_threshold, name=name, monitor_id=monitor_id)
+        Synthetic.__init__(self=self, weights=weights)
+
+    def __call__(self, market_data: MarketData, **kwargs):
+        super().__call__(market_data=market_data, **kwargs)
+        self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
+        self._update_macd(ticker='Synthetic', market_price=self.synthetic_index, timestamp=market_data.timestamp)
+
+    def clear(self):
+        super().clear()
+        Synthetic.clear(self)
