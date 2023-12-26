@@ -371,12 +371,12 @@ class TradeCoherenceMonitor(CoherenceMonitor):
         self._historical_volume_net[ticker] = sampled_volume_net
 
     @property
-    def value(self) -> dict[str, float]:
+    def value(self) -> float:
         """
         Calculates and returns the regression slope between volume percentage change and price percentage change.
 
         Returns:
-            dict: Dictionary containing the 'slope' value.
+            float: the 'slope' value.
         """
         price_pct_change = []
         volume_pct = []
@@ -394,4 +394,4 @@ class TradeCoherenceMonitor(CoherenceMonitor):
 
         slope = self.regression(x=volume_pct, y=price_pct_change)
 
-        return {'slope': slope}
+        return slope
