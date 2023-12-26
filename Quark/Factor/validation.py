@@ -13,7 +13,7 @@ import pandas as pd
 from AlgoEngine.Engine import MarketDataMonitor, ProgressiveReplay
 from PyQuantKit import MarketData, BarData
 
-from . import LOGGER, MDS, future, IndexWeight, ALPHA_0001
+from . import LOGGER, MDS, future, IndexWeight, ALPHA_0001, collect_factor
 from .Correlation import EntropyEMAMonitor
 from .LowPass import IndexMACDTriggerMonitor
 from .Misc import SyntheticIndexMonitor
@@ -78,7 +78,7 @@ class FactorValidation(object):
 
         # Params for validation
         self.pred_target = 'Synthetic.market_price'
-        self.features = {'Monitor.MACD.Index.Trigger.Synthetic'}
+        self.features = {'MACD.Index.Trigger.Synthetic'}
 
         self.factor: MarketDataMonitor | None = None
         self.synthetic: SyntheticIndexMonitor | None = None
@@ -404,14 +404,8 @@ class FactorValidation(object):
             entry_log (dict): Dictionary to store collected data.
         """
         if timestamp >= last_update + self.sampling_interval:
-
-            factor_value = self.factor.value
-
-            if isinstance(factor_value, dict):
-                for key in factor_value:
-                    entry_log[f'{self.factor.name}.{key}'] = factor_value[key]
-            elif isinstance(factor_value, BarData):
-                entry_log[f'{factor_value.ticker}.market_price'] = factor_value.close_price
+            factors = collect_factor(monitors=self.factor)
+            entry_log.update(factors)
 
     def _collect_market_price(self, ticker: str, market_price: float, entry_log: dict[str, float]):
         """
@@ -487,7 +481,7 @@ class FactorBatchValidation(FactorValidation):
 
         self.poly_degree = kwargs.get('poly_degree', 2)
 
-        self.features: list[str] = ['Monitor.MACD.Index.Trigger.Synthetic', 'Monitor.Entropy.Price.EMA']
+        self.features: list[str] = ['MACD.Index.Trigger.Synthetic', 'Entropy.Price.EMA']
         self.factor: list[MarketDataMonitor] = []
 
     def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
@@ -527,30 +521,6 @@ class FactorBatchValidation(FactorValidation):
         MDS.add_monitor(self.synthetic)
 
         return self.factor
-
-    def _collect_factor(self, timestamp: float, last_update: float, entry_log: dict[str, float]):
-        """
-        Collects data for multiple factors.
-
-        Args:
-            timestamp (float): Current timestamp.
-            last_update (float): Last update timestamp.
-            entry_log (dict): Dictionary to store collected data.
-        """
-        if timestamp >= last_update + self.sampling_interval:
-
-            for factor in self.factor:
-                factor_value = factor.value
-
-                if isinstance(factor_value, dict):
-                    for key in factor_value:
-                        entry_log[f'{factor.name}.{key}'] = factor_value[key]
-                elif isinstance(factor_value, BarData):
-                    entry_log[f'{factor_value.ticker}.market_price'] = factor_value.close_price
-                elif isinstance(factor_value, (int, float)):
-                    entry_log[f'{factor.name}'] = factor_value
-                else:
-                    raise NotImplementedError(f'Invalid factor value type: {type(factor_value)}')
 
     def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
         """
@@ -614,8 +584,8 @@ def main():
     """
     Main function to run factor validation or batch validation.
     """
-    fv = FactorValidation()
-    # fv = FactorBatchValidation()
+    # fv = FactorValidation()
+    fv = FactorBatchValidation()
     fv.run()
     safe_exit()
 
