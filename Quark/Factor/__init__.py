@@ -342,19 +342,24 @@ def register_monitor(**kwargs) -> dict[str, MarketDataMonitor]:
     return monitors
 
 
-def collect_factor(monitors: dict[MarketDataMonitor]) -> dict[str, float]:
+def collect_factor(monitors: dict[str, MarketDataMonitor] | list[MarketDataMonitor] | MarketDataMonitor) -> dict[str, float]:
     factors = {}
 
-    for name, monitor in monitors.items():
+    if isinstance(monitors, dict):
+        monitors = list(monitors.values())
+    elif isinstance(monitors, MarketDataMonitor):
+        monitors = [monitors]
+
+    for monitor in monitors:  # type: MarketDataMonitor
         if monitor.is_ready:
             factor_value = monitor.value
-            monitor_name_short = monitor.name.removeprefix('Monitor.')
+            name = monitor.name.removeprefix('Monitor.')
 
             if isinstance(factor_value, (int, float)):
-                factors[monitor_name_short] = factor_value
+                factors[name] = factor_value
             elif isinstance(factor_value, dict):
                 for key in factor_value:
-                    factors[f'{monitor_name_short}.{key}'] = factor_value[key]
+                    factors[f'{name}.{key}'] = factor_value[key]
             else:
                 raise NotImplementedError(f'Invalid return type, expect float | dict[str, float], got {type(factor_value)}.')
 
@@ -362,7 +367,7 @@ def collect_factor(monitors: dict[MarketDataMonitor]) -> dict[str, float]:
 
 
 __all__ = [
-    'LOGGER', 'TIME_ZONE', 'DEBUG_MODE', 'register_monitor', 'IndexWeight', 'Synthetic', 'EMA', 'register_monitor',
+    'LOGGER', 'TIME_ZONE', 'DEBUG_MODE', 'register_monitor', 'IndexWeight', 'Synthetic', 'EMA', 'register_monitor', 'collect_factor',
     # from .Correlation module
     'CoherenceMonitor', 'CoherenceEMAMonitor', 'TradeCoherenceMonitor', 'EntropyMonitor', 'EntropyEMAMonitor',
     # from Decoder module
