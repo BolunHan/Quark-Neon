@@ -1,3 +1,21 @@
+"""
+This module defines two classes, AggressivenessMonitor and AggressivenessEMAMonitor, for monitoring the aggressiveness of buy/sell trades.
+
+Classes:
+- AggressivenessMonitor: Monitors the aggressiveness of buy/sell trades and provides aggregated values.
+- AggressivenessEMAMonitor: Extends AggressivenessMonitor and adds Exponential Moving Averages (EMA) to aggressive buying, selling, and total trade volumes.
+
+Usage:
+1. Instantiate the desired monitor class with optional parameters.
+2. Call the instance with market data to update the monitor.
+3. Retrieve the calculated values using the 'value' property.
+
+Note: This module assumes the availability of AlgoEngine, PyQuantKit, and other required modules.
+
+Author: Bolun
+Date: 2023-12-27
+"""
+
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData
 
@@ -6,14 +24,11 @@ from .. import EMA, Synthetic, MDS, DEBUG_MODE
 
 class AggressivenessMonitor(MarketDataMonitor):
     """
-    monitor the aggressiveness of buy / sell trades. the deeper the orders fill at one time, the more aggressive they are
+    Monitors the aggressiveness of buy/sell trades and provides aggregated values.
 
-    this module requires 2 additional fields
-    - sell_order_id
-    - buy_order_id
-
-    without these 2 fields the monitor is set to is_ready = False
-    the monitor aggregated aggressive buying / selling volume separately
+    Args:
+    - name (str, optional): Name of the monitor. Defaults to 'Monitor.Aggressiveness'.
+    - monitor_id (str, optional): Identifier for the monitor. Defaults to None.
     """
 
     def __init__(self, name: str = 'Monitor.Aggressiveness', monitor_id: str = None):
@@ -30,10 +45,22 @@ class AggressivenessMonitor(MarketDataMonitor):
         self._is_ready = True
 
     def __call__(self, market_data: MarketData, **kwargs):
+        """
+        Update the monitor based on market data.
+
+        Args:
+        - market_data (MarketData): Market data to update the monitor.
+        """
         if isinstance(market_data, TradeData):
             self._on_trade(trade_data=market_data)
 
     def _on_trade(self, trade_data: TradeData):
+        """
+        Handle trade data to update aggressive buying/selling volumes.
+
+        Args:
+        - trade_data (TradeData): Trade data to handle.
+        """
         ticker = trade_data.ticker
         price = trade_data.market_price
         volume = trade_data.volume
@@ -45,7 +72,6 @@ class AggressivenessMonitor(MarketDataMonitor):
         else:
             trade_price_log = self._trade_price[ticker] = {}
 
-        # trade logs triggered by the same order can not have 2 different timestamp
         if ticker not in self._last_update or self._last_update[ticker] < timestamp:
             trade_price_log.clear()
             self._last_update[ticker] = timestamp
@@ -82,35 +108,65 @@ class AggressivenessMonitor(MarketDataMonitor):
         self._last_update[ticker] = timestamp
 
     def _update_aggressiveness(self, ticker: str, volume: float, side: int, timestamp: float):
+        """
+        Update aggressive buying/selling volumes.
+
+        Args:
+        - ticker (str): Ticker symbol.
+        - volume (float): Trade volume.
+        - side (int): Trade side (-1 for sell, 1 for buy).
+        - timestamp (float): Trade timestamp.
+        """
         if side > 0:
             self._aggressive_buy[ticker] = self._aggressive_buy.get(ticker, 0.) + volume
         else:
             self._aggressive_sell[ticker] = self._aggressive_sell.get(ticker, 0.) + volume
 
     def clear(self):
+        """Clear the monitor data."""
         self._last_update.clear()
         self._trade_price.clear()
         self._aggressive_buy.clear()
         self._aggressive_sell.clear()
 
     @property
-    def value(self) -> tuple[dict[str, float], dict[str, float]]:
-        return self._aggressive_buy, self._aggressive_sell
+    def value(self) -> dict[str, float]:
+        """
+        Get the aggregated values of aggressive buying/selling volumes.
+
+        Returns:
+        dict[str, float]: Dictionary of aggregated values.
+        """
+        result = {}
+
+        for ticker in set(self._aggressive_buy) | set(self._aggressive_sell):
+            result[f'{ticker}.buy'] = self._aggressive_buy.get(ticker, 0.)
+            result[f'{ticker}.sell'] = self._aggressive_sell.get(ticker, 0.)
+
+        return result
 
     @property
     def is_ready(self) -> bool:
+        """
+        Check if the monitor is ready.
+
+        Returns:
+        bool: True if the monitor is ready, False otherwise.
+        """
         return self._is_ready
 
 
 class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
     """
-    ema average of aggressiveness buying / selling volume.
+    Exponential Moving Average (EMA) of aggressive buying/selling volume.
 
-    Note that the discount process is triggered by on_trade_data.
-    - Upon discount, there should be a discontinuity of index value.
-    - But if the update interval is small enough, the effect should be marginal
-
-    aggressiveness is a relative stable indication. a large positive aggressiveness indicates market is in an upward ongoing trend
+    Args:
+    - discount_interval (float): Interval for EMA discounting.
+    - alpha (float): EMA smoothing factor.
+    - weights (dict[str, float]): Dictionary of ticker weights.
+    - normalized (bool, optional): Whether to use normalized EMA. Defaults to True.
+    - name (str, optional): Name of the monitor. Defaults to 'Monitor.Aggressiveness.EMA'.
+    - monitor_id (str, optional): Identifier for the monitor. Defaults to None.
     """
 
     def __init__(self, discount_interval: float, alpha: float, weights: dict[str, float], normalized: bool = True, name: str = 'Monitor.Aggressiveness.EMA', monitor_id: str = None):
@@ -120,12 +176,20 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
 
         self.normalized = normalized
 
-        self._aggressive_buy: dict[str, float] = self._register_ema(name='aggressive_buy')  # ema of the aggressiveness buy volume
-        self._aggressive_sell: dict[str, float] = self._register_ema(name='aggressive_sell')  # ema of the aggressiveness sell volume
-        self._trade_volume: dict[str, float] = self._register_ema(name='trade_volume')  # ema of the total volume
+        self._aggressive_buy: dict[str, float] = self._register_ema(name='aggressive_buy')  # EMA of aggressive buying volume
+        self._aggressive_sell: dict[str, float] = self._register_ema(name='aggressive_sell')  # EMA of aggressive selling volume
+        self._trade_volume: dict[str, float] = self._register_ema(name='trade_volume')  # EMA of total trade volume
 
     def _update_aggressiveness(self, ticker: str, volume: float, side: int, timestamp: float):
+        """
+        Update aggressive buying/selling volumes and accumulate EMAs.
 
+        Args:
+        - ticker (str): Ticker symbol.
+        - volume (float): Trade volume.
+        - side (int): Trade side (-1 for sell, 1 for buy).
+        - timestamp (float): Trade timestamp.
+        """
         if side > 0:
             self._accumulate_ema(ticker=ticker, timestamp=timestamp, replace_na=0., aggressive_buy=volume, aggressive_sell=0.)
         else:
@@ -140,11 +204,23 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
                 raise ValueError(f'{ticker} {self.__class__.__name__} encounter invalid value, total_volume={total_volume}, aggressiveness={aggressiveness_volume}, side={side}')
 
     def _on_trade(self, trade_data: TradeData):
+        """
+        Handle trade data to update aggressive buying/selling volumes and accumulate EMAs.
+
+        Args:
+        - trade_data (TradeData): Trade data to handle.
+        """
         ticker = trade_data.ticker
         self._accumulate_ema(ticker=ticker, trade_volume=trade_data.volume, replace_na=0.)  # to avoid redundant calculation, timestamp is not passed-in, so that the discount function will not be triggered
         super()._on_trade(trade_data=trade_data)
 
     def __call__(self, market_data: MarketData, **kwargs):
+        """
+        Update the monitor and trigger EMA discounting based on market data.
+
+        Args:
+        - market_data (MarketData): Market data to update the monitor.
+        """
         ticker = market_data.ticker
         timestamp = market_data.timestamp
 
@@ -154,12 +230,18 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         return super().__call__(market_data=market_data, **kwargs)
 
     def clear(self):
+        """Clear the monitor data."""
         super().clear()
         EMA.clear(self)
         Synthetic.clear(self)
 
-    @property
-    def value(self) -> tuple[dict[str, float], dict[str, float]]:
+    def aggressiveness_adjusted(self):
+        """
+        Get adjusted aggressive buying/selling volumes.
+
+        Returns:
+        tuple[dict[str, float], dict[str, float]]: Adjusted aggressive buying and selling volumes.
+        """
         aggressive_buy = {}
         aggressive_sell = {}
 
@@ -171,8 +253,33 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         return aggressive_buy, aggressive_sell
 
     @property
+    def value(self) -> dict[str, float]:
+        """
+        Get the adjusted values of aggressive buying/selling volumes and the composite index value.
+
+        Returns:
+        dict[str, float]: Dictionary of adjusted values.
+        """
+        result = {}
+
+        for ticker, volume in self._trade_volume.items():
+            if volume:
+                result[f'{ticker}.buy'] = self._aggressive_buy.get(ticker, 0.) / volume
+                result[f'{ticker}.sell'] = self._aggressive_sell.get(ticker, 0.) / volume
+
+        result['Index'] = self.index_value
+
+        return result
+
+    @property
     def index_value(self) -> float:
-        aggressive_buy, aggressive_sell = self.value
+        """
+        Get the composite index value.
+
+        Returns:
+        float: Composite index value.
+        """
+        aggressive_buy, aggressive_sell = self.aggressiveness_adjusted()
         values = {}
 
         for ticker in set(aggressive_buy) | set(aggressive_sell):
