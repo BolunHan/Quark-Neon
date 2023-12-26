@@ -342,6 +342,25 @@ def register_monitor(**kwargs) -> dict[str, MarketDataMonitor]:
     return monitors
 
 
+def collect_factor(monitors: dict[MarketDataMonitor]) -> dict[str, float]:
+    factors = {}
+
+    for name, monitor in monitors.items():
+        if monitor.is_ready:
+            factor_value = monitor.value
+            monitor_name_short = monitor.name.removeprefix('Monitor.')
+
+            if isinstance(factor_value, (int, float)):
+                factors[monitor_name_short] = factor_value
+            elif isinstance(factor_value, dict):
+                for key in factor_value:
+                    factors[f'{monitor_name_short}.{key}'] = factor_value[key]
+            else:
+                raise NotImplementedError(f'Invalid return type, expect float | dict[str, float], got {type(factor_value)}.')
+
+    return factors
+
+
 __all__ = [
     'LOGGER', 'TIME_ZONE', 'DEBUG_MODE', 'register_monitor', 'IndexWeight', 'Synthetic', 'EMA', 'register_monitor',
     # from .Correlation module
