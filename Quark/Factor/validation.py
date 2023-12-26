@@ -22,31 +22,12 @@ from ..Backtest import simulated_env
 from ..Base import safe_exit, GlobalStatics
 from ..Calibration.bootstrap import BootstrapLinearRegression
 from ..Calibration.cross_validation import CrossValidation
+from ..Calibration.dummies import is_cn_market_session, session_dummies
+from ..Calibration.Kernel import poly_kernel
 from ..Misc import helper
 
 LOGGER = LOGGER.getChild('validation')
-DUMMY_WEIGHT = True
-
-
-def cn_market_session_filter(timestamp: float) -> bool:
-    """
-    Filters non-trading hours based on the Chinese market session.
-
-    Args:
-        timestamp (float): Unix timestamp.
-
-    Returns:
-        bool: True if within trading hours, False otherwise.
-    """
-    market_time = datetime.datetime.fromtimestamp(timestamp)
-
-    # Filter non-trading hours
-    if market_time.time() < datetime.time(9, 30) \
-            or datetime.time(11, 30) < market_time.time() < datetime.time(13, 0) \
-            or datetime.time(15, 0) < market_time.time():
-        return False
-
-    return True
+DUMMY_WEIGHT = False
 
 
 class FactorValidation(object):
@@ -60,7 +41,7 @@ class FactorValidation(object):
         end_date (datetime.date): End date for the replay.
         sampling_interval (float): Interval for sampling market data.
         pred_target (str): Prediction target for validation.
-        factor_name (list): Names of factors for validation.
+        features (list): Names of features for validation.
         factor (MarketDataMonitor): Market data monitor for factor validation.
         metrics (dict): Dictionary to store validation metrics.
 
@@ -97,13 +78,15 @@ class FactorValidation(object):
 
         # Params for validation
         self.pred_target = 'Synthetic.market_price'
-        self.factor_name = ['Monitor.MACD.Index.Trigger.Synthetic', 'bias']
+        self.features = {'Monitor.MACD.Index.Trigger.Synthetic'}
 
         self.factor: MarketDataMonitor | None = None
         self.synthetic: SyntheticIndexMonitor | None = None
         self.subscription = set()
         self.replay: ProgressiveReplay | None = None
         self.metrics: dict[float, dict[str, float]] = {}
+
+        self.model = BootstrapLinearRegression()
 
     def init_factor(self, **kwargs) -> MarketDataMonitor:
         """
@@ -246,6 +229,13 @@ class FactorValidation(object):
         factors['market_time'] = [datetime.datetime.fromtimestamp(_) for _ in factors.index]
         factors['bias'] = 1.
 
+        x_matrix = factors[list(self.features)]
+        x_matrix = x_matrix.loc[:, x_matrix.nunique() > 1]
+        x_matrix['bias'] = 1.
+
+        x = x_matrix.to_numpy()
+        return x
+
     def _define_prediction(self, factors: pd.DataFrame):
         """
         Defines the prediction target for regression analysis.
@@ -256,7 +246,7 @@ class FactorValidation(object):
         future.fix_prediction_target(
             factors=factors,
             key=self.pred_target,
-            session_filter=cn_market_session_filter,
+            session_filter=lambda ts: is_cn_market_session(ts)['is_valid'],
             inplace=True,
             pred_length=15 * 60
         )
@@ -264,12 +254,15 @@ class FactorValidation(object):
         future.wavelet_prediction_target(
             factors=factors,
             key=self.pred_target,
-            session_filter=cn_market_session_filter,
+            session_filter=lambda ts: is_cn_market_session(ts)['is_valid'],
             inplace=True,
             decode_level=3
         )
 
-    def _cross_validation(self, factors: pd.DataFrame):
+        y = factors['target_actual'].to_numpy()
+        return y
+
+    def _cross_validation(self, x, y, factors: pd.DataFrame):
         """
         Performs cross-validation with linear regression.
 
@@ -281,18 +274,15 @@ class FactorValidation(object):
         """
         import plotly.graph_objects as go
 
-        regression = BootstrapLinearRegression()
         x_axis = factors['market_time']
-        x = factors[self.factor_name].to_numpy()
-        y = factors['target_actual'].to_numpy()
 
         # Drop rows with NaN or infinite values horizontally from x, y, and x_axis
-        valid_mask = np.all(np.isfinite(x), axis=1) & np.isfinite(y) & np.isfinite(x_axis)
+        valid_mask = np.all(np.isfinite(x), axis=1) & np.isfinite(y)
         x = x[valid_mask]
         y = y[valid_mask]
         x_axis = x_axis[valid_mask]
 
-        cv = CrossValidation(model=regression, folds=10, shuffle=True, strict_no_future=True)
+        cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
         cv.validate(x=x, y=y)
         fig = cv.plot(x=x, y=y, x_axis=x_axis)
 
@@ -353,11 +343,11 @@ class FactorValidation(object):
         # Step 1: Add define prediction target
         factor_metrics = pd.DataFrame(self.metrics).T
 
-        self._define_inputs(factors=factor_metrics)
-        self._define_prediction(factors=factor_metrics)
+        x = self._define_inputs(factors=factor_metrics)
+        y = self._define_prediction(factors=factor_metrics)
 
         # Step 2: Regression analysis
-        cv, fig = self._cross_validation(factors=factor_metrics)
+        cv, fig = self._cross_validation(x=x, y=y, factors=factor_metrics)
 
         # Step 3: Dump the results
         self._dump_result(market_date=market_date, factors=factor_metrics, fig=fig)
@@ -452,7 +442,7 @@ class FactorValidation(object):
         current_bar: BarData | None = None
 
         for market_data in self.replay:  # type: MarketData
-            if not cn_market_session_filter(market_data.timestamp):
+            if not is_cn_market_session(market_data.timestamp)['is_valid']:
                 continue
 
             MDS.on_market_data(market_data=market_data)
@@ -495,7 +485,9 @@ class FactorBatchValidation(FactorValidation):
         """
         super().__init__(**kwargs)
 
-        self.factor_name: list[str] = ['Monitor.MACD.Index.Trigger.Synthetic', 'Monitor.Entropy.Price.EMA', 'bias']
+        self.poly_degree = kwargs.get('poly_degree', 2)
+
+        self.features: list[str] = ['Monitor.MACD.Index.Trigger.Synthetic', 'Monitor.Entropy.Price.EMA']
         self.factor: list[MarketDataMonitor] = []
 
     def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
@@ -587,13 +579,43 @@ class FactorBatchValidation(FactorValidation):
             _.clear()
         self.synthetic.clear()
 
+    def _define_inputs(self, factors: pd.DataFrame):
+        """
+        Defines input features for regression analysis.
+
+        Args:
+            factors (pd.DataFrame): DataFrame containing factors.
+        """
+        super()._define_inputs(factors=factors)
+        session_dummies(timestamp=factors.index, inplace=factors)
+
+        # default features
+        features = {'Dummies.IsOpening', 'Dummies.IsClosing'}
+        features.update(self.features)
+
+        for i in range(1, self.poly_degree):
+            feature_df = factors[self.features]
+            extended_feature = poly_kernel(feature_df, degree=i + 1)
+
+            for _ in extended_feature:
+                factors[_] = extended_feature[_]
+
+            features.update(extended_feature.keys())
+
+        x_matrix = factors[list(features)]
+        x_matrix = x_matrix.loc[:, x_matrix.nunique() > 1]
+        x_matrix['bias'] = 1.
+
+        x = x_matrix.to_numpy()
+        return x
+
 
 def main():
     """
     Main function to run factor validation or batch validation.
     """
-    # fv = FactorValidation()
-    fv = FactorBatchValidation()
+    fv = FactorValidation()
+    # fv = FactorBatchValidation()
     fv.run()
     safe_exit()
 
