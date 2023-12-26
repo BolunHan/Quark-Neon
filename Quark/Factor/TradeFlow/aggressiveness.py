@@ -15,7 +15,7 @@ Note: This module assumes the availability of AlgoEngine, PyQuantKit, and other 
 Author: Bolun
 Date: 2023-12-27
 """
-
+import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData
 
@@ -140,9 +140,10 @@ class AggressivenessMonitor(MarketDataMonitor):
         result = {}
 
         for ticker in set(self._aggressive_buy) | set(self._aggressive_sell):
-            result[f'{ticker}.buy'] = self._aggressive_buy.get(ticker, 0.)
-            result[f'{ticker}.sell'] = self._aggressive_sell.get(ticker, 0.)
+            result[f'{ticker}.Buy'] = self._aggressive_buy.get(ticker, 0.)
+            result[f'{ticker}.Sell'] = self._aggressive_sell.get(ticker, 0.)
 
+        result['Net'] = np.nansum(list(self._aggressive_buy.values())) - np.nansum(list(self._aggressive_sell.values()))
         return result
 
     @property
@@ -264,8 +265,8 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
 
         for ticker, volume in self._trade_volume.items():
             if volume:
-                result[f'{ticker}.buy'] = self._aggressive_buy.get(ticker, 0.) / volume
-                result[f'{ticker}.sell'] = self._aggressive_sell.get(ticker, 0.) / volume
+                result[f'{ticker}.Buy'] = self._aggressive_buy.get(ticker, 0.) / volume
+                result[f'{ticker}.Sell'] = self._aggressive_sell.get(ticker, 0.) / volume
 
         result['Index'] = self.index_value
 

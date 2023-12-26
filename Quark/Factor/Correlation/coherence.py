@@ -200,12 +200,19 @@ class CoherenceMonitor(MarketDataMonitor):
         Calculates and returns the dispersion coefficients.
 
         Returns:
-            dict: Dictionary containing 'up' and 'down' dispersion coefficients.
+            dict: Dictionary containing 'up', 'down' and 'ratio' dispersion coefficients.
         """
         up_dispersion = self.collect_dispersion(side=1)
         down_dispersion = self.collect_dispersion(side=-1)
 
-        return {'up': up_dispersion, 'down': down_dispersion}
+        if up_dispersion < 0:
+            ratio = 1.
+        elif down_dispersion < 0:
+            ratio = 0.
+        else:
+            ratio = down_dispersion / (up_dispersion + down_dispersion)
+
+        return {'up': up_dispersion, 'down': down_dispersion, 'ratio': ratio}
 
     @property
     def is_ready(self) -> bool:

@@ -118,14 +118,32 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
             return self._is_ready
 
     @property
-    def value(self) -> BarData | None:
+    def value(self) -> dict[str, float]:
         """
         Retrieve the last generated bar data.
 
         Returns:
-        BarData | None: Last generated bar data.
+        dict[str, float]: Dictionary of last generated bar data.
         """
-        return self._last_bar_data
+        bar_data = self._last_bar_data
+
+        if bar_data is not None:
+            result = dict(
+                market_price=self.index_price,
+                high_price=bar_data.high_price,
+                low_price=bar_data.low_price,
+                open_price=bar_data.open_price,
+                close_price=bar_data.close_price,
+                volume=bar_data.volume,
+                notional=bar_data.notional,
+                trade_count=bar_data.trade_count
+            )
+        else:
+            result = dict(
+                market_price=self.index_price
+            )
+
+        return result
 
     @property
     def index_price(self) -> float:
@@ -146,3 +164,13 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
         BarData | None: Currently active bar data.
         """
         return self._active_bar_data
+
+    @property
+    def last_bar(self) -> BarData | None:
+        """
+        Retrieve the last bar data.
+
+        Returns:
+        BarData | None: last bar data.
+        """
+        return self._last_bar_data

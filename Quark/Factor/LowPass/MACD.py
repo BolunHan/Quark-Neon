@@ -6,7 +6,7 @@ from PyQuantKit import MarketData
 from .. import Synthetic, LOGGER, MDS
 
 
-class MACD:
+class MACD(object):
     """
     This model calculates the MACD absolute value (not the relative / adjusted value)
 
@@ -102,8 +102,7 @@ class MACDMonitor(MarketDataMonitor, Synthetic):
         self._price.clear()
         Synthetic.clear(self)
 
-    @property
-    def value(self) -> dict[str, float]:
+    def macd_value(self):
         macd_value = {}
 
         for ticker in self._macd:
@@ -112,8 +111,15 @@ class MACDMonitor(MarketDataMonitor, Synthetic):
         return macd_value
 
     @property
+    def value(self) -> dict[str, float]:
+        result = {}
+        result.update(self.macd_value())
+        result['Index'] = self.index_value
+        return result
+
+    @property
     def index_value(self) -> float:
-        return self.composite(self.value)
+        return self.composite(self.macd_value())
 
     @property
     def is_ready(self) -> bool:
