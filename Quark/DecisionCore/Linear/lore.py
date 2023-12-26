@@ -12,6 +12,7 @@ import pandas as pd
 from . import LOGGER
 from ...Base import GlobalStatics
 from ...Calibration.bootstrap import BootstrapLinearRegression
+from ...Calibration.dummies import session_dummies
 from ...Factor.future import fix_prediction_target
 from ...Strategy import StrategyMetric
 
@@ -176,7 +177,7 @@ class LinearLore(DataLore):
         self.coefficients = None
 
     def predict(self, factor: dict[str, float], **kwargs) -> dict[str, float]:
-        self.session_dummies(timestamp=kwargs.get('timestamp', time.time()), inplace=factor)
+        session_dummies(timestamp=kwargs.get('timestamp', time.time()), inplace=factor)
         x = {_: factor.get(_, kwargs.get('replace_nan', np.nan)) for _ in self.inputs_var}  # to ensure the order of input data
         x = self._generate_x_features(x)
         prediction = self._pred(x=x)
@@ -215,7 +216,7 @@ class LinearLore(DataLore):
         )['pct_change']
 
         # step 2: assigning session dummies
-        self.session_dummies(factors.index, inplace=factors)
+        session_dummies(factors.index, inplace=factors)
 
         # step 3: drop entries with nan
         filtered = factors[np.isfinite(factors).all(1)]
@@ -264,19 +265,6 @@ class LinearLore(DataLore):
             residuals.append(residual)
 
         return np.array(coefficients).T, np.array(residuals).T
-
-    @classmethod
-    def session_dummies(cls, timestamp: float | list[float], inplace: dict[str, float | list[float]] | pd.DataFrame = None):
-        d = {} if inplace is None else inplace
-
-        if isinstance(timestamp, (float, int)):
-            d['Dummies.IsOpening'] = 1 if datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE).time() < datetime.time(10, 30) else 0
-            d['Dummies.IsClosing'] = 1 if datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE).time() > datetime.time(14, 30) else 0
-        else:
-            d['Dummies.IsOpening'] = [1 if datetime.datetime.fromtimestamp(_, tz=TIME_ZONE).time() < datetime.time(10, 30) else 0 for _ in timestamp]
-            d['Dummies.IsClosing'] = [1 if datetime.datetime.fromtimestamp(_, tz=TIME_ZONE).time() > datetime.time(14, 30) else 0 for _ in timestamp]
-
-        return d
 
     @classmethod
     def _generate_x_features(cls, x: pd.DataFrame | dict) -> pd.DataFrame | dict:
