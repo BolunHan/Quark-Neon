@@ -227,22 +227,49 @@ class OnlineDecoder(Decoder):
 
 class RecursiveDecoder(Decoder):
     """
-    a modified wave decoder based on https://en.wikipedia.org/wiki/Elliott_wave_principle
-    a recursive decoder marks the local minimal / maximal, and connect them to form each wavelet
-    recursive decoder can only be used offline, as it is not realtime decoder.
+    RecursiveDecoder class implements a modified wave decoder based on the Elliott Wave Principle https://en.wikipedia.org/wiki/Elliott_wave_principle.
+    It marks local minima/maxima and connects them to form wavelets. This decoder operates offline and recursively.
 
-    recursive decoder should be used recursively, to decode multiple level.
-    recursive decoder only output 2 state, up and down
-    for level = 0, we mark the local maximum / minimum of the market_price
-    for level >= 1, we mark the local maximum of the maximums from previous level and minimums of the minimums from previous level
+    Attributes:
+        level (int): The decoding level, indicating the depth of recursion.
+        _local_maximum (dict): Stores local maxima at different levels.
+        _local_minimum (dict): Stores local minima at different levels.
+        _last_marking (dict): Stores the last marking (local extremum) at each level.
+        _last_maximum (dict): Stores the last maximum at each level.
+        _last_minimum (dict): Stores the last minimum at each level.
+        _last_extreme (dict): Stores the last extreme (maximum/minimum) at each level.
+        _recursive_wavelet (dict): Stores the recursive wavelets at each level.
+
+    Methods:
+        update_decoder(ticker, market_price, timestamp):
+            Updates the decoder with market data to initiate the decoding process.
+
+        _decode(ticker, market_price, timestamp, flag, level):
+            Recursive decoding method. Marks local extrema and forms wavelets.
+
+        plot(ticker):
+            Plots the decoded local extrema at different levels using Plotly.
+
+        local_extremes(ticker, level):
+            Retrieves the local extremes (maxima/minima) at a specific level.
+
+        clear():
+            Clears the decoder's internal state, including stored data and wavelets.
     """
 
     def __init__(self, level: int = 4):
+        """
+        Initializes the RecursiveDecoder with a specified level.
+
+        Args:
+            level (int): The decoding level (default is 4).
+        """
         super().__init__()
 
         self.level = level
 
-        self._local_maximum: dict[str, dict[int, list[tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))  # the tuple contains the info of market_price, timestamp
+        # Dictionaries to store decoding information
+        self._local_maximum: dict[str, dict[int, list[tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
         self._local_minimum: dict[str, dict[int, list[tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
         self._last_marking: dict[str, dict[int, tuple[float, float]]] = defaultdict(dict)
         self._last_maximum: dict[str, dict[int, tuple[float, float]]] = defaultdict(dict)
@@ -251,9 +278,30 @@ class RecursiveDecoder(Decoder):
         self._recursive_wavelet: dict[str, dict[int, list[Wavelet]]] = defaultdict(lambda: defaultdict(list))
 
     def update_decoder(self, ticker: str, market_price: float, timestamp: float):
+        """
+        Updates the decoder with market data to initiate the decoding process.
+
+        Args:
+            ticker (str): Ticker symbol.
+            market_price (float): Current market price.
+            timestamp (float): Timestamp of the market data.
+        """
         self._decode(ticker=ticker, market_price=market_price, timestamp=timestamp)
 
     def _decode(self, ticker: str, market_price: float, timestamp: float, **kwargs):
+        """
+        Recursive decoding method. Marks local extrema and forms wavelets.
+
+        Args:
+            ticker (str): Ticker symbol.
+            market_price (float): Current market price.
+            timestamp (float): Timestamp of the market data.
+            flag (int): Flag indicating the direction of the movement (1 for up, -1 for down).
+            level (int): Current decoding level.
+
+        Note:
+            This method is called recursively to decode multiple levels of wavelets.
+        """
         flag = kwargs.get('flag', 0)
         level = kwargs.get('level', 0)
 
@@ -266,7 +314,7 @@ class RecursiveDecoder(Decoder):
 
         assert level <= self.level
 
-        # start the marking
+        # Start the marking
         if not last_marking:
             self._last_marking[ticker][level] = (market_price, timestamp)
             recursive_wavelet.append(Wavelet(market_price=market_price, timestamp=timestamp))
@@ -281,7 +329,9 @@ class RecursiveDecoder(Decoder):
         current_wavelet = recursive_wavelet[-1]
         new_flag = 0
 
+        # Logic for marking based on the movement direction
         if flag == 1:
+            # Up movement
             last_extreme = self._last_extreme[ticker].get(level)
             last_price = last_marking_max[0] if last_marking_max else last_marking[0]
             last_ts = last_marking_max[1] if last_marking_max else last_marking[1]
@@ -291,6 +341,7 @@ class RecursiveDecoder(Decoder):
                 local_maximum.append((last_price, last_ts))
                 new_flag = 1
         elif flag == -1:
+            # Down movement
             last_extreme = self._last_extreme[ticker].get(level)
             last_price = last_marking_min[0] if last_marking_min else last_marking[0]
             last_ts = last_marking_min[1] if last_marking_min else last_marking[1]
@@ -300,6 +351,7 @@ class RecursiveDecoder(Decoder):
                 local_minimum.append((last_price, last_ts))
                 new_flag = -1
         else:
+            # Flat movement
             last_extreme = self._last_extreme[ticker].get(level)
             last_price = last_marking[0]
             last_ts = last_marking[1]
@@ -315,6 +367,7 @@ class RecursiveDecoder(Decoder):
         current_wavelet.update(market_price=market_price, timestamp=timestamp)
 
         if new_flag:
+            # Update the last extreme and recursively decode for the next level
             self._last_extreme[ticker][level] = (last_price, last_ts, new_flag)
 
             if level < self.level:
@@ -323,12 +376,22 @@ class RecursiveDecoder(Decoder):
             current_wavelet.flag = WaveletFlag.up if new_flag == 1 else WaveletFlag.down
 
             if level == self.level:
+                # Confirm the wavelet and update the current state
                 self.confirm_wavelet(ticker=ticker, wavelet=current_wavelet)
                 self.current_state[ticker] = Wavelet(market_price=market_price, timestamp=timestamp)
 
             recursive_wavelet.append(Wavelet(market_price=market_price, timestamp=timestamp))
 
     def plot(self, ticker: str):
+        """
+        Plots the decoded local extrema at different levels using Plotly.
+
+        Args:
+            ticker (str): Ticker symbol.
+
+        Returns:
+            fig: Plotly figure.
+        """
         import plotly.graph_objects as go
         data = []
 
@@ -353,6 +416,16 @@ class RecursiveDecoder(Decoder):
         return fig
 
     def local_extremes(self, ticker: str, level: int) -> list[tuple[float, float, int]]:
+        """
+        Retrieves the local extremes (maxima/minima) at a specific level.
+
+        Args:
+            ticker (str): Ticker symbol.
+            level (int): Decoding level.
+
+        Returns:
+            list: List of tuples representing local extremes.
+        """
         local_maximum = [(_[0], _[1], 1) for _ in self._local_maximum[ticker][level]]
         local_minimum = [(_[0], _[1], -1) for _ in self._local_minimum[ticker][level]]
         local_extreme = local_maximum + local_minimum
@@ -361,8 +434,12 @@ class RecursiveDecoder(Decoder):
         return local_extreme
 
     def clear(self):
+        """
+        Clears the decoder's internal state, including stored data and wavelets.
+        """
         super().clear()
 
+        # Clear decoding-related data
         self._local_maximum.clear()
         self._local_minimum.clear()
         self._last_marking.clear()
