@@ -1,5 +1,5 @@
 """
-this script is designed to validate single factor, with linear regression
+This script is designed for factor validation using linear regression.
 """
 __package__ = 'Quark.Factor'
 
@@ -29,9 +29,18 @@ DUMMY_WEIGHT = True
 
 
 def cn_market_session_filter(timestamp: float) -> bool:
+    """
+    Filters non-trading hours based on the Chinese market session.
+
+    Args:
+        timestamp (float): Unix timestamp.
+
+    Returns:
+        bool: True if within trading hours, False otherwise.
+    """
     market_time = datetime.datetime.fromtimestamp(timestamp)
 
-    # filter non-trading hours
+    # Filter non-trading hours
     if market_time.time() < datetime.time(9, 30) \
             or datetime.time(11, 30) < market_time.time() < datetime.time(13, 0) \
             or datetime.time(15, 0) < market_time.time():
@@ -63,26 +72,30 @@ class FactorValidation(object):
         init_replay(self) -> ProgressiveReplay: Initialize market data replay.
         validation(self, market_date: datetime.date, dump_dir: str | pathlib.Path): Perform factor validation.
         run(self): Run the factor validation process.
-
-    Note: Cross validation is facing future function issue.
     """
 
     def __init__(self, **kwargs):
+        """
+        Initializes the FactorValidation instance.
+
+        Args:
+            **kwargs: Additional parameters for configuration.
+        """
         self.validation_id = kwargs.get('validation_id', f'{uuid.uuid4()}')
 
-        # params for index
+        # Params for index
         self.index_name = kwargs.get('index_name', '000016.SH')
         self.index_weights = IndexWeight(index_name='000016.SH')
 
-        # params for replay
+        # Params for replay
         self.dtype = kwargs.get('dtype', 'TradeData')
         self.start_date = kwargs.get('start_date', datetime.date(2023, 1, 1))
         self.end_date = kwargs.get('end_date', datetime.date(2023, 2, 1))
 
-        # params for sampling
+        # Params for sampling
         self.sampling_interval = kwargs.get('sampling_interval', 10.)
 
-        # params for validation
+        # Params for validation
         self.pred_target = 'Synthetic.market_price'
         self.factor_name = ['Monitor.MACD.Index.Trigger.Synthetic', 'bias']
 
@@ -93,6 +106,15 @@ class FactorValidation(object):
         self.metrics: dict[float, dict[str, float]] = {}
 
     def init_factor(self, **kwargs) -> MarketDataMonitor:
+        """
+        Initializes the factor for validation.
+
+        Args:
+            **kwargs: Additional parameters for factor configuration.
+
+        Returns:
+            MarketDataMonitor: Initialized market data monitor.
+        """
         self.factor = IndexMACDTriggerMonitor(
             weights=self.index_weights,
             update_interval=kwargs.get('update_interval', 60),
@@ -112,6 +134,12 @@ class FactorValidation(object):
         return self.factor
 
     def _update_index_weights(self, market_date: datetime.date):
+        """
+        Updates index weights based on the provided market date.
+
+        Args:
+            market_date (datetime.date): Date for which to update index weights.
+        """
         index_weight = IndexWeight(
             index_name=self.index_name,
             **helper.load_dict(
@@ -120,16 +148,19 @@ class FactorValidation(object):
             )
         )
 
-        # a lite setting for fast debugging
+        # A lite setting for fast debugging
         if DUMMY_WEIGHT:
             for _ in list(index_weight.keys())[5:]:
                 index_weight.pop(_)
 
-        # step 0: update index weights
+        # Step 0: Update index weights
         self.index_weights.update(index_weight)
         self.index_weights.normalize()
 
     def _update_subscription(self):
+        """
+        Updates market data subscriptions based on index weights.
+        """
         subscription = set(self.index_weights.keys())
 
         for _ in subscription:
@@ -143,18 +174,32 @@ class FactorValidation(object):
         self.subscription.update(subscription)
 
     def bod(self, market_date: datetime.date, **kwargs) -> None:
+        """
+        Executes the beginning-of-day process.
+
+        Args:
+            market_date (datetime.date): Current market date.
+            **kwargs: Additional parameters.
+        """
         LOGGER.info(f'Starting {market_date} bod process...')
 
-        # startup task 0: update subscription
+        # Startup task 0: Update subscription
         self._update_index_weights(market_date=market_date)
 
-        # backtest specific action 1: unzip data
+        # Backtest specific action 1: Unzip data
         historical.unzip_batch(market_date=market_date, ticker_list=self.index_weights.keys())
 
-        # startup task 2: update replay
+        # Startup task 2: Update replay
         self._update_subscription()
 
     def eod(self, market_date: datetime.date, **kwargs) -> None:
+        """
+        Executes the end-of-day process.
+
+        Args:
+            market_date (datetime.date): Current market date.
+            **kwargs: Additional parameters.
+        """
         LOGGER.info(f'Starting {market_date} eod process...')
 
         self.validation(market_date=market_date)
@@ -162,10 +207,19 @@ class FactorValidation(object):
         self.reset()
 
     def reset(self):
+        """
+        Resets the factor and metrics data.
+        """
         self.factor.clear()
         self.metrics.clear()
 
     def init_replay(self) -> ProgressiveReplay:
+        """
+        Initializes market data replay.
+
+        Returns:
+            ProgressiveReplay: Initialized market data replay.
+        """
         calendar = simulated_env.trade_calendar(start_date=self.start_date, end_date=self.end_date)
 
         self.replay = ProgressiveReplay(
@@ -183,10 +237,22 @@ class FactorValidation(object):
         return self.replay
 
     def _define_inputs(self, factors: pd.DataFrame):
+        """
+        Defines input features for regression analysis.
+
+        Args:
+            factors (pd.DataFrame): DataFrame containing factors.
+        """
         factors['market_time'] = [datetime.datetime.fromtimestamp(_) for _ in factors.index]
         factors['bias'] = 1.
 
     def _define_prediction(self, factors: pd.DataFrame):
+        """
+        Defines the prediction target for regression analysis.
+
+        Args:
+            factors (pd.DataFrame): DataFrame containing factors.
+        """
         future.fix_prediction_target(
             factors=factors,
             key=self.pred_target,
@@ -204,6 +270,15 @@ class FactorValidation(object):
         )
 
     def _cross_validation(self, factors: pd.DataFrame):
+        """
+        Performs cross-validation with linear regression.
+
+        Args:
+            factors (pd.DataFrame): DataFrame containing factors.
+
+        Returns:
+            Tuple: Cross-validation object and plotly figure.
+        """
         import plotly.graph_objects as go
 
         regression = BootstrapLinearRegression()
@@ -246,6 +321,14 @@ class FactorValidation(object):
         return cv, fig
 
     def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
+        """
+        Dumps the cross-validation results to CSV and HTML files.
+
+        Args:
+            market_date (datetime.date): Current market date.
+            factors (pd.DataFrame): DataFrame containing factors.
+            fig: Plotly figure from cross-validation.
+        """
         dump_dir = f'Validation.{self.validation_id.split("-")[0]}'
         os.makedirs(dump_dir, exist_ok=True)
 
@@ -256,24 +339,42 @@ class FactorValidation(object):
         fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.validation.html'), include_plotlyjs='cdn')
 
     def validation(self, market_date: datetime.date):
+        """
+        Performs factor validation for the given market date.
+
+        Args:
+            market_date (datetime.date): Current market date.
+        """
         if not self.metrics:
             return
 
         LOGGER.info(f'{market_date} validation started with {len(self.metrics):,} obs.')
 
-        # step 1: add define prediction target
+        # Step 1: Add define prediction target
         factor_metrics = pd.DataFrame(self.metrics).T
 
         self._define_inputs(factors=factor_metrics)
         self._define_prediction(factors=factor_metrics)
 
-        # step 2: regression analysis
+        # Step 2: Regression analysis
         cv, fig = self._cross_validation(factors=factor_metrics)
 
-        # step 3: dump the results
+        # Step 3: Dump the results
         self._dump_result(market_date=market_date, factors=factor_metrics, fig=fig)
 
     def _collect_synthetic(self, timestamp: float, current_bar: BarData | None, last_update: float, entry_log: dict[str, float]):
+        """
+        Collects synthetic index data.
+
+        Args:
+            timestamp (float): Current timestamp.
+            current_bar (BarData): Current bar data.
+            last_update (float): Last update timestamp.
+            entry_log (dict): Dictionary to store collected data.
+
+        Returns:
+            BarData | None: Updated bar data.
+        """
         synthetic_price = self.synthetic.index_price
 
         if current_bar is not None:
@@ -304,6 +405,14 @@ class FactorValidation(object):
         return current_bar
 
     def _collect_factor(self, timestamp: float, last_update: float, entry_log: dict[str, float]):
+        """
+        Collects factor data.
+
+        Args:
+            timestamp (float): Current timestamp.
+            last_update (float): Last update timestamp.
+            entry_log (dict): Dictionary to store collected data.
+        """
         if timestamp >= last_update + self.sampling_interval:
 
             factor_value = self.factor.value
@@ -315,6 +424,14 @@ class FactorValidation(object):
                 entry_log[f'{factor_value.ticker}.market_price'] = factor_value.close_price
 
     def _collect_market_price(self, ticker: str, market_price: float, entry_log: dict[str, float]):
+        """
+        Collects market price data.
+
+        Args:
+            ticker (str): Ticker symbol.
+            market_price (float): Market price.
+            entry_log (dict): Dictionary to store collected data.
+        """
         synthetic_price = self.synthetic.index_price
 
         if entry_log is not None and (key := f'{ticker}.market_price') not in entry_log:
@@ -324,6 +441,9 @@ class FactorValidation(object):
             entry_log[key] = synthetic_price
 
     def run(self):
+        """
+        Runs the factor validation process.
+        """
         self.init_factor()
         self.init_replay()
 
@@ -353,13 +473,41 @@ class FactorValidation(object):
 
 
 class FactorBatchValidation(FactorValidation):
+    """
+    Class for batch factor validation with multiple factors.
+
+    Attributes:
+        Same as FactorValidation, with additional attributes for multiple factors.
+
+    Methods:
+        init_factor(self, **kwargs) -> list[MarketDataMonitor]: Override to initialize multiple factors.
+        _collect_factor(self, timestamp: float, last_update: float, entry_log: dict[str, float]): Override to collect data for multiple factors.
+        reset(self): Reset multiple factors.
+        _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig): Override to dump results for multiple factors.
+    """
+
     def __init__(self, **kwargs):
+        """
+        Initializes the FactorBatchValidation instance.
+
+        Args:
+            **kwargs: Additional parameters for configuration.
+        """
         super().__init__(**kwargs)
 
         self.factor_name: list[str] = ['Monitor.MACD.Index.Trigger.Synthetic', 'Monitor.Entropy.Price.EMA', 'bias']
         self.factor: list[MarketDataMonitor] = []
 
     def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
+        """
+        Initializes multiple factors for validation.
+
+        Args:
+            **kwargs: Additional parameters for factor configuration.
+
+        Returns:
+            list[MarketDataMonitor]: Initialized list of market data monitors.
+        """
         self.factor = [
             IndexMACDTriggerMonitor(
                 weights=self.index_weights,
@@ -389,6 +537,14 @@ class FactorBatchValidation(FactorValidation):
         return self.factor
 
     def _collect_factor(self, timestamp: float, last_update: float, entry_log: dict[str, float]):
+        """
+        Collects data for multiple factors.
+
+        Args:
+            timestamp (float): Current timestamp.
+            last_update (float): Last update timestamp.
+            entry_log (dict): Dictionary to store collected data.
+        """
         if timestamp >= last_update + self.sampling_interval:
 
             for factor in self.factor:
@@ -405,6 +561,14 @@ class FactorBatchValidation(FactorValidation):
                     raise NotImplementedError(f'Invalid factor value type: {type(factor_value)}')
 
     def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
+        """
+        Dumps results for multiple factors.
+
+        Args:
+            market_date (datetime.date): Current market date.
+            factors (pd.DataFrame): DataFrame containing factors.
+            fig: Plotly figure from cross-validation.
+        """
         dump_dir = f'BatchValidation.{self.validation_id.split("-")[0]}'
         os.makedirs(dump_dir, exist_ok=True)
 
@@ -416,12 +580,18 @@ class FactorBatchValidation(FactorValidation):
         fig.write_html(pathlib.Path(entry_dir, f'{file_name}.html'), include_plotlyjs='cdn')
 
     def reset(self):
+        """
+        Resets multiple factors.
+        """
         for _ in self.factor:
             _.clear()
         self.synthetic.clear()
 
 
 def main():
+    """
+    Main function to run factor validation or batch validation.
+    """
     # fv = FactorValidation()
     fv = FactorBatchValidation()
     fv.run()
