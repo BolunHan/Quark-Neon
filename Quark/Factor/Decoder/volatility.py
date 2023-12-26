@@ -89,7 +89,7 @@ class VolatilityMonitor(MarketDataMonitor, Synthetic):
         dict[str, float]: Dictionary of volatility-adjusted values for each ticker and the weighted index.
         """
         result = self.volatility_adjusted()
-        result['index'] = self.weighted_index
+        result['Index'] = self.weighted_index
         return result
 
     @property
