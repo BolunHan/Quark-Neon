@@ -1,3 +1,19 @@
+"""
+This module defines a function, poly_features, for generating polynomial features from input data.
+
+Functions:
+- poly_features: Generates polynomial features from input data.
+
+Usage:
+1. Call poly_features with the input data and optional parameters.
+2. Retrieve the generated polynomial features.
+
+Note: This module assumes the availability of NumPy and pandas.
+
+Author: Bolun
+Date: 2023-12-27
+"""
+
 from collections import Counter
 
 import numpy as np
@@ -9,11 +25,22 @@ def poly_features(
         degree: int = 3,
         simplified_name: bool = True
 ) -> dict[str, np.ndarray | int | float]:
+    """
+    Generate polynomial features from input data.
+
+    Args:
+    - data (pd.DataFrame | dict[str, list | np.ndarray | int | float]): Input data.
+    - degree (int, optional): Degree of the polynomial. Defaults to 3.
+    - simplified_name (bool, optional): Whether to simplify feature names. Defaults to True.
+
+    Returns:
+    dict[str, np.ndarray | int | float]: Dictionary of generated polynomial features.
+    """
     expression = data.keys()
 
     for _ in expression:
         if ' * ' in _:
-            raise KeyError(f'The data can not have " * " in this keys or columns. Invalid name: {_}')
+            raise KeyError(f'The data cannot have " * " in these keys or columns. Invalid name: {_}')
 
     extended_names = [[_] for _ in expression]
     extended_features = {}
