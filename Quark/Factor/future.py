@@ -83,7 +83,16 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
         decoder.update_decoder(ticker=key, market_price=market_price, timestamp=timestamp)
 
     # step 2: mark the ups and downs for each data point
+    factors['state'] = 0
     local_extreme = decoder.local_extremes(ticker=key, level=decode_level)
+    for wavelet in decoder.state_history[key]:
+        mask = (factors.index >= wavelet.start_ts) & (factors.index <= wavelet.end_ts)
+
+        # Update the 'state' column based on the flag of the wavelet
+        if wavelet.flag.is_up:
+            factors.loc[mask, 'state'] = 1
+        elif wavelet.flag.is_down:
+            factors.loc[mask, 'state'] = -1
 
     factors['local_max'] = np.nan
     factors['local_min'] = np.nan
@@ -110,6 +119,9 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
 
     factors['up_actual'] = factors['local_max'] / factors[key] - 1
     factors['down_actual'] = factors['local_min'] / factors[key] - 1
+    factors['target_actual'] = np.where(factors['state'] == 1, factors['up_actual'],
+                                        np.where(factors['state'] == -1, factors['down_actual'],
+                                                 (factors['up_actual'] + factors['down_actual']) / 2))
 
     # step 3: smooth out the breaking points
     if not enable_smooth:
@@ -144,5 +156,9 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
             factors['up_smoothed'].update(smoothed)
         else:
             continue
+
+    factors['target_smoothed'] = np.where(factors['state'] == 1, factors['up_smoothed'],
+                                          np.where(factors['state'] == -1, factors['down_smoothed'],
+                                                   (factors['up_smoothed'] + factors['down_smoothed']) / 2))
 
     return factors
