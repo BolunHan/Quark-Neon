@@ -1,4 +1,6 @@
 import abc
+import json
+import pathlib
 
 import numpy as np
 
@@ -15,6 +17,7 @@ class Regression(object, metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def predict(self, x: list | np.ndarray, alpha=0.05) -> tuple[float, tuple[float, float], ...]: ...
+
     """
     returns a prediction value, 
     and a prediction interval (lower bound and upper bound, of confidence interval {alpha}, minus the prediction value) 
@@ -27,3 +30,13 @@ class Regression(object, metaclass=abc.ABCMeta):
     @classmethod
     @abc.abstractmethod
     def from_json(cls, json_str: str | bytes | dict): ...
+
+    def dump(self, file_path: str | pathlib.Path = None):
+        json_dict = self.to_json(fmt='dict')
+        json_str = json.dumps(json_dict, indent=4)
+
+        if file_path is not None:
+            with open(file_path, 'w') as f:
+                f.write(json_str)
+
+        return json_dict
