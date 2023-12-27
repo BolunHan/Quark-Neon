@@ -275,6 +275,9 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
         super().clear()
         EMA.clear(self)
 
+        self.dispersion_ratio = self._register_ema(name='dispersion_ratio')
+        self.last_update = 0.
+
     @property
     def value(self) -> dict[str, float]:
         """

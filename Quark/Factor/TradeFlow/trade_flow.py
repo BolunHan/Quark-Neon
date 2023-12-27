@@ -143,6 +143,9 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
         EMA.clear(self)
         Synthetic.clear(self)
 
+        self._trade_flow = self._register_ema(name='trade_flow')
+        self._trade_volume = self._register_ema(name='trade_volume')
+
     def trade_flow_adjusted(self):
         """
         Get adjusted net trade volume flow values.

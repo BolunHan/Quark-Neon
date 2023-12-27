@@ -236,6 +236,10 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         EMA.clear(self)
         Synthetic.clear(self)
 
+        self._aggressive_buy: dict[str, float] = self._register_ema(name='aggressive_buy')  # EMA of aggressive buying volume
+        self._aggressive_sell: dict[str, float] = self._register_ema(name='aggressive_sell')  # EMA of aggressive selling volume
+        self._trade_volume: dict[str, float] = self._register_ema(name='trade_volume')  # EMA of total trade volume
+
     def aggressiveness_adjusted(self):
         """
         Get adjusted aggressive buying/selling volumes.

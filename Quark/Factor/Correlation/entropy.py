@@ -243,6 +243,9 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         super().clear()
         EMA.clear(self)
 
+        self.entropy_ema = self._register_ema(name='entropy')
+        self.last_update = 0.
+
     @property
     def value(self) -> float:
         """
