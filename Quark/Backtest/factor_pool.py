@@ -11,9 +11,11 @@ from typing import Iterable
 from AlgoEngine.Engine import MarketDataMonitor, MDS
 from PyQuantKit import MarketData
 
+from . import LOGGER
 from ..Base import GlobalStatics, CONFIG
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
+LOGGER = LOGGER.getChild('FactorPool')
 
 
 class FactorPool(object):
@@ -99,6 +101,16 @@ class FactorPool(object):
             return _
 
         return timestamp // step * step
+
+    @classmethod
+    def locate_cache_index(cls, timestamp: float, key_range: list[float] = None, start_idx: int = 0) -> int:
+        i = start_idx
+
+        for i in range(start_idx, len(key_range)):
+            if key_range[i] <= timestamp:
+                continue
+            break
+        return i
 
     def dump(self, factor_dir: str | pathlib.Path = None):
 
@@ -228,11 +240,20 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
         self.factor_pool = FACTOR_POOL if factor_pool is None else factor_pool
         self._is_ready = True
         self.timestamp = 0.
+        self.cache_index = 0
 
     def __call__(self, market_data: MarketData, **kwargs):
+        timestamp = market_data.timestamp
+
+        if timestamp < self.timestamp:
+            self.cache_index = 0
+            LOGGER.warning(f'Factor pool cache requires market_data replayed in strict order for optimal performance. previous ts {self.timestamp}, new ts {timestamp}. cache idx is reset.')
+
         self.timestamp = market_data.timestamp
 
     def clear(self) -> None:
+        self.cache_index = 0
+        self.timestamp = 0.
 
         if self.factor_pool is not None:
             self.factor_pool.clear()
@@ -245,11 +266,22 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
         if factor_storage is None:
             factor_storage = self.factor_pool.load(market_date=market_date)
 
-        key = self.factor_pool.locate_timestamp(
-            timestamp=self.timestamp,
-            key_range=list(factor_storage.keys()),
-            step=self.factor_pool.log_interval
-        )
+        # key = self.factor_pool.locate_timestamp(
+        #     timestamp=self.timestamp,
+        #     key_range=list(factor_storage.keys()),
+        #     step=self.factor_pool.log_interval
+        # )
+
+        key_range = list(factor_storage.keys())
+
+        idx = self.factor_pool.locate_cache_index(timestamp=self.timestamp, key_range=key_range, start_idx=self.cache_index)
+
+        if idx < len(key_range):
+            key = key_range[idx]
+        else:
+            key = self.timestamp // self.factor_pool.log_interval * self.factor_pool.log_interval
+
+        self.cache_index = idx
 
         value = factor_storage.get(key, {})
         return value
