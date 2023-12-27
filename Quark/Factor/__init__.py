@@ -351,15 +351,18 @@ def collect_factor(monitors: dict[str, MarketDataMonitor] | list[MarketDataMonit
         monitors = [monitors]
 
     for monitor in monitors:  # type: MarketDataMonitor
-        if monitor.is_ready:
+        if monitor.is_ready and monitor.enabled:
             factor_value = monitor.value
             name = monitor.name.removeprefix('Monitor.')
 
             if isinstance(factor_value, (int, float)):
                 factors[name] = factor_value
             elif isinstance(factor_value, dict):
-                for key in factor_value:
-                    factors[f'{name}.{key}'] = factor_value[key]
+                if monitor.name == 'Monitor.FactorPool.Dummy':
+                    factors.update(factor_value)
+                else:
+                    for key in factor_value:
+                        factors[f'{name}.{key}'] = factor_value[key]
             else:
                 raise NotImplementedError(f'Invalid return type, expect float | dict[str, float], got {type(factor_value)}.')
 
