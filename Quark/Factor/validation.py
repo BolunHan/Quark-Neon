@@ -18,12 +18,12 @@ from .Correlation import EntropyEMAMonitor
 from .LowPass import IndexMACDTriggerMonitor
 from .Misc import SyntheticIndexMonitor
 from ..API import historical
-from ..Backtest import simulated_env
+from ..Backtest import simulated_env, factor_pool
 from ..Base import safe_exit, GlobalStatics
+from ..Calibration.Kernel import poly_kernel
 from ..Calibration.bootstrap import BootstrapLinearRegression
 from ..Calibration.cross_validation import CrossValidation
 from ..Calibration.dummies import is_cn_market_session, session_dummies
-from ..Calibration.Kernel import poly_kernel
 from ..Misc import helper
 
 LOGGER = LOGGER.getChild('validation')
@@ -43,7 +43,7 @@ class FactorValidation(object):
         pred_target (str): Prediction target for validation.
         features (list): Names of features for validation.
         factor (MarketDataMonitor): Market data monitor for factor validation.
-        metrics (dict): Dictionary to store validation metrics.
+        factor_value (dict): Dictionary to store validation metrics.
 
     Methods:
         __init__(self, **kwargs): Initialize the FactorValidation instance.
@@ -84,7 +84,7 @@ class FactorValidation(object):
         self.synthetic: SyntheticIndexMonitor | None = None
         self.subscription = set()
         self.replay: ProgressiveReplay | None = None
-        self.metrics: dict[float, dict[str, float]] = {}
+        self.factor_value: dict[float, dict[str, float]] = {}
 
         self.model = BootstrapLinearRegression()
 
@@ -191,10 +191,10 @@ class FactorValidation(object):
 
     def reset(self):
         """
-        Resets the factor and metrics data.
+        Resets the factor and factor_value data.
         """
         self.factor.clear()
-        self.metrics.clear()
+        self.factor_value.clear()
 
     def init_replay(self) -> ProgressiveReplay:
         """
@@ -335,13 +335,13 @@ class FactorValidation(object):
         Args:
             market_date (datetime.date): Current market date.
         """
-        if not self.metrics:
+        if not self.factor_value:
             return
 
-        LOGGER.info(f'{market_date} validation started with {len(self.metrics):,} obs.')
+        LOGGER.info(f'{market_date} validation started with {len(self.factor_value):,} obs.')
 
         # Step 1: Add define prediction target
-        factor_metrics = pd.DataFrame(self.metrics).T
+        factor_metrics = pd.DataFrame(self.factor_value).T
 
         x = self._define_inputs(factors=factor_metrics)
         y = self._define_prediction(factors=factor_metrics)
@@ -447,7 +447,7 @@ class FactorValidation(object):
 
             if timestamp >= last_update + self.sampling_interval:
                 timestamp_index = timestamp // self.sampling_interval * self.sampling_interval
-                self.metrics[timestamp_index] = entry_log = {}
+                self.factor_value[timestamp_index] = entry_log = {}
 
             current_bar = self._collect_synthetic(timestamp=timestamp, current_bar=current_bar, last_update=last_update, entry_log=entry_log)
             self._collect_factor(timestamp=timestamp, last_update=last_update, entry_log=entry_log)
@@ -480,9 +480,13 @@ class FactorBatchValidation(FactorValidation):
         super().__init__(**kwargs)
 
         self.poly_degree = kwargs.get('poly_degree', 2)
+        self.override_cache = kwargs.get('override_cache', False)
 
         self.features: list[str] = ['MACD.Index.Trigger.Synthetic', 'Entropy.Price.EMA']
         self.factor: list[MarketDataMonitor] = []
+
+        self.factor_pool = factor_pool.FACTOR_POOL
+        self.factor_cache: MarketDataMonitor | None = None
 
     def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
         """
@@ -515,12 +519,66 @@ class FactorBatchValidation(FactorValidation):
 
         )
 
+        self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
+
         for _ in self.factor:
             MDS.add_monitor(_)
 
         MDS.add_monitor(self.synthetic)
 
+        if not self.override_cache:
+            MDS.add_monitor(self.factor_cache)
+
         return self.factor
+
+    def init_cache(self, market_date: datetime.date):
+        self.factor_pool.load(market_date=market_date)
+        factor_existed = self.factor_pool.factor_names(market_date=market_date)
+
+        for factor in self.factor:
+            factor_prefix = factor.name.removeprefix('Monitor.')
+
+            for _ in factor_existed:
+                if factor_prefix in _:
+                    factor.enabled = False
+                    LOGGER.info(f'Factor {factor.name} found in the factor cache, and will be disabled.')
+                    break
+
+    def update_cache(self, market_date: datetime):
+        if self.override_cache:
+            LOGGER.info('Cache overridden!')
+            self.factor_pool.batch_update(factors=self.factor_value)
+        else:
+            LOGGER.info('Cache updated!')
+            exclude_keys = self.factor_pool.factor_names(market_date=market_date)
+            self.factor_pool.batch_update(factors=self.factor_value, exclude_keys=exclude_keys)
+        self.factor_pool.dump()
+
+    def bod(self, market_date: datetime.date, **kwargs) -> None:
+
+        if not self.override_cache:
+            self.init_cache(market_date=market_date)
+
+        super().bod(market_date=market_date, **kwargs)
+
+        # no replay task is needed, remove all tasks
+        if not self.override_cache:
+            if all([not factor.enabled for factor in self.factor]):
+                self.replay.replay_subscription.clear()
+                self.subscription.clear()  # need to ensure the synchronization of the subscription
+                LOGGER.info(f'{market_date} All factor is cached, skip this day.')
+                self.factor_value.update(self.factor_pool.storage[market_date])
+
+    def eod(self, market_date: datetime.date, **kwargs) -> None:
+        self.update_cache(market_date=market_date)
+        super().eod(market_date=market_date, **kwargs)
+
+    def _collect_factor(self, timestamp: float, last_update: float, entry_log: dict[str, float]):
+        super()._collect_factor(timestamp=timestamp, last_update=last_update, entry_log=entry_log)
+
+        if not self.override_cache:
+            factors = collect_factor(monitors=self.factor_cache)
+            entry_log.update(factors)
 
     def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
         """
@@ -547,7 +605,11 @@ class FactorBatchValidation(FactorValidation):
         """
         for _ in self.factor:
             _.clear()
+            _.enabled = True
+
         self.synthetic.clear()
+        self.factor_value.clear()
+        self.factor_cache.clear()
 
     def _define_inputs(self, factors: pd.DataFrame):
         """
