@@ -7,6 +7,7 @@ import datetime
 import os
 import pathlib
 import uuid
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -87,6 +88,7 @@ class FactorValidation(object):
         self.factor_value: dict[float, dict[str, float]] = {}
 
         self.model = BootstrapLinearRegression()
+        self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
 
     def init_factor(self, **kwargs) -> MarketDataMonitor:
         """
@@ -272,7 +274,6 @@ class FactorValidation(object):
         Returns:
             Tuple: Cross-validation object and plotly figure.
         """
-        import plotly.graph_objects as go
 
         x_axis = factors['market_time']
 
@@ -282,10 +283,13 @@ class FactorValidation(object):
         y = y[valid_mask]
         x_axis = x_axis[valid_mask]
 
-        cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
-        cv.validate(x=x, y=y)
-        fig = cv.plot(x=x, y=y, x_axis=x_axis)
+        self.cv.validate(x=x, y=y)
+        fig = self.cv.plot(x=x, y=y, x_axis=x_axis)
+        fig = self.plot_synthetic(factors=factors, fig=fig)
+        return fig
 
+    def plot_synthetic(self, factors: pd.DataFrame, fig):
+        import plotly.graph_objects as go
         candlestick_trace = go.Candlestick(
             name='Synthetic',
             x=factors['market_time'],
@@ -308,7 +312,7 @@ class FactorValidation(object):
             )
         )
 
-        return cv, fig
+        return fig
 
     def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
         """
@@ -347,7 +351,7 @@ class FactorValidation(object):
         y = self._define_prediction(factors=factor_metrics)
 
         # Step 2: Regression analysis
-        cv, fig = self._cross_validation(x=x, y=y, factors=factor_metrics)
+        fig = self._cross_validation(x=x, y=y, factors=factor_metrics)
 
         # Step 3: Dump the results
         self._dump_result(market_date=market_date, factors=factor_metrics, fig=fig)
@@ -642,12 +646,92 @@ class FactorBatchValidation(FactorValidation):
         return x
 
 
+class InterTemporalValidation(FactorBatchValidation):
+    """
+    model is trained prior to the beginning of the day, using multi-day data
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        self.training_days: int = kwargs.get('training_days', 5)
+        self.factor_value_storage = deque(maxlen=self.training_days)
+
+    def validation(self, market_date: datetime.date):
+        if not self.factor_value_storage:
+            self.factor_value_storage.append(self.factor_value.copy())
+            return
+
+        LOGGER.info(f'{market_date} validation started with {len(self.factor_value_storage):,} days obs.')
+
+        # Step 1: define training set
+        x_train, y_train = [], []
+        for factor_value in self.factor_value_storage:
+            factor_metrics = pd.DataFrame(factor_value).T
+
+            _x = self._define_inputs(factors=factor_metrics)
+            _y = self._define_prediction(factors=factor_metrics)
+
+            x_train.append(_x)
+            y_train.append(_y)
+
+        x_train = np.concatenate(x_train)
+        y_train = np.concatenate(y_train)
+
+        # Step 2: define validation set
+        factor_metrics = pd.DataFrame(self.factor_value).T
+        x_val = self._define_inputs(factors=factor_metrics)
+        y_val = self._define_prediction(factors=factor_metrics)
+
+        fig = self._out_sample_validation(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, factors=factor_metrics)
+
+        # Step 3: Dump the results
+        self._dump_result(market_date=market_date, factors=factor_metrics, fig=fig)
+
+        # step 4: store factor value
+        self.factor_value_storage.append(self.factor_value.copy())
+
+    def _out_sample_validation(self, x_train, y_train, x_val, y_val, factors: pd.DataFrame):
+        x_axis = factors['market_time']
+
+        valid_mask = np.all(np.isfinite(x_train), axis=1) & np.isfinite(y_train)
+        x_train = x_train[valid_mask]
+        y_train = y_train[valid_mask]
+
+        valid_mask = np.all(np.isfinite(x_val), axis=1) & np.isfinite(y_val)
+        x_val = x_val[valid_mask]
+        y_val = y_val[valid_mask]
+        x_axis = x_axis[valid_mask]
+
+        self.cv.validate_out_sample(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
+        fig = self.cv.plot(x_axis=x_axis)
+        fig = self.plot_synthetic(factors=factors, fig=fig)
+        return fig
+
+    def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
+        dump_dir = f'InterTemporalValidation.{self.validation_id.split("-")[0]}'
+        os.makedirs(dump_dir, exist_ok=True)
+
+        entry_dir = pathlib.Path(dump_dir, f'{market_date:%Y-%m-%d}')
+        os.makedirs(entry_dir, exist_ok=True)
+
+        if len(self.factor) > 2:
+            file_name = f'InterTemporal.validation'
+        else:
+            file_name = f'{"".join([f"[{factor.name}]" for factor in self.factor])}.validation'
+
+        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.csv'))
+        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.html'), include_plotlyjs='cdn')
+        self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
+
+
 def main():
     """
     Main function to run factor validation or batch validation.
     """
     # fv = FactorValidation()
-    fv = FactorBatchValidation()
+    # fv = FactorBatchValidation()
+    fv = InterTemporalValidation()
     fv.run()
     safe_exit()
 
