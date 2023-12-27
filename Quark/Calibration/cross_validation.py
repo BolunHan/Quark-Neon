@@ -1,7 +1,7 @@
 import numpy as np
 
 
-class CrossValidation:
+class CrossValidation(object):
     def __init__(self, model, folds=5, strict_no_future: bool = True, shuffle: bool = True, **kwargs):
         """
         Initialize the CrossValidation object.
@@ -19,7 +19,7 @@ class CrossValidation:
 
         self.fit_kwargs = kwargs
 
-        self.metrics = {'mse': [], 'residuals': [], 'y_actual': [], 'y_val': [], 'prediction_interval': []}
+        self.metrics: dict[str, float | np.ndarray | None] = {'mse': 0., 'residuals': None, 'y_actual': None, 'y_pred': None, 'prediction_interval': None}
 
     @classmethod
     def _compute_metrics(cls, y_actual, y_pred, prediction_interval):
@@ -124,8 +124,78 @@ class CrossValidation:
         self.metrics['mse'] = np.mean(fold_metrics['mse'], axis=0)
         self.metrics['residuals'] = fold_metrics['residuals']
         self.metrics['y_actual'] = fold_metrics['y_actual']
-        self.metrics['y_val'] = fold_metrics['y_pred']
+        self.metrics['y_pred'] = fold_metrics['y_pred']
         self.metrics['prediction_interval'] = fold_metrics['prediction_interval']
+
+    def validate_out_sample(self, x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray):
+        self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
+
+        # Predict on the validation data
+        y_pred, prediction_interval, *_ = self.model.predict(x_val)
+
+        # Compute metrics for the fold
+        mse, residuals, _ = self._compute_metrics(y_val, y_pred, prediction_interval)
+
+        self.metrics['mse'] = mse
+        self.metrics['residuals'] = np.array(residuals)
+        self.metrics['y_actual'] = np.array(y_val)
+        self.metrics['y_pred'] = np.array(y_pred)
+        self.metrics['prediction_interval'] = np.array(prediction_interval)
+
+    def _compute_accuracy(self, y_actual, y_pred):
+        """
+        Compute accuracy as the percentage of correct sign predictions.
+
+        Args:
+            y_actual (numpy.ndarray): Actual output values.
+            y_pred (numpy.ndarray): Predicted output values.
+
+        Returns:
+            float: Accuracy.
+        """
+        correct_signs = np.sign(y_actual) == np.sign(y_pred)
+        accuracy = np.mean(correct_signs)
+        return accuracy
+
+    def _compute_significant_accuracy(self, y_actual, y_pred, prediction_interval):
+        """
+        Compute accuracy for significant predictions based on the prediction interval.
+
+        Args:
+            y_actual (numpy.ndarray): Actual output values.
+            y_pred (numpy.ndarray): Predicted output values.
+            prediction_interval (numpy.ndarray): Prediction interval.
+
+        Returns:
+            float: Significant accuracy.
+        """
+        lower_bound_sign = y_pred + prediction_interval[:, 0]
+        upper_bound_sign = y_pred + prediction_interval[:, 1]
+
+        correct_signs = (y_actual > 0) & (lower_bound_sign > 0) | (y_actual < 0) & (upper_bound_sign < 0)
+        significant_accuracy = np.mean(correct_signs)
+        return significant_accuracy
+
+    def _compute_roc(self, y_actual, bootstrap_residuals, alpha_range=np.linspace(0.01, 0.5, 50)):
+        """
+        Compute Receiver Operating Characteristic (RoC) curve.
+
+        Args:
+            y_actual (numpy.ndarray): Actual output values.
+            bootstrap_residuals (numpy.ndarray): Bootstrap residuals.
+            alpha_range (numpy.ndarray): Range of significance thresholds (alpha values).
+
+        Returns:
+            Tuple[numpy.ndarray, numpy.ndarray]: Alpha values and corresponding RoC values.
+        """
+        roc_values = []
+        for alpha in alpha_range:
+            lower_bound = np.quantile(bootstrap_residuals, alpha / 2)
+            upper_bound = np.quantile(bootstrap_residuals, 1 - alpha / 2)
+            correct_signs = (y_actual > 0) & (lower_bound > 0) | (y_actual < 0) & (upper_bound < 0)
+            roc_values.append(np.mean(correct_signs))
+
+        return alpha_range, np.array(roc_values)
 
     def plot(self, x_axis: list | np.ndarray = None, **kwargs):
         """
@@ -140,7 +210,7 @@ class CrossValidation:
         import plotly.graph_objects as go
 
         fig = go.Figure()
-        y_pred = self.metrics['y_val']
+        y_pred = self.metrics['y_pred']
         y_actual = self.metrics['y_actual']
         interval = self.metrics['prediction_interval']
 
