@@ -59,11 +59,12 @@ def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 
         return pd.DataFrame({'pct_change': pd.Series(target).astype(float)})
 
 
-def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.Price', inplace: bool = True, session_filter=None, decode_level=4, enable_smooth: bool = True, smooth_alpha=0.008, smooth_look_back=5 * 60) -> pd.DataFrame:
+def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.Price', inplace: bool = True, session_filter=None, decoder: RecursiveDecoder = None, decode_level=4, enable_smooth: bool = True, smooth_alpha=0.008, smooth_look_back=5 * 60) -> pd.DataFrame:
     if not inplace:
         factors = pd.DataFrame({key: factors[key]})
 
-    decoder = RecursiveDecoder(level=decode_level)
+    if decoder is None:
+        decoder = RecursiveDecoder(level=decode_level)
 
     # step 1: update decoder
     for _ in factors.iterrows():  # type: tuple[float, dict]
@@ -82,23 +83,14 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
 
         decoder.update_decoder(ticker=key, market_price=market_price, timestamp=timestamp)
 
-    # step 2: mark the ups and downs for each data point
+    # step 2: mark the wave flag (ups and downs) for each data point
     factors['state'] = 0
     local_extreme = decoder.local_extremes(ticker=key, level=decode_level)
-    for wavelet in decoder.state_history[key]:
-        mask = (factors.index >= wavelet.start_ts) & (factors.index <= wavelet.end_ts)
-
-        # Update the 'state' column based on the flag of the wavelet
-        if wavelet.flag.is_up:
-            factors.loc[mask, 'state'] = 1
-        elif wavelet.flag.is_down:
-            factors.loc[mask, 'state'] = -1
-
     factors['local_max'] = np.nan
     factors['local_min'] = np.nan
 
     for i in range(len(local_extreme)):
-        start_ts = local_extreme[i][1]
+        _, start_ts, flag = local_extreme[i]
         end_ts = local_extreme[i + 1][1] if i + 1 < len(local_extreme) else None
 
         # Step 1: Reverse the selected DataFrame
@@ -112,6 +104,7 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
         # Step 2: Calculate cumulative minimum and maximum of "index_price"
         info_selected['local_max'] = info_selected[key].cummax()
         info_selected['local_min'] = info_selected[key].cummin()
+        info_selected['state'] = -flag
 
         # Step 3: Merge the result back into the original DataFrame
         factors['local_max'].update(info_selected['local_max'])
