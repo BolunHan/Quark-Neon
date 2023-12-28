@@ -9,6 +9,10 @@ from . import Regression
 
 
 class Cache(object):
+    """
+    Cache decorator for memoization.
+    """
+
     def __init__(self):
         self.cache = {}
 
@@ -44,21 +48,27 @@ METRIC_CACHE = Cache()
 
 
 class Metrics(object):
-    def __init__(self, model: Regression, x: np.ndarray, y: np.ndarray):
+    """
+    Metrics class for evaluating regression model performance.
+    """
+
+    def __init__(self, model: Regression, x: np.ndarray, y: np.ndarray, informed_baseline: bool = False):
         """
-        Metrics class for evaluating regression model performance.
+        Initialize Metrics class.
 
         Args:
             model (Regression): Regression model object.
             x (numpy.ndarray): Input features.
             y (numpy.ndarray): Output values.
+            informed_baseline (bool): True if the distribution of the y_val is known by the model.
         """
         self.model = model
         self.x = x
         self.y = y
 
         self.alpha = 0.05
-        self.alpha_range = np.linspace(0.01, 0.5, 50)
+        self.alpha_range = np.linspace(0., 1, 100)
+        self.informed_baseline = informed_baseline  # True if the distribution of the y_val is known by the model.
 
     def __del__(self):
         """
@@ -79,6 +89,11 @@ class Metrics(object):
         """
         y_pred, prediction_interval, *_ = self._predict(model=self.model, x=self.x, alpha=self.alpha)
 
+        if self.informed_baseline:
+            accuracy_baseline = 0.5 + np.abs(np.mean(np.sign(self.y))) / 2
+        else:
+            accuracy_baseline = 0.5
+
         mse = self.compute_mse(y_actual=self.y, y_pred=y_pred)
         mae = self.compute_mae(y_actual=self.y, y_pred=y_pred)
         accuracy = self.compute_accuracy(y_actual=self.y, y_pred=y_pred)
@@ -87,16 +102,17 @@ class Metrics(object):
         mae_significant, _ = self.compute_mae_significant(model=self.model, x=self.x, y_actual=self.y, alpha=self.alpha)
         accuracy_significant, selection_ratio = self.compute_accuracy_significant(model=self.model, x=self.x, y_actual=self.y, alpha=self.alpha)
 
-        auc_roc = self.compute_auc_roc(model=self.model, x=self.x, y_actual=self.y, alpha_range=self.alpha_range)
+        auc_roc = self.compute_auc_roc(model=self.model, x=self.x, y_actual=self.y, alpha_range=self.alpha_range) - accuracy_baseline
 
         return dict(
             obs_num=len(self.x),
             mse=mse,
             mae=mae,
-            accuracy=accuracy,
+            accuracy_baseline=accuracy_baseline,
+            accuracy_boost=accuracy - accuracy_baseline,
             mse_significant=mse_significant,
             mae_significant=mae_significant,
-            accuracy_significant=accuracy_significant,
+            accuracy_boost_significant=accuracy_significant - accuracy_baseline,
             significant_ratio=selection_ratio,
             auc_roc=auc_roc
         )
@@ -296,13 +312,13 @@ class Metrics(object):
         valid_indices = ~np.isnan(roc_values)
 
         if np.any(valid_indices):
-            auc_roc = -np.trapz(roc_values[valid_indices], (1 - 2 * alpha_range)[valid_indices])
+            auc_roc = -np.trapz(roc_values[valid_indices], (1 - alpha_range)[valid_indices])
             return auc_roc
         else:
             return np.nan
 
     @classmethod
-    def plot_roc(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha_range: np.ndarray, **kwargs):
+    def plot_roc(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha_range: np.ndarray, accuracy_baseline: float = 0., **kwargs):
         """
         Plot the Receiver Operating Characteristic (ROC) Curve.
 
@@ -311,6 +327,7 @@ class Metrics(object):
             x (numpy.ndarray): Input features.
             y_actual (numpy.ndarray): Actual output values.
             alpha_range (numpy.ndarray): Array of significance levels.
+            accuracy_baseline: Baseline value of accuracy
             **kwargs: Additional keyword arguments for customizing the plot.
 
         Returns:
@@ -323,14 +340,14 @@ class Metrics(object):
 
         for alpha in alpha_range:
             accuracy, selection_ratio = cls.compute_accuracy_significant(model=model, x=x, y_actual=y_actual, alpha=alpha)
-            roc_values.append(accuracy)
+            roc_values.append(accuracy - accuracy_baseline)
             selection_ratios.append(selection_ratio)
 
         fig = go.Figure()
 
         fig.add_trace(
             go.Scatter(
-                x=1 - 2 * alpha_range,
+                x=1 - alpha_range,
                 y=roc_values,
                 mode='lines',
                 name=kwargs.get('curve_name', "ROC Curve"),
@@ -341,9 +358,9 @@ class Metrics(object):
 
         fig.add_trace(
             go.Bar(
-                x=1 - 2 * alpha_range,
+                x=1 - alpha_range,
                 y=selection_ratios,
-                opacity=0.4,
+                opacity=0.3,
                 name="Selection Ratio",
                 marker=dict(color='green'),
                 yaxis='y2'
@@ -352,18 +369,24 @@ class Metrics(object):
 
         fig.update_layout(
             title=kwargs.get('title', "Receiver Operating Characteristic (ROC) Curve"),
-            xaxis_title=kwargs.get('x_name', "Classification threshold (1 - 2 * alpha)"),
-            yaxis_title=kwargs.get('y_name', "Accuracy"),
+            xaxis_title=kwargs.get('x_name', "Classification threshold (1 - alpha)"),
+            yaxis_title=kwargs.get('y_name', "Accuracy Boost" if accuracy_baseline else "Accuracy"),
             hovermode="x unified",
             template='simple_white',
+            showlegend=False,
             yaxis=dict(
-                showspikes=True
+                maxallowed=1,
+                minallowed=0,
+                showspikes=True,
+                tickformat='.2%'
             ),
             yaxis2=dict(
                 title="Selection Ratio",
+                range=[0, 1],
                 overlaying='y',
                 side='right',
-                showgrid=False
+                showgrid=False,
+                tickformat='.2%'
             )
         )
 
@@ -387,7 +410,7 @@ class Metrics(object):
         metrics_table = pd.DataFrame({'Metrics': pd.Series(metrics_data)})
 
         # Create ROC curve figure
-        roc_curve = self.plot_roc(model=self.model, x=self.x, y_actual=self.y, alpha_range=self.alpha_range)
+        roc_curve = self.plot_roc(model=self.model, x=self.x, y_actual=self.y, baseline_accuracy=metrics_data['accuracy_baseline'], alpha_range=self.alpha_range)
 
         # Convert the figures to HTML codes
         metrics_table_html = metrics_table.to_html(float_format=lambda x: f'{x:.4%}')
@@ -584,7 +607,6 @@ class CrossValidation(object):
                     y=y_pred + prediction_interval[:, 1],
                     mode='lines',
                     line=dict(color='red', dash='dash'),
-                    showlegend=False,
                     yaxis='y1'
                 )
             )
@@ -598,7 +620,6 @@ class CrossValidation(object):
                     mode='lines',
                     fillcolor='rgba(255,0,0,0.3)',
                     fill='tonexty',
-                    showlegend=False,
                     yaxis='y1'
                 )
             )
@@ -619,8 +640,8 @@ class CrossValidation(object):
 
     @property
     def metrics(self) -> Metrics | None:
-        if self.x_val is None:
-            return None
+        if self.x_val is None or self.y_val is None:
+            raise ValueError('Must call .validation() method first')
 
         if self._metrics is None:
             self._metrics = Metrics(
