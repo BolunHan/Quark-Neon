@@ -7,6 +7,111 @@ from . import Regression
 __all__ = ['LinearRegression', 'RidgeRegression', 'LassoRegression']
 
 
+class Scaler(object):
+    def __init__(self, sample_range: list[float] = None):
+        self.mean = None
+        self.variance = None
+
+        self.sample_range = [0.05, 0.95] if sample_range is None else sample_range
+
+    def fit(self, x: np.ndarray):
+        # Calculate mean and variance for each feature using the center 90% of the data
+        lower_percentile = self.sample_range[0]
+        upper_percentile = self.sample_range[1]
+
+        num_features = x.shape[1]
+        mean = []
+        variance = []
+
+        for i in range(num_features):
+            feature_data = x[:, i]
+            is_dummy = np.all((feature_data == 0) | (feature_data == 1) | (feature_data == -1))
+
+            if is_dummy:
+                feature_mean = 0.5
+                feature_variance = 1
+            else:
+                lower_bound = np.quantile(feature_data, lower_percentile)
+                upper_bound = np.quantile(feature_data, upper_percentile)
+                feature_data_centered = feature_data[(feature_data >= lower_bound) & (feature_data <= upper_bound)]
+
+                feature_mean = np.nanmean(feature_data_centered)
+                feature_variance = np.nanvar(feature_data_centered, ddof=1)
+
+            mean.append(feature_mean)
+            variance.append(feature_variance)
+
+        self.mean = np.array(mean)
+        self.variance = np.array(variance)
+
+    def transform(self, x):
+        # Transform each feature (column) of x
+        if self.mean is None or self.variance is None:
+            raise ValueError("Scaler has not been fitted. Call fit() before transform().")
+
+        num_features = x.shape[1]
+        transformed_columns = []
+
+        for i in range(num_features):
+            feature_data = x[:, i]
+            is_dummy = np.all((feature_data == 0) | (feature_data == 1))
+
+            if is_dummy:
+                transformed_columns.append(feature_data)
+            else:
+                transformed_column = (feature_data - self.mean[i]) / np.sqrt(self.variance[i])
+                transformed_columns.append(transformed_column)
+
+        transformed_x = np.column_stack(transformed_columns)
+        return transformed_x
+
+    def to_json(self, fmt='dict') -> dict | str:
+        """
+        Serialize the model to a JSON format.
+
+        Args:
+            fmt (str): Format for serialization ('dict' or 'json').
+
+        Returns:
+            dict or str: Serialized model.
+        """
+        json_dict = dict(
+            mean=self.mean.tolist() if self.mean is not None else None,
+            variance=self.variance.tolist() if self.variance is not None else None,
+            sample_range=self.sample_range
+        )
+
+        if fmt == 'dict':
+            return json_dict
+        else:
+            return json.dumps(json_dict)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+        """
+        Deserialize the model from a JSON format.
+
+        Args:
+            json_str (str, bytes, or dict): Serialized model.
+
+        Returns:
+            LinearRegression: Deserialized model.
+        """
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        self = cls(sample_range=json_dict['sample_range'])
+
+        self.mean = np.array(json_dict["mean"]) if json_dict["mean"] is not None else None
+        self.variance = np.array(json_dict["variance"]) if json_dict["variance"] is not None else None
+
+        return self
+
+
 class LinearRegression(Regression):
     """
     LinearRegression class for performing linear regression with bootstrapping.
@@ -339,7 +444,7 @@ class RidgeRegression(LinearRegression):
         bootstrap_block(x, y): Generate bootstrap samples using the block bootstrap method.
     """
 
-    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0):
+    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0, scaler: Scaler = None):
         """
         Initialize the BootstrapRidgeRegression object.
 
@@ -350,6 +455,15 @@ class RidgeRegression(LinearRegression):
         """
         super().__init__(bootstrap_samples=bootstrap_samples, bootstrap_block_size=bootstrap_block_size)
         self.alpha = alpha
+        self.scaler = Scaler() if scaler is None else scaler
+
+    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
+        if self.scaler is not None:
+            x = np.array(x)
+            self.scaler.fit(x)
+            x = self.scaler.transform(x)
+
+        return super().fit(x=x, y=y, use_bootstrap=use_bootstrap, method=method)
 
     def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         n, m = x.shape
@@ -365,14 +479,51 @@ class RidgeRegression(LinearRegression):
 
         return coefficient, residuals
 
+    def predict(self, x: list | np.ndarray, alpha=0.05):
 
-class LassoRegression(LinearRegression):
-    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0):
-        super().__init__(bootstrap_samples, bootstrap_block_size)
-        self.alpha = alpha
+        if self.scaler is not None:
+            x = np.array(x)
+            x = self.scaler.transform(x)
 
-        self.max_iter = 1000
-        self.tolerance = 1e-4
+        return super().predict(x=x, alpha=alpha)
+
+    def to_json(self, fmt='dict') -> dict | str:
+        json_dict = super().to_json(fmt='dict')
+        json_dict['scaler'] = self.scaler.to_json(fmt='dict')
+
+        if fmt == 'dict':
+            return json_dict
+        else:
+            return json.dumps(json_dict)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        self = cls(
+            bootstrap_samples=json_dict['bootstrap_samples'],
+            bootstrap_block_size=json_dict['bootstrap_block_size'],
+            alpha=json_dict['alpha'],
+            scaler=json_dict['scaler']
+        )
+
+        self.coefficient = np.array(json_dict['coefficient'])
+        self.bootstrap_coefficients.extend([np.array(_) for _ in json_dict['bootstrap_coefficients']])
+
+        return self
+
+
+class LassoRegression(RidgeRegression):
+    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0, scaler: Scaler = None, max_iter: int = 1000, tolerance: float = 1e-4):
+        super().__init__(bootstrap_samples=bootstrap_samples, bootstrap_block_size=bootstrap_block_size, alpha=alpha, scaler=scaler)
+
+        self.max_iter = max_iter
+        self.tolerance = tolerance
 
     def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         from sklearn.linear_model import Lasso
@@ -388,7 +539,7 @@ class LassoRegression(LinearRegression):
 
         return coefficients, residuals
 
-    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _fit2(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         n, m = x.shape
 
         # Use coordinate descent to solve Lasso regression
@@ -414,6 +565,39 @@ class LassoRegression(LinearRegression):
         residuals = y - np.dot(x, w)
 
         return w, residuals
+
+    def to_json(self, fmt='dict') -> dict | str:
+        json_dict = super().to_json(fmt='dict')
+        json_dict['max_iter'] = self.max_iter
+        json_dict['tolerance'] = self.tolerance
+
+        if fmt == 'dict':
+            return json_dict
+        else:
+            return json.dumps(json_dict)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        self = cls(
+            bootstrap_samples=json_dict['bootstrap_samples'],
+            bootstrap_block_size=json_dict['bootstrap_block_size'],
+            alpha=json_dict['alpha'],
+            scaler=json_dict['scaler'],
+            max_iter=json_dict['max_iter'],
+            tolerance=json_dict['tolerance']
+        )
+
+        self.coefficient = np.array(json_dict['coefficient'])
+        self.bootstrap_coefficients.extend([np.array(_) for _ in json_dict['bootstrap_coefficients']])
+
+        return self
 
 
 def test():
