@@ -22,7 +22,7 @@ from ..API import historical
 from ..Backtest import simulated_env, factor_pool
 from ..Base import safe_exit, GlobalStatics
 from ..Calibration.Kernel import poly_kernel
-from ..Calibration.bootstrap import BootstrapLinearRegression
+from ..Calibration.bootstrap import *
 from ..Calibration.cross_validation import CrossValidation
 from ..Calibration.dummies import is_cn_market_session, session_dummies
 from ..Misc import helper
@@ -87,7 +87,7 @@ class FactorValidation(object):
         self.replay: ProgressiveReplay | None = None
         self.factor_value: dict[float, dict[str, float]] = {}
 
-        self.model = BootstrapLinearRegression()
+        self.model = RidgeRegression(alpha=0.0001)
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
 
     def init_factor(self, **kwargs) -> MarketDataMonitor:
