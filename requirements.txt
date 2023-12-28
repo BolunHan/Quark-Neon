@@ -7,3 +7,6 @@ numpy
 py7zr  # historical data api
 baostock  # minute bar data api
 plotly  # plotting support
+
+# for calibration
+scikit-learn
