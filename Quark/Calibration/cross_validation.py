@@ -419,7 +419,7 @@ class CrossValidation(object):
         Initialize the CrossValidation object.
 
         Args:
-            model: Regression model object (e.g., BootstrapLinearRegression).
+            model: Regression model object (e.g., LinearRegression).
             folds (int): Number of folds for cross-validation.
             strict_no_future (bool): training data must be prier to ALL the validation data
             shuffle (bool): shuffle the training and validation index

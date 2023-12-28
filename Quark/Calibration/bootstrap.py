@@ -4,10 +4,12 @@ import numpy as np
 
 from . import Regression
 
+__all__ = ['LinearRegression', 'RidgeRegression', 'LassoRegression']
 
-class BootstrapLinearRegression(Regression):
+
+class LinearRegression(Regression):
     """
-    BootstrapLinearRegression class for performing linear regression with bootstrapping.
+    LinearRegression class for performing linear regression with bootstrapping.
 
     Note: by default the .predict function will return the mean, not median, of the prediction interval.
 
@@ -27,14 +29,14 @@ class BootstrapLinearRegression(Regression):
         from_json(json_str): Deserialize the model from a JSON format.
 
     Usage:
-        model = BootstrapLinearRegression()
+        model = LinearRegression()
         model.fit(x, y, use_bootstrap=True, method='block')
         model.plot(x=x, y=y, x_axis=index)
     """
 
     def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05):
         """
-        Initialize the BootstrapLinearRegression object.
+        Initialize the LinearRegression object.
 
         Args:
             bootstrap_samples (int): Number of bootstrap samples to generate.
@@ -46,6 +48,10 @@ class BootstrapLinearRegression(Regression):
         self.bootstrap_samples = bootstrap_samples
         self.bootstrap_block_size = bootstrap_block_size
         self.bootstrap_coefficients: list[np.ndarray] = []
+
+    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        coefficient, residuals, *_ = np.linalg.lstsq(x, y, rcond=None)
+        return coefficient, residuals
 
     def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
         """
@@ -60,7 +66,7 @@ class BootstrapLinearRegression(Regression):
         Returns:
             None
         """
-        coefficient, residuals, *_ = np.linalg.lstsq(x, y, rcond=None)
+        coefficient, residuals = self._fit(x=x, y=y)
 
         if use_bootstrap:
             if method == 'standard':
@@ -89,7 +95,7 @@ class BootstrapLinearRegression(Regression):
         for _ in range(self.bootstrap_samples):
             indices = np.random.choice(n, n, replace=True)
             x_sampled, y_sampled = x[indices], y[indices]
-            coefficient = np.linalg.lstsq(x_sampled, y_sampled, rcond=None)[0]
+            coefficient, _ = self._fit(x=x_sampled, y=y_sampled)
             self.bootstrap_coefficients.append(coefficient)
 
     def bootstrap_block(self, x, y):
@@ -114,7 +120,7 @@ class BootstrapLinearRegression(Regression):
                 indices.extend(range(block_start, block_start + block_size))
 
             x_sampled, y_sampled = x[indices], y[indices]
-            coefficient = np.linalg.lstsq(x_sampled, y_sampled, rcond=None)[0]
+            coefficient, _ = self._fit(x=x_sampled, y=y_sampled)
             self.bootstrap_coefficients.append(coefficient)
 
     def predict(self, x: list | np.ndarray, alpha=0.05):
@@ -296,7 +302,7 @@ class BootstrapLinearRegression(Regression):
             json_str (str, bytes, or dict): Serialized model.
 
         Returns:
-            BootstrapLinearRegression: Deserialized model.
+            LinearRegression: Deserialized model.
         """
         if isinstance(json_str, (str, bytes)):
             json_dict = json.loads(json_str)
@@ -316,9 +322,103 @@ class BootstrapLinearRegression(Regression):
         return self
 
 
+class RidgeRegression(LinearRegression):
+    """
+    BootstrapRidgeRegression class for performing ridge regression with bootstrapping.
+
+    Attributes:
+        coefficient (numpy.ndarray): Coefficients of the ridge regression model.
+        bootstrap_samples (int): Number of bootstrap samples to generate.
+        bootstrap_block_size (float): Block size as a percentage of the dataset length for block bootstrap.
+        bootstrap_coefficients (list): List to store bootstrap sample coefficients.
+        alpha (float): Regularization strength.
+
+    Methods:
+        fit(x, y, use_bootstrap=True, method='standard'): Fit the ridge regression model to the data.
+        bootstrap_standard(x, y): Generate bootstrap samples using the standard method.
+        bootstrap_block(x, y): Generate bootstrap samples using the block bootstrap method.
+    """
+
+    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0):
+        """
+        Initialize the BootstrapRidgeRegression object.
+
+        Args:
+            bootstrap_samples (int): Number of bootstrap samples to generate.
+            bootstrap_block_size (float): Block size as a percentage of the dataset length for block bootstrap.
+            alpha (float): Regularization strength.
+        """
+        super().__init__(bootstrap_samples=bootstrap_samples, bootstrap_block_size=bootstrap_block_size)
+        self.alpha = alpha
+
+    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        n, m = x.shape
+        identity_matrix = np.eye(m)
+        regularization_matrix = self.alpha * identity_matrix
+
+        x_transpose_x = np.dot(x.T, x)
+        ridge_matrix = x_transpose_x + regularization_matrix
+        ridge_matrix_inv = np.linalg.inv(ridge_matrix)
+        coefficient = np.dot(np.dot(ridge_matrix_inv, x.T), y)
+
+        residuals = y - np.dot(x, coefficient)
+
+        return coefficient, residuals
+
+
+class LassoRegression(LinearRegression):
+    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0):
+        super().__init__(bootstrap_samples, bootstrap_block_size)
+        self.alpha = alpha
+
+        self.max_iter = 1000
+        self.tolerance = 1e-4
+
+    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        from sklearn.linear_model import Lasso
+        # Create Lasso regression model
+        lasso_model = Lasso(alpha=self.alpha)
+
+        # Fit the model
+        lasso_model.fit(x, y)
+
+        # Extract coefficients and residuals
+        coefficients = lasso_model.coef_
+        residuals = y - lasso_model.predict(x)
+
+        return coefficients, residuals
+
+    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        n, m = x.shape
+
+        # Use coordinate descent to solve Lasso regression
+        # This is a basic implementation; you might want to use a specialized library for better performance
+
+        w = np.zeros(m)
+
+        for _ in range(self.max_iter):
+            w_old = np.copy(w)
+
+            for j in range(m):
+                x_j = x[:, j]
+                residual = y - np.dot(x, w) + w[j] * x_j
+                rho = np.dot(x_j, residual)
+                z = np.dot(x_j, x_j)
+
+                # Soft thresholding
+                w[j] = np.sign(rho) * max(0, abs(rho) - self.alpha) / z if z != 0 else 0
+
+            if np.sum(np.abs(w - w_old)) < self.tolerance:
+                break
+
+        residuals = y - np.dot(x, w)
+
+        return w, residuals
+
+
 def test():
     """
-    Test the BootstrapLinearRegression class with synthetic data.
+    Test the LinearRegression class with synthetic data.
 
     Returns:
         None
@@ -330,11 +430,11 @@ def test():
     y = 5 * index + 5 * (index - 50) ** 2 + np.random.normal(scale=500, size=n) + np.random.normal(scale=100, size=n) * (index - 50)
 
     # Example usage:
-    model = BootstrapLinearRegression(bootstrap_samples=50)
+    model = LinearRegression(bootstrap_samples=50)
     model.fit(x, y, use_bootstrap=True, method='block')
 
     json_dump = model.to_json()
-    model = BootstrapLinearRegression.from_json(json_dump)
+    model = LinearRegression.from_json(json_dump)
 
     # Use the index as the x_axis
     fig = model.plot(x=x, y=y, x_axis=index)
