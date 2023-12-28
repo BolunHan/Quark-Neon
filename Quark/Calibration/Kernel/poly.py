@@ -59,17 +59,38 @@ def poly_features(
 
     for expression in extended_names:
         features = expression.split(' * ')
-        value = 1
+        sorted_terms = sorted(features)
+        term_counts = Counter(sorted_terms)
 
-        for feature in features:
-            _ = np.array(data[feature])
-            value *= _
+        expression_simplified = ' * '.join([f'{term}^{count}' if count > 1 else term for term, count in term_counts.items()])
+
+        # check if the expression has single feature and the feature is a dummy.
+        if len(term_counts) == 1:
+            feature = list(term_counts)[0]
+            feature_data = np.array(data[feature])
+            is_dummy = np.all((feature_data == 0) | (feature_data == 1))
+
+            if is_dummy:
+                continue
 
         if simplified_name:
-            terms = expression.split(' * ')
-            sorted_terms = sorted(terms)
-            term_counts = Counter(sorted_terms)
-            expression = ' * '.join([f'{term}^{count}' if count > 1 else term for term, count in term_counts.items()])
+            expression = expression_simplified
+
+        value = 1
+        all_dummy = True
+
+        for feature in features:
+            feature_data = np.array(data[feature])
+            is_dummy = np.all((feature_data == 0) | (feature_data == 1))
+
+            if not is_dummy:
+                all_dummy = False
+
+            value = np.multiply(value, feature_data)
+
+        # the expression has only the dummies and they excluded each other
+        if all_dummy and len(np.unique(value)) == 1:
+            continue
 
         extended_features[expression] = value
 
