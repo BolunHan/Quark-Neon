@@ -3,7 +3,7 @@ import json
 import pathlib
 
 import numpy as np
-
+from typing import overload
 from .. import LOGGER
 
 __all__ = ['LOGGER']
@@ -15,9 +15,11 @@ class Regression(object, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def fit(self, x: list | np.ndarray, y: list | np.ndarray, **kwargs) -> None: ...
 
+    @overload
+    def predict(self, x: np.ndarray, alpha=0.05) -> tuple[np.ndarray, np.ndarray, ...]: ...
+
     @abc.abstractmethod
     def predict(self, x: list | np.ndarray, alpha=0.05) -> tuple[float, tuple[float, float], ...]: ...
-
     """
     returns a prediction value, 
     and a prediction interval (lower bound and upper bound, of confidence interval {alpha}, minus the prediction value) 
