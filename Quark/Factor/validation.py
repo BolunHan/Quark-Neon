@@ -26,9 +26,11 @@ from ..Calibration.bootstrap import *
 from ..Calibration.cross_validation import CrossValidation
 from ..Calibration.dummies import is_cn_market_session, session_dummies
 from ..Misc import helper
+from .decoder import RecursiveDecoder
 
 LOGGER = LOGGER.getChild('validation')
 DUMMY_WEIGHT = False
+TIME_ZONE = GlobalStatics.TIME_ZONE
 
 
 class FactorValidation(object):
@@ -78,6 +80,7 @@ class FactorValidation(object):
         self.sampling_interval = kwargs.get('sampling_interval', 10.)
 
         # Params for validation
+        self.decoder = RecursiveDecoder(level=3)
         self.pred_target = 'Synthetic.market_price'
         self.features = {'MACD.Index.Trigger.Synthetic'}
 
@@ -87,7 +90,8 @@ class FactorValidation(object):
         self.replay: ProgressiveReplay | None = None
         self.factor_value: dict[float, dict[str, float]] = {}
 
-        self.model = RidgeRegression(alpha=0.0001)
+        self.model = RidgeRegression(alpha=0.0)
+        self.coefficients: dict[str, float] = {}
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
 
     def init_factor(self, **kwargs) -> MarketDataMonitor:
@@ -197,6 +201,7 @@ class FactorValidation(object):
         """
         self.factor.clear()
         self.factor_value.clear()
+        self.decoder.clear()
 
     def init_replay(self) -> ProgressiveReplay:
         """
@@ -231,11 +236,21 @@ class FactorValidation(object):
         factors['market_time'] = [datetime.datetime.fromtimestamp(_) for _ in factors.index]
         factors['bias'] = 1.
 
-        x_matrix = factors[list(self.features)]
-        x_matrix = x_matrix.loc[:, x_matrix.nunique() > 1]
+        x_matrix = factors.loc[:, list(self.features)]
+
+        invalid_factor: pd.DataFrame = x_matrix.loc[:, x_matrix.nunique() == 1]
+        if not invalid_factor.empty:
+            LOGGER.error(f'Invalid factor {invalid_factor}, add epsilon to avoid multicolinearity')
+            for name in invalid_factor.columns:
+                x_matrix[name] = 1 + np.random.normal(scale=0.1, size=len(x_matrix))
+
         x_matrix['bias'] = 1.
 
+        for _ in x_matrix.columns:
+            self.coefficients[_] = 0.
+
         x = x_matrix.to_numpy()
+
         return x
 
     def _define_prediction(self, factors: pd.DataFrame):
@@ -258,10 +273,11 @@ class FactorValidation(object):
             key=self.pred_target,
             session_filter=lambda ts: is_cn_market_session(ts)['is_valid'],
             inplace=True,
-            decode_level=3
+            decoder=self.decoder,
+            decode_level=self.decoder.level
         )
 
-        y = factors['target_actual'].to_numpy()
+        y = factors['target_smoothed'].to_numpy()
         return y
 
     def _cross_validation(self, x, y, factors: pd.DataFrame):
@@ -288,7 +304,7 @@ class FactorValidation(object):
         fig = self.plot_synthetic(factors=factors, fig=fig)
         return fig
 
-    def plot_synthetic(self, factors: pd.DataFrame, fig):
+    def plot_synthetic(self, factors: pd.DataFrame, fig, plot_wavelet: bool = True):
         import plotly.graph_objects as go
         candlestick_trace = go.Candlestick(
             name='Synthetic',
@@ -300,8 +316,22 @@ class FactorValidation(object):
             yaxis='y2'
         )
         fig.add_trace(candlestick_trace)
+
+        if plot_wavelet:
+            for level in range(self.decoder.level + 1):
+                local_extreme = self.decoder.local_extremes(ticker=self.pred_target, level=level)
+
+                if not local_extreme:
+                    break
+
+                y, x, wave_flag = zip(*local_extreme)
+                x = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in x]
+
+                trace = go.Scatter(x=x, y=y, mode='lines', name=f'decode level {level}', yaxis='y2')
+                fig.add_trace(trace)
+
         fig.update_xaxes(
-            rangebreaks=[dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 9.5], pattern="hour")],
+            rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")],
         )
         fig.update_layout(
             yaxis2=dict(
@@ -330,7 +360,7 @@ class FactorValidation(object):
         os.makedirs(entry_dir, exist_ok=True)
 
         factors.to_csv(pathlib.Path(entry_dir, f'{self.factor.name}.validation.csv'))
-        fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.validation.html'), include_plotlyjs='cdn')
+        fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.validation.html'))
 
     def validation(self, market_date: datetime.date):
         """
@@ -614,6 +644,7 @@ class FactorBatchValidation(FactorValidation):
         self.synthetic.clear()
         self.factor_value.clear()
         self.factor_cache.clear()
+        self.decoder.clear()
 
     def _define_inputs(self, factors: pd.DataFrame):
         """
@@ -622,27 +653,36 @@ class FactorBatchValidation(FactorValidation):
         Args:
             factors (pd.DataFrame): DataFrame containing factors.
         """
-        super()._define_inputs(factors=factors)
+        factors['market_time'] = [datetime.datetime.fromtimestamp(_) for _ in factors.index]
+        factors['bias'] = 1.
+
         session_dummies(timestamp=factors.index, inplace=factors)
 
         # default features
         features = {'Dummies.IsOpening', 'Dummies.IsClosing'}
         features.update(self.features)
+        feature_original = factors[list(features)]
+        x_matrix = factors.loc[:, list(features)]
 
         for i in range(1, self.poly_degree):
-            feature_df = factors[self.features]
-            extended_feature = poly_kernel(feature_df, degree=i + 1)
+            additional_feature = poly_kernel(feature_original, degree=i + 1)
 
-            for _ in extended_feature:
-                factors[_] = extended_feature[_]
+            for _ in additional_feature:
+                x_matrix[_] = additional_feature[_]
 
-            features.update(extended_feature.keys())
+        invalid_factor: pd.DataFrame = x_matrix.loc[:, x_matrix.nunique() == 1]
+        if not invalid_factor.empty:
+            LOGGER.error(f'Invalid factor {invalid_factor}, add epsilon to avoid multicolinearity')
+            for name in invalid_factor.columns:
+                x_matrix[name] = 1 + np.random.normal(scale=0.1, size=len(x_matrix))
 
-        x_matrix = factors[list(features)]
-        x_matrix = x_matrix.loc[:, x_matrix.nunique() > 1]
         x_matrix['bias'] = 1.
 
+        for _ in x_matrix.columns:
+            self.coefficients[_] = 0.
+
         x = x_matrix.to_numpy()
+
         return x
 
 
@@ -674,6 +714,7 @@ class InterTemporalValidation(FactorBatchValidation):
 
             x_train.append(_x)
             y_train.append(_y)
+            self.decoder.clear()
 
         x_train = np.concatenate(x_train)
         y_train = np.concatenate(y_train)
