@@ -11,7 +11,7 @@ import pandas as pd
 
 from . import LOGGER
 from ...Base import GlobalStatics
-from ...Calibration.bootstrap import BootstrapLinearRegression
+from ...Calibration.bootstrap import LinearRegression
 from ...Calibration.dummies import session_dummies
 from ...Factor.future import fix_prediction_target
 from ...Strategy import StrategyMetric
@@ -67,7 +67,7 @@ class LinearLore(DataLore):
         self.pred_var = ['pct_chg']
         self.coefficients: pd.DataFrame | None = None
 
-        self.model = {_: BootstrapLinearRegression(bootstrap_samples=kwargs.get('bootstrap_samples', 100), bootstrap_block_size=kwargs.get('bootstrap_samples', 0.05)) for _ in self.pred_var}
+        self.model = {_: LinearRegression(bootstrap_samples=kwargs.get('bootstrap_samples', 100), bootstrap_block_size=kwargs.get('bootstrap_samples', 0.05)) for _ in self.pred_var}
 
     def __str__(self):
         return f'Lore.Linear.{self.ticker}'
@@ -109,7 +109,7 @@ class LinearLore(DataLore):
 
         self.calibration_params.trace_back = json_dict['calibration_params']['trace_back']
         self.calibration_params.pred_length = json_dict['calibration_params']['pred_length']
-        self.model.update({key: BootstrapLinearRegression.from_json(value) for key, value in json_dict['model'].items()})
+        self.model.update({key: LinearRegression.from_json(value) for key, value in json_dict['model'].items()})
 
         if json_dict['coefficients']:
             self.coefficients = pd.DataFrame(json_dict['coefficients'])
@@ -255,7 +255,7 @@ class LinearLore(DataLore):
         coefficients = []
         residuals = []
 
-        # Fit BootstrapLinearRegression models for each prediction target
+        # Fit LinearRegression models for each prediction target
 
         for i, pred_name in zip(range(len(self.pred_var)), self.pred_var):
             model = self.model[pred_name]
