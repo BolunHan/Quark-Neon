@@ -1,6 +1,9 @@
-from typing import Hashable
+import pathlib
 from functools import cached_property
+from typing import Hashable
+
 import numpy as np
+import pandas as pd
 
 from . import Regression
 
@@ -10,7 +13,6 @@ class Cache(object):
         self.cache = {}
 
     def __call__(self, func):
-
         def wrapper(*args, **kwargs):
             entry_list = []
 
@@ -43,49 +45,93 @@ METRIC_CACHE = Cache()
 
 class Metrics(object):
     def __init__(self, model: Regression, x: np.ndarray, y: np.ndarray):
+        """
+        Metrics class for evaluating regression model performance.
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y (numpy.ndarray): Output values.
+        """
         self.model = model
         self.x = x
         self.y = y
 
+        self.alpha = 0.05
+        self.alpha_range = np.linspace(0.01, 0.5, 50)
+
     def __del__(self):
+        """
+        Destructor to clean up the object.
+        """
         self.model = None
         self.x = None
         self.y = None
         METRIC_CACHE.cache.clear()
 
     @cached_property
-    def metrics(self):
-        alpha_range = np.linspace(0.01, 0.5, 50)
-        y_pred, prediction_interval, *_ = self._predict(model=self.model, x=self.x, alpha=0.95)
+    def metrics(self) -> dict[str, float]:
+        """
+        Calculate and return various regression metrics.
+
+        Returns:
+            dict: Dictionary containing calculated metrics.
+        """
+        y_pred, prediction_interval, *_ = self._predict(model=self.model, x=self.x, alpha=self.alpha)
+
         mse = self.compute_mse(y_actual=self.y, y_pred=y_pred)
         mae = self.compute_mae(y_actual=self.y, y_pred=y_pred)
         accuracy = self.compute_accuracy(y_actual=self.y, y_pred=y_pred)
 
-        mse_significant = self.compute_mse_significant(model=self.model, x=self.x, y_actual=self.y, alpha=0.95)
-        mae_significant = self.compute_mae_significant(model=self.model, x=self.x, y_actual=self.y, alpha=0.95)
-        accuracy_significant = self.compute_accuracy_significant(model=self.model, x=self.x, y_actual=self.y, alpha=0.95)
+        mse_significant, _ = self.compute_mse_significant(model=self.model, x=self.x, y_actual=self.y, alpha=self.alpha)
+        mae_significant, _ = self.compute_mae_significant(model=self.model, x=self.x, y_actual=self.y, alpha=self.alpha)
+        accuracy_significant, selection_ratio = self.compute_accuracy_significant(model=self.model, x=self.x, y_actual=self.y, alpha=self.alpha)
 
-        _, roc_values = self.compute_roc(model=self.model, x=self.x, y_actual=self.y, alpha_range=alpha_range)
+        auc_roc = self.compute_auc_roc(model=self.model, x=self.x, y_actual=self.y, alpha_range=self.alpha_range)
 
         return dict(
+            obs_num=len(self.x),
             mse=mse,
             mae=mae,
             accuracy=accuracy,
             mse_significant=mse_significant,
             mae_significant=mae_significant,
             accuracy_significant=accuracy_significant,
-            alpha_range=alpha_range,
-            roc_values=roc_values
+            significant_ratio=selection_ratio,
+            auc_roc=auc_roc
         )
 
     @classmethod
     @METRIC_CACHE
     def _predict(cls, model: Regression, x: np.ndarray, alpha: float):
+        """
+        Predict using the regression model.
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            alpha (float): Significance level for the prediction interval.
+
+        Returns:
+            Tuple: Predicted values, prediction interval, and residuals.
+        """
         return model.predict(x=x, alpha=alpha)
 
     @classmethod
-    @METRIC_CACHE
-    def _select_significant_prediction(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float):
+    # @METRIC_CACHE
+    def _select_significant_prediction(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Select data with significant predictions based on the prediction interval.
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y_actual (numpy.ndarray): Actual output values.
+            alpha (float): Significance level for the prediction interval.
+
+        Returns:
+            Tuple: Selected actual and predicted values.
+        """
         y_pred, prediction_interval, *_ = model.predict(x=x, alpha=alpha)
         lower_bound = y_pred + prediction_interval[:, 0]
         upper_bound = y_pred + prediction_interval[:, 1]
@@ -94,7 +140,7 @@ class Metrics(object):
         selected_indices = (lower_bound >= 0) | (upper_bound <= 0)
 
         if not np.any(selected_indices):
-            return None, None
+            return np.array([]), np.array([])
 
         y_actual_selected = y_actual[selected_indices]
         y_pred_selected = y_pred[selected_indices]
@@ -102,19 +148,39 @@ class Metrics(object):
         return y_actual_selected, y_pred_selected
 
     @classmethod
-    def compute_mse(cls, y_actual: np.ndarray, y_pred: np.ndarray):
+    def compute_mse(cls, y_actual: np.ndarray, y_pred: np.ndarray) -> float:
+        """
+        Compute Mean Squared Error (MSE).
+
+        Args:
+            y_actual (numpy.ndarray): Actual output values.
+            y_pred (numpy.ndarray): Predicted output values.
+
+        Returns:
+            float: MSE.
+        """
         residuals = y_actual - y_pred
         mse = np.mean(residuals ** 2)
         return mse
 
     @classmethod
-    def compute_mae(cls, y_actual: np.ndarray, y_pred: np.ndarray):
+    def compute_mae(cls, y_actual: np.ndarray, y_pred: np.ndarray) -> float:
+        """
+        Compute Mean Absolute Error (MAE).
+
+        Args:
+            y_actual (numpy.ndarray): Actual output values.
+            y_pred (numpy.ndarray): Predicted output values.
+
+        Returns:
+            float: MAE.
+        """
         residuals = y_actual - y_pred
         mae = np.mean(np.abs(residuals))
         return mae
 
     @classmethod
-    def compute_accuracy(cls, y_actual: np.ndarray, y_pred: np.ndarray):
+    def compute_accuracy(cls, y_actual: np.ndarray, y_pred: np.ndarray) -> float:
         """
         Compute accuracy as the percentage of correct sign predictions.
 
@@ -130,32 +196,221 @@ class Metrics(object):
         return accuracy
 
     @classmethod
-    def compute_mse_significant(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float):
-        y_actual, y_pred = cls._select_significant_prediction(model=model, x=x, y_actual=y_actual, alpha=alpha)
-        mse_significant = np.mean((y_actual - y_pred) ** 2) if y_actual is not None else np.nan
-        return mse_significant
+    def compute_mse_significant(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float) -> tuple[float, float]:
+        """
+        Compute MSE for significant predictions based on the prediction interval.
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y_actual (numpy.ndarray): Actual output values.
+            alpha (float): Significance level for the prediction interval.
+
+        Returns:
+            float: MSE for significant predictions or np.nan if no data is left after selection.
+        """
+        y_actual_selected, y_pred_selected = cls._select_significant_prediction(model=model, x=x, y_actual=y_actual, alpha=alpha)
+        mse_significant = np.mean((y_actual_selected - y_pred_selected) ** 2) if y_actual.size > 0 else np.nan
+        selection_ratio = len(y_actual_selected) / len(y_actual) if y_actual.size > 0 else np.nan
+        return mse_significant, selection_ratio
 
     @classmethod
-    def compute_mae_significant(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float):
-        y_actual, y_pred = cls._select_significant_prediction(model=model, x=x, y_actual=y_actual, alpha=alpha)
-        mae_significant = np.mean(np.abs(y_actual - y_pred)) if y_actual is not None else np.nan
-        return mae_significant
+    def compute_mae_significant(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float) -> tuple[float, float]:
+        """
+        Compute MAE for significant predictions based on the prediction interval.
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y_actual (numpy.ndarray): Actual output values.
+            alpha (float): Significance level for the prediction interval.
+
+        Returns:
+            float: MAE for significant predictions or np.nan if no data is left after selection.
+        """
+        y_actual_selected, y_pred_selected = cls._select_significant_prediction(model=model, x=x, y_actual=y_actual, alpha=alpha)
+        mae_significant = np.mean(np.abs(y_actual_selected - y_pred_selected)) if y_actual.size > 0 else np.nan
+        selection_ratio = len(y_actual_selected) / len(y_actual) if y_actual.size > 0 else np.nan
+        return mae_significant, selection_ratio
 
     @classmethod
-    def compute_accuracy_significant(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float):
-        y_actual, y_pred = cls._select_significant_prediction(model=model, x=x, y_actual=y_actual, alpha=alpha)
-        accuracy_significant = np.mean(np.sign(y_actual) == np.sign(y_pred)) if y_actual is not None else np.nan
-        return accuracy_significant
+    def compute_accuracy_significant(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha: float) -> tuple[float, float]:
+        """
+        Compute accuracy for significant predictions based on the prediction interval.
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y_actual (numpy.ndarray): Actual output values.
+            alpha (float): Significance level for the prediction interval.
+
+        Returns:
+            float: Accuracy for significant predictions or np.nan if no data is left after selection.
+        """
+        y_actual_selected, y_pred_selected = cls._select_significant_prediction(model=model, x=x, y_actual=y_actual, alpha=alpha)
+        accuracy_significant = np.mean(np.sign(y_actual_selected) == np.sign(y_pred_selected)) if y_actual.size > 0 else np.nan
+        selection_ratio = len(y_actual_selected) / len(y_actual) if y_actual.size > 0 else np.nan
+        return accuracy_significant, selection_ratio
 
     @classmethod
-    def compute_roc(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha_range=np.linspace(0.01, 0.5, 50)):
+    def compute_roc(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha_range: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Compute Receiver Operating Characteristic (ROC) values.
 
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y_actual (numpy.ndarray): Actual output values.
+            alpha_range (numpy.ndarray): Array of significance levels.
+
+        Returns:
+            Tuple: Array of alpha values and corresponding ROC values.
+        """
         roc_values = []
         for alpha in alpha_range:
-            accuracy = cls.compute_accuracy_significant(model=model, x=x, y_actual=y_actual, alpha=alpha)
+            accuracy, _ = cls.compute_accuracy_significant(model=model, x=x, y_actual=y_actual, alpha=alpha)
             roc_values.append(accuracy)
 
         return alpha_range, np.array(roc_values)
+
+    @classmethod
+    def compute_auc_roc(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha_range: np.ndarray) -> float:
+        """
+        Compute the Area Under the Receiver Operating Characteristic (ROC) Curve (AUC-ROC).
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y_actual (numpy.ndarray): Actual output values.
+            alpha_range (numpy.ndarray): Array of significance levels.
+
+        Returns:
+            float: AUC-ROC value.
+        """
+        roc_values = []
+        for alpha in alpha_range:
+            accuracy, _ = cls.compute_accuracy_significant(model=model, x=x, y_actual=y_actual, alpha=alpha)
+            roc_values.append(accuracy)
+
+        roc_values = np.array(roc_values)
+        valid_indices = ~np.isnan(roc_values)
+
+        if np.any(valid_indices):
+            auc_roc = -np.trapz(roc_values[valid_indices], (1 - 2 * alpha_range)[valid_indices])
+            return auc_roc
+        else:
+            return np.nan
+
+    @classmethod
+    def plot_roc(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha_range: np.ndarray, **kwargs):
+        """
+        Plot the Receiver Operating Characteristic (ROC) Curve.
+
+        Args:
+            model (Regression): Regression model object.
+            x (numpy.ndarray): Input features.
+            y_actual (numpy.ndarray): Actual output values.
+            alpha_range (numpy.ndarray): Array of significance levels.
+            **kwargs: Additional keyword arguments for customizing the plot.
+
+        Returns:
+            plotly.graph_objects.Figure: Plotly figure object.
+        """
+        import plotly.graph_objects as go
+
+        roc_values = []
+        selection_ratios = []
+
+        for alpha in alpha_range:
+            accuracy, selection_ratio = cls.compute_accuracy_significant(model=model, x=x, y_actual=y_actual, alpha=alpha)
+            roc_values.append(accuracy)
+            selection_ratios.append(selection_ratio)
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Scatter(
+                x=1 - 2 * alpha_range,
+                y=roc_values,
+                mode='lines',
+                name=kwargs.get('curve_name', "ROC Curve"),
+                line=dict(color='blue'),
+                yaxis='y1'
+            )
+        )
+
+        fig.add_trace(
+            go.Bar(
+                x=1 - 2 * alpha_range,
+                y=selection_ratios,
+                opacity=0.4,
+                name="Selection Ratio",
+                marker=dict(color='green'),
+                yaxis='y2'
+            )
+        )
+
+        fig.update_layout(
+            title=kwargs.get('title', "Receiver Operating Characteristic (ROC) Curve"),
+            xaxis_title=kwargs.get('x_name', "Classification threshold (1 - 2 * alpha)"),
+            yaxis_title=kwargs.get('y_name', "Accuracy"),
+            hovermode="x unified",
+            template='simple_white',
+            yaxis=dict(
+                showspikes=True
+            ),
+            yaxis2=dict(
+                title="Selection Ratio",
+                overlaying='y',
+                side='right',
+                showgrid=False
+            )
+        )
+
+        return fig
+
+    def to_html(self, file_path: str | pathlib.Path):
+        """
+        Export metrics and ROC curve plot to an HTML file.
+
+        Args:
+            file_path (str): File path for the HTML file.
+
+        Returns:
+            None
+        """
+        metrics_data = self.metrics.copy()
+
+        # Create metrics table figure
+        # noinspection PyTypeChecker
+        metrics_data['obs_num'] = f"{metrics_data['obs_num']:,d}"
+        metrics_table = pd.DataFrame({'Metrics': pd.Series(metrics_data)})
+
+        # Create ROC curve figure
+        roc_curve = self.plot_roc(model=self.model, x=self.x, y_actual=self.y, alpha_range=self.alpha_range)
+
+        # Convert the figures to HTML codes
+        metrics_table_html = metrics_table.to_html(float_format=lambda x: f'{x:.4%}')
+        roc_curve_html = roc_curve.to_html(roc_curve, full_html=False)
+
+        # Create a 1x2 table HTML code
+        html_code = f"""
+        <html>
+        <head></head>
+        <body>
+            <table style="width:100%">
+                <tr>
+                    <td style="width:30%">{metrics_table_html}</td>
+                    <td style="width:70%">{roc_curve_html}</td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        # Write the HTML code to the file
+        with open(file_path, 'w') as file:
+            file.write(html_code)
 
 
 class CrossValidation(object):
@@ -180,6 +435,8 @@ class CrossValidation(object):
         self.y_val = None
         self.y_pred = None
         self.prediction_interval = None
+
+        self._metrics = None
 
     @classmethod
     def _select_data(cls, x: np.ndarray, y: np.ndarray, indices: np.ndarray, fold: int, n_folds: int, shuffle: bool = False):
@@ -360,15 +617,16 @@ class CrossValidation(object):
 
         return fig
 
-    @cached_property
-    def metrics(self) -> dict[str, float] | None:
+    @property
+    def metrics(self) -> Metrics | None:
         if self.x_val is None:
             return None
 
-        metrics = Metrics(
-            model=self.model,
-            x=self.x_val,
-            y=self.y_val
-        )
+        if self._metrics is None:
+            self._metrics = Metrics(
+                model=self.model,
+                x=self.x_val,
+                y=self.y_val
+            )
 
-        return metrics.metrics
+        return self._metrics
