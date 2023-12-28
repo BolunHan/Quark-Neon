@@ -715,14 +715,15 @@ class InterTemporalValidation(FactorBatchValidation):
         entry_dir = pathlib.Path(dump_dir, f'{market_date:%Y-%m-%d}')
         os.makedirs(entry_dir, exist_ok=True)
 
-        if len(self.factor) > 2:
+        if len(self.factor) > 1:
             file_name = f'InterTemporal.validation'
         else:
             file_name = f'{"".join([f"[{factor.name}]" for factor in self.factor])}.validation'
 
-        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.csv'))
-        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.html'), include_plotlyjs='cdn')
+        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.factors.csv'))
+        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.validation.html'), include_plotlyjs='cdn')
         self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
+        self.cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.metrics.html'))
 
 
 def main():
