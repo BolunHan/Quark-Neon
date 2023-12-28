@@ -412,7 +412,7 @@ class RecursiveDecoder(Decoder):
 
         layout = go.Layout(title=f'Recursive Decoder {ticker}', xaxis=dict(title='X-axis'), yaxis=dict(title='Y-axis'))
         fig = go.Figure(data=data, layout=layout)
-        fig.update_xaxes(rangebreaks=[dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 9.5], pattern="hour")])
+        fig.update_xaxes(rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")])
         return fig
 
     def local_extremes(self, ticker: str, level: int) -> list[tuple[float, float, int]]:
