@@ -9,6 +9,8 @@ class BootstrapLinearRegression(Regression):
     """
     BootstrapLinearRegression class for performing linear regression with bootstrapping.
 
+    Note: by default the .predict function will return the mean, not median, of the prediction interval.
+
     Attributes:
         coefficient (numpy.ndarray): Coefficients of the linear regression model.
         bootstrap_samples (int): Number of bootstrap samples to generate.
@@ -134,27 +136,27 @@ class BootstrapLinearRegression(Regression):
         if not self.bootstrap_coefficients:
             return y_pred, None, None, np.nan
 
-        bootstrap_residuals = []
+        bootstrap_deviation = []
         for bootstrap_coefficient in self.bootstrap_coefficients:
             y_bootstrap = np.dot(x, bootstrap_coefficient)
-            residual = y_bootstrap - y_pred
-            bootstrap_residuals.append(residual)
+            deviation = y_bootstrap - y_pred
+            bootstrap_deviation.append(deviation)
 
-        bootstrap_residuals = np.array(bootstrap_residuals).T
+        bootstrap_deviation = np.array(bootstrap_deviation).T
 
         # For single input, X might be a 1D array
         if len(x.shape) == 1:
-            lower_bound = np.quantile(bootstrap_residuals, alpha / 2)
-            upper_bound = np.quantile(bootstrap_residuals, 1 - alpha / 2)
-            variance = np.var(bootstrap_residuals)
+            lower_bound = np.quantile(bootstrap_deviation, alpha / 2)
+            upper_bound = np.quantile(bootstrap_deviation, 1 - alpha / 2)
+            variance = np.var(bootstrap_deviation)
         else:
-            lower_bound = np.quantile(bootstrap_residuals, alpha / 2, axis=1)
-            upper_bound = np.quantile(bootstrap_residuals, 1 - alpha / 2, axis=1)
-            variance = np.var(bootstrap_residuals, axis=1, ddof=1)
+            lower_bound = np.quantile(bootstrap_deviation, alpha / 2, axis=1)
+            upper_bound = np.quantile(bootstrap_deviation, 1 - alpha / 2, axis=1)
+            variance = np.var(bootstrap_deviation, axis=1, ddof=1)
 
         interval = np.array([lower_bound, upper_bound]).T
 
-        return y_pred, interval, bootstrap_residuals, variance
+        return y_pred, interval, bootstrap_deviation, variance
 
     def plot(self, x, y, x_axis, alpha=0.05, **kwargs):
         """
