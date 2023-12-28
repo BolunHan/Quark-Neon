@@ -344,7 +344,7 @@ class LinearLore(DataLore):
             yaxis2=dict(title="Percentage", overlaying="y", side="right"),
         )
 
-        fig.update_xaxes(rangebreaks=[dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 9.5], pattern="hour")])
+        fig.update_xaxes(rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")])
         return fig
 
     @property
