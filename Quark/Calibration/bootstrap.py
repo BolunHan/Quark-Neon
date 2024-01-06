@@ -2,7 +2,8 @@ import json
 
 import numpy as np
 
-from . import Regression
+from . import Regression, LOGGER
+from .cross_validation import CrossValidation, Metrics
 
 __all__ = ['LinearRegression', 'RidgeRegression', 'LassoRegression']
 
@@ -38,6 +39,10 @@ class Scaler(object):
                 feature_mean = np.nanmean(feature_data_centered)
                 feature_variance = np.nanvar(feature_data_centered, ddof=1)
 
+                # fallback to min max scaling
+                if not feature_variance:
+                    feature_variance = max(feature_data) - min(feature_data)
+
             mean.append(feature_mean)
             variance.append(feature_variance)
 
@@ -54,7 +59,7 @@ class Scaler(object):
 
         for i in range(num_features):
             feature_data = x[:, i]
-            is_dummy = np.all((feature_data == 0) | (feature_data == 1))
+            is_dummy = np.all((feature_data == 0) | (feature_data == 1) | (feature_data == -1))
 
             if is_dummy:
                 transformed_columns.append(feature_data)
@@ -461,11 +466,13 @@ class RidgeRegression(LinearRegression):
         if self.scaler is not None:
             x = np.array(x)
             self.scaler.fit(x)
-            x = self.scaler.transform(x)
+            x_scaled = self.scaler.transform(x)
+        else:
+            x_scaled = x
 
-        return super().fit(x=x, y=y, use_bootstrap=use_bootstrap, method=method)
+        return super().fit(x=x_scaled, y=y, use_bootstrap=use_bootstrap, method=method)
 
-    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _fit2(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         n, m = x.shape
         identity_matrix = np.eye(m)
         regularization_matrix = self.alpha * identity_matrix
@@ -478,6 +485,15 @@ class RidgeRegression(LinearRegression):
         residuals = y - np.dot(x, coefficient)
 
         return coefficient, residuals
+
+    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        from sklearn.linear_model import Ridge
+
+        model = Ridge(alpha=self.alpha, fit_intercept=False)
+        model.fit(x, y)
+        coefficient = model.coef_
+
+        return coefficient, np.array([])
 
     def predict(self, x: list | np.ndarray, alpha=0.05):
 
@@ -516,6 +532,72 @@ class RidgeRegression(LinearRegression):
         self.bootstrap_coefficients.extend([np.array(_) for _ in json_dict['bootstrap_coefficients']])
 
         return self
+
+    def optimal_alpha(self, x: np.ndarray, y: np.ndarray, cv: CrossValidation = None, start_alpha: float = 0, steps: int = 20, tolerance: int = 2, stop_alpha: float = 1., metric: str = 'auc_roc', mode='max', level: int = 2) -> tuple[float, float]:
+        result: list[tuple[float, float]] = []
+        best_metric = None
+        tolerance_counts = 0
+
+        LOGGER.info(f'Find optimal alpha for {self.__class__}, from {start_alpha:.4%} to {stop_alpha:.4%}, step={steps:,}, level={level}.')
+
+        if cv is None:
+            cv = CrossValidation(model=self, strict_no_future=True, folds=10)
+
+        if not cv.strict_no_future:
+            LOGGER.warning('The cross validation is not using strict_no_future mode. Future data leak is possible. Proceed with caution!')
+
+        if not cv.model is self:
+            raise ValueError('The model of cv should be the is not this model!')
+
+        for i in range(steps + 1):
+            alpha = start_alpha + i * (stop_alpha - start_alpha) / steps
+            self.alpha = alpha
+            cv.validate(x=x, y=y)
+
+            metrics = Metrics(
+                model=self,
+                x=cv.x_val,
+                y=cv.y_val
+            )
+
+            metric_value = metrics.metrics[metric]
+
+            if mode == 'max':
+                best_metric = metric_value if best_metric is None else max(best_metric, metric_value)
+                if metric_value < best_metric:
+                    tolerance_counts += 1
+                else:
+                    tolerance_counts = 0
+            else:
+                best_metric = metric_value if best_metric is None else min(best_metric, metric_value)
+                if metric_value > best_metric:
+                    tolerance_counts += 1
+                else:
+                    tolerance_counts = 0
+
+            result.append((alpha, metric_value))
+            LOGGER.info(f'Level {level}, Step {i}, Alpha = {alpha:.4f}, {metric}={metric_value}')
+
+            if tolerance_counts >= tolerance:
+                LOGGER.info('Level {level}, Step {i} Early stopped!')
+
+        sorted_result = sorted(result, key=lambda _: _[1])
+        best_result = sorted_result[-1]
+        second_best_result = sorted_result[-2]
+
+        if level > 1:
+            return self.optimal_alpha(
+                x=x,
+                y=y,
+                cv=cv,
+                start_alpha=min(best_result[0], second_best_result[0]),
+                stop_alpha=max(best_result[0], second_best_result[0]),
+                steps=steps,
+                metric=metric,
+                level=level - 1
+            )
+
+        return best_result
 
 
 class LassoRegression(RidgeRegression):
