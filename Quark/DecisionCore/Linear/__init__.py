@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 
 from .. import LOGGER
@@ -47,6 +46,6 @@ class Scaler(object):
 
 from .linear import *
 # from .ridge import *
-from .kelly import *
+from Quark.Calibration.kelly import *
 
 __all__ = ['LOGGER', 'LinearDecisionCore']
