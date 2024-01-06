@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from . import Regression
+from .kelly import kelly_bootstrap
 
 
 class Cache(object):
@@ -52,7 +53,7 @@ class Metrics(object):
     Metrics class for evaluating regression model performance.
     """
 
-    def __init__(self, model: Regression, x: np.ndarray, y: np.ndarray, informed_baseline: bool = False):
+    def __init__(self, model: Regression, x: np.ndarray, y: np.ndarray, informed_baseline: bool = False, cost: float = 0.):
         """
         Initialize Metrics class.
 
@@ -69,6 +70,7 @@ class Metrics(object):
         self.alpha = 0.05
         self.alpha_range = np.linspace(0., 1, 100)
         self.informed_baseline = informed_baseline  # True if the distribution of the y_val is known by the model.
+        self.cost = cost  # trading cost of the metrics
 
     def __del__(self):
         """
@@ -103,6 +105,7 @@ class Metrics(object):
         accuracy_significant, selection_ratio = self.compute_accuracy_significant(model=self.model, x=self.x, y_actual=self.y, alpha=self.alpha)
 
         auc_roc = self.compute_auc_roc(model=self.model, x=self.x, y_actual=self.y, alpha_range=self.alpha_range) - accuracy_baseline
+        kelly_return = self.compute_kelly_return(model=self.model, x=self.x, y_actual=self.y, cost=self.cost)
 
         return dict(
             obs_num=len(self.x),
@@ -114,7 +117,8 @@ class Metrics(object):
             mae_significant=mae_significant,
             accuracy_boost_significant=accuracy_significant - accuracy_baseline,
             significant_ratio=selection_ratio,
-            auc_roc=auc_roc
+            auc_roc=auc_roc,
+            kelly_return=kelly_return
         )
 
     @classmethod
@@ -148,7 +152,7 @@ class Metrics(object):
         Returns:
             Tuple: Selected actual and predicted values.
         """
-        y_pred, prediction_interval, *_ = model.predict(x=x, alpha=alpha)
+        y_pred, prediction_interval, *_ = cls._predict(model=model, x=x, alpha=alpha)
         lower_bound = y_pred + prediction_interval[:, 0]
         upper_bound = y_pred + prediction_interval[:, 1]
 
@@ -162,6 +166,17 @@ class Metrics(object):
         y_pred_selected = y_pred[selected_indices]
 
         return y_actual_selected, y_pred_selected
+
+    @classmethod
+    def _compute_kelly(cls, model: Regression, x: np.ndarray, cost: float = 0.):
+        y_pred, _, bootstrap_deviation, *_ = cls._predict(model=model, x=x, alpha=0)
+
+        kelly_value = []
+        for outcome, deviations in zip(y_pred, bootstrap_deviation):
+            kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=cost)
+            kelly_value.append(kelly_proportion)
+
+        return np.array(kelly_value)
 
     @classmethod
     def compute_mse(cls, y_actual: np.ndarray, y_pred: np.ndarray) -> float:
@@ -318,6 +333,17 @@ class Metrics(object):
             return np.nan
 
     @classmethod
+    def compute_kelly_return(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, cost: float = 0.):
+        kelly_return = []
+
+        kelly_decision = cls._compute_kelly(model=model, x=x, cost=cost)
+
+        for weight, outcome in zip(kelly_decision, y_actual):
+            kelly_return.append(weight * outcome)
+
+        return np.nanmean(kelly_return)
+
+    @classmethod
     def plot_roc(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, alpha_range: np.ndarray, accuracy_baseline: float = 0., **kwargs):
         """
         Plot the Receiver Operating Characteristic (ROC) Curve.
@@ -375,8 +401,8 @@ class Metrics(object):
             template='simple_white',
             showlegend=False,
             yaxis=dict(
-                maxallowed=1,
-                minallowed=0,
+                maxallowed=0.5 if accuracy_baseline else 1,
+                minallowed=-0.5 if accuracy_baseline else 0,
                 showspikes=True,
                 tickformat='.2%'
             ),
@@ -410,7 +436,13 @@ class Metrics(object):
         metrics_table = pd.DataFrame({'Metrics': pd.Series(metrics_data)})
 
         # Create ROC curve figure
-        roc_curve = self.plot_roc(model=self.model, x=self.x, y_actual=self.y, baseline_accuracy=metrics_data['accuracy_baseline'], alpha_range=self.alpha_range)
+        roc_curve = self.plot_roc(
+            model=self.model,
+            x=self.x,
+            y_actual=self.y,
+            accuracy_baseline=metrics_data['accuracy_baseline'],
+            alpha_range=self.alpha_range
+        )
 
         # Convert the figures to HTML codes
         metrics_table_html = metrics_table.to_html(float_format=lambda x: f'{x:.4%}')
@@ -437,7 +469,7 @@ class Metrics(object):
 
 
 class CrossValidation(object):
-    def __init__(self, model, folds=5, strict_no_future: bool = True, shuffle: bool = True, **kwargs):
+    def __init__(self, model, folds=5, strict_no_future: bool = True, shuffle: bool = True, trade_cost: float = 0.001, **kwargs):
         """
         Initialize the CrossValidation object.
 
@@ -451,6 +483,7 @@ class CrossValidation(object):
         self.folds = folds
         self.strict_no_future = strict_no_future
         self.shuffle = shuffle
+        self.trade_cost = trade_cost
 
         self.fit_kwargs = kwargs
 
@@ -458,6 +491,7 @@ class CrossValidation(object):
         self.y_val = None
         self.y_pred = None
         self.prediction_interval = None
+        self.bootstrap_deviation = None
 
         self._metrics = None
 
@@ -515,7 +549,7 @@ class CrossValidation(object):
         if not self.strict_no_future:
             np.random.shuffle(indices)
 
-        fold_metrics = {'x': [], 'y_val': [], 'y_pred': [], 'index': [], 'prediction_interval': []}
+        fold_metrics = {'x_val': [], 'y_val': [], 'y_pred': [], 'index': [], 'prediction_interval': [], 'bootstrap_deviation': []}
 
         for fold in range(self.folds):
             if self.strict_no_future:
@@ -526,16 +560,17 @@ class CrossValidation(object):
             self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
 
             # Predict on the validation data
-            y_pred, prediction_interval, *_ = self.model.predict(x_val)
+            y_pred, prediction_interval, bootstrap_deviation, *_ = self.model.predict(x_val)
 
             fold_metrics['x_val'].append(x_val)
             fold_metrics['y_val'].append(y_val)
             fold_metrics['y_pred'].append(y_pred)
             fold_metrics['index'].append(val_indices)  # Store sorted indices
             fold_metrics['prediction_interval'].append(prediction_interval)
+            fold_metrics['bootstrap_deviation'].append(bootstrap_deviation)
 
         sorted_indices = np.concatenate(fold_metrics['index'])
-        for key in ['x_val', 'y_val', 'y_pred', 'prediction_interval']:
+        for key in ['x_val', 'y_val', 'y_pred', 'prediction_interval', 'bootstrap_deviation']:
             values = np.concatenate(fold_metrics[key])
             fold_metrics[key] = values[np.argsort(sorted_indices)]
 
@@ -543,17 +578,19 @@ class CrossValidation(object):
         self.y_val = fold_metrics['y_val']
         self.y_pred = fold_metrics['y_pred']
         self.prediction_interval = fold_metrics['prediction_interval']
+        self.bootstrap_deviation = fold_metrics['bootstrap_deviation']
 
     def validate_out_sample(self, x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray):
         self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
 
         # Predict on the validation data
-        y_pred, prediction_interval, *_ = self.model.predict(x_val)
+        y_pred, prediction_interval, bootstrap_deviation, *_ = self.model.predict(x_val)
 
         self.x_val = np.array(x_val)
         self.y_val = np.array(y_val)
         self.y_pred = np.array(y_pred)
         self.prediction_interval = np.array(prediction_interval)
+        self.bootstrap_deviation = np.array(bootstrap_deviation)
 
     def plot(self, x_axis: list | np.ndarray = None, **kwargs):
         """
@@ -624,6 +661,23 @@ class CrossValidation(object):
                 )
             )
 
+        # Plot Kelly decision
+        kelly_value = []
+        for outcome, deviations in zip(self.y_pred, self.bootstrap_deviation):
+            kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=self.trade_cost)
+            kelly_value.append(kelly_proportion)
+
+        fig.add_trace(
+            go.Bar(
+                x=x_axis,
+                y=np.array(kelly_value),
+                opacity=0.3,
+                name='kelly decision',
+                marker=dict(color='green'),
+                yaxis='y2'
+            )
+        )
+
         # Layout settings
         fig.update_layout(
             title=kwargs.get('title', "Cross-Validation: Actual vs Predicted"),
@@ -634,9 +688,25 @@ class CrossValidation(object):
             yaxis=dict(
                 showspikes=True
             ),
+            yaxis2=dict(
+                anchor="free",
+                overlaying='y',
+                showgrid=False,  # Hide grid for y3 axis
+                showline=False,  # Hide line for y3 axis
+                zeroline=False,  # Hide zero line for y3 axis
+                showticklabels=False  # Hide tick labels for y3 axis
+            )
         )
 
         return fig
+
+    def clear(self):
+        self.x_val = None
+        self.y_val = None
+        self.y_pred = None
+        self.prediction_interval = None
+
+        self._metrics = None
 
     @property
     def metrics(self) -> Metrics | None:
@@ -647,7 +717,9 @@ class CrossValidation(object):
             self._metrics = Metrics(
                 model=self.model,
                 x=self.x_val,
-                y=self.y_val
+                y=self.y_val,
+                informed_baseline=True,
+                cost=self.trade_cost
             )
 
         return self._metrics
