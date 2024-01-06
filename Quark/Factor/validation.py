@@ -14,10 +14,11 @@ import pandas as pd
 from AlgoEngine.Engine import MarketDataMonitor, ProgressiveReplay
 from PyQuantKit import MarketData, BarData
 
-from . import LOGGER, MDS, future, IndexWeight, ALPHA_0001, collect_factor
-from .Correlation import EntropyEMAMonitor
-from .LowPass import IndexMACDTriggerMonitor
+from . import LOGGER, MDS, future, IndexWeight, ALPHA_0001, ALPHA_05, collect_factor
+from .Correlation import *
+from .LowPass import *
 from .Misc import SyntheticIndexMonitor
+from .TradeFlow import *
 from ..API import historical
 from ..Backtest import simulated_env, factor_pool
 from ..Base import safe_exit, GlobalStatics
@@ -89,8 +90,9 @@ class FactorValidation(object):
         self.subscription = set()
         self.replay: ProgressiveReplay | None = None
         self.factor_value: dict[float, dict[str, float]] = {}
+        self.metrics = {}
 
-        self.model = RidgeRegression(alpha=0.0)
+        self.model = RidgeRegression(alpha=1.0)
         self.coefficients: dict[str, float] = {}
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
 
@@ -202,6 +204,7 @@ class FactorValidation(object):
         self.factor.clear()
         self.factor_value.clear()
         self.decoder.clear()
+        self.cv.clear()
 
     def init_replay(self) -> ProgressiveReplay:
         """
@@ -240,7 +243,7 @@ class FactorValidation(object):
 
         invalid_factor: pd.DataFrame = x_matrix.loc[:, x_matrix.nunique() == 1]
         if not invalid_factor.empty:
-            LOGGER.error(f'Invalid factor {invalid_factor}, add epsilon to avoid multicolinearity')
+            LOGGER.error(f'Invalid factor {invalid_factor.columns}, add epsilon to avoid multicolinearity')
             for name in invalid_factor.columns:
                 x_matrix[name] = 1 + np.random.normal(scale=0.1, size=len(x_matrix))
 
@@ -277,7 +280,8 @@ class FactorValidation(object):
             decode_level=self.decoder.level
         )
 
-        y = factors['target_smoothed'].to_numpy()
+        # y = factors['target_smoothed'].to_numpy()
+        y = factors['pct_change'].to_numpy()
         return y
 
     def _cross_validation(self, x, y, factors: pd.DataFrame):
@@ -302,6 +306,7 @@ class FactorValidation(object):
         self.cv.validate(x=x, y=y)
         fig = self.cv.plot(x=x, y=y, x_axis=x_axis)
         fig = self.plot_synthetic(factors=factors, fig=fig)
+
         return fig
 
     def plot_synthetic(self, factors: pd.DataFrame, fig, plot_wavelet: bool = True):
@@ -313,7 +318,7 @@ class FactorValidation(object):
             high=factors['Synthetic.high_price'],
             low=factors['Synthetic.low_price'],
             close=factors['Synthetic.close_price'],
-            yaxis='y2'
+            yaxis='y3'
         )
         fig.add_trace(candlestick_trace)
 
@@ -327,15 +332,16 @@ class FactorValidation(object):
                 y, x, wave_flag = zip(*local_extreme)
                 x = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in x]
 
-                trace = go.Scatter(x=x, y=y, mode='lines', name=f'decode level {level}', yaxis='y2')
+                trace = go.Scatter(x=x, y=y, mode='lines', name=f'decode level {level}', yaxis='y3')
                 fig.add_trace(trace)
 
         fig.update_xaxes(
             rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")],
         )
         fig.update_layout(
-            yaxis2=dict(
+            yaxis3=dict(
                 title="Synthetic",
+                anchor="x",
                 overlaying='y',
                 side='right',
                 showgrid=False
@@ -361,6 +367,9 @@ class FactorValidation(object):
 
         factors.to_csv(pathlib.Path(entry_dir, f'{self.factor.name}.validation.csv'))
         fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.validation.html'))
+
+        self.metrics[market_date] = self.cv.metrics.metrics
+        pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
 
     def validation(self, market_date: datetime.date):
         """
@@ -544,6 +553,34 @@ class FactorBatchValidation(FactorValidation):
                 update_interval=kwargs.get('update_interval', 60),
                 alpha=ALPHA_0001,
                 discount_interval=1
+            ),
+            TradeCoherenceMonitor(
+                update_interval=60,
+                sample_interval=1,
+                weights=self.index_weights
+            ),
+            CoherenceEMAMonitor(
+                update_interval=60,
+                sample_interval=1,
+                weights=self.index_weights,
+                discount_interval=1,
+                alpha=ALPHA_0001
+            ),
+            IndexMACDTriggerMonitor(
+                weights=self.index_weights,
+                update_interval=60,
+                observation_window=5,
+                confirmation_threshold=0.0001
+            ),
+            TradeFlowEMAMonitor(
+                discount_interval=1,
+                alpha=ALPHA_05,
+                weights=self.index_weights
+            ),
+            AggressivenessEMAMonitor(
+                discount_interval=1,
+                alpha=ALPHA_0001,
+                weights=self.index_weights
             )
         ]
 
@@ -633,6 +670,9 @@ class FactorBatchValidation(FactorValidation):
         factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.csv'))
         fig.write_html(pathlib.Path(entry_dir, f'{file_name}.html'), include_plotlyjs='cdn')
 
+        self.metrics[market_date] = self.cv.metrics.metrics
+        pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
+
     def reset(self):
         """
         Resets multiple factors.
@@ -645,6 +685,7 @@ class FactorBatchValidation(FactorValidation):
         self.factor_value.clear()
         self.factor_cache.clear()
         self.decoder.clear()
+        self.cv.clear()
 
     def _define_inputs(self, factors: pd.DataFrame):
         """
@@ -672,7 +713,7 @@ class FactorBatchValidation(FactorValidation):
 
         invalid_factor: pd.DataFrame = x_matrix.loc[:, x_matrix.nunique() == 1]
         if not invalid_factor.empty:
-            LOGGER.error(f'Invalid factor {invalid_factor}, add epsilon to avoid multicolinearity')
+            LOGGER.error(f'Invalid factor {invalid_factor.columns}, add epsilon to avoid multicolinearity')
             for name in invalid_factor.columns:
                 x_matrix[name] = 1 + np.random.normal(scale=0.1, size=len(x_matrix))
 
@@ -684,6 +725,13 @@ class FactorBatchValidation(FactorValidation):
         x = x_matrix.to_numpy()
 
         return x
+
+    def _define_prediction(self, factors: pd.DataFrame):
+        y = super()._define_prediction(factors=factors)
+
+        # multi factors regression should adjust the baseline
+        y = y - np.nanmedian(y)
+        return y
 
 
 class InterTemporalValidation(FactorBatchValidation):
@@ -744,6 +792,9 @@ class InterTemporalValidation(FactorBatchValidation):
         y_val = y_val[valid_mask]
         x_axis = x_axis[valid_mask]
 
+        # if isinstance(self.model, RidgeRegression):
+        #     self.model.optimal_alpha(x=x_train, y=y_train)
+
         self.cv.validate_out_sample(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
         fig = self.cv.plot(x_axis=x_axis)
         fig = self.plot_synthetic(factors=factors, fig=fig)
@@ -765,6 +816,9 @@ class InterTemporalValidation(FactorBatchValidation):
         fig.write_html(pathlib.Path(entry_dir, f'{file_name}.validation.html'), include_plotlyjs='cdn')
         self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
         self.cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.metrics.html'))
+
+        self.metrics[market_date] = self.cv.metrics.metrics
+        pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
 
 
 def main():
