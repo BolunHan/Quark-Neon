@@ -180,7 +180,7 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
         """
         result = {}
         result.update(self.trade_flow_adjusted())
-        result['Index'] = self.index_value
+        result['Index'] = self.composite(result)
         return result
 
     @property
@@ -191,4 +191,4 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
         Returns:
         float: Composite index value.
         """
-        return self.composite(self.value)
+        return self.composite(self.trade_flow_adjusted())
