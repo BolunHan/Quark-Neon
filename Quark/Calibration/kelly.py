@@ -7,6 +7,10 @@ def kelly_bootstrap(outcomes: list[float], probs: list[float] = None, max_levera
     based on a set of probabilities and corresponding outcomes. If probs is None,
     outcomes are assumed to be equally weighted.
 
+    $$
+    f = \frac{p}{a} - \frac{1 - p}{b} = \dfrac{p}{a}(1 - \frac{1}{WLP} \frac{1}{WLR})
+    $$
+
     Parameters:
     - outcomes (List[float]): List of potential outcomes.
     - probs (Optional[List[float]]): List of probabilities for each outcome. If None,
@@ -46,7 +50,12 @@ def kelly_bootstrap(outcomes: list[float], probs: list[float] = None, max_levera
     elif not (down_outcome + neutral_outcome):
         kelly_long = max_leverage
     else:
-        kelly_long = np.sum(up_prob) / (np.average(up_outcome, weights=up_prob) - cost) + np.sum(down_prob + neutral_prob) / (np.average(down_outcome + neutral_outcome, weights=down_prob + neutral_prob) - cost)
+        expected_gain = np.average(up_outcome, weights=up_prob) - cost
+        expected_loss = np.average(down_outcome + neutral_outcome, weights=down_prob + neutral_prob) - cost
+        gain_prob = np.sum(up_prob)
+        loss_prob = np.sum(down_prob + neutral_prob)
+
+        kelly_long = gain_prob / -expected_loss - loss_prob / expected_gain
 
     # for short action
     if not down_prob:
@@ -54,7 +63,12 @@ def kelly_bootstrap(outcomes: list[float], probs: list[float] = None, max_levera
     elif not (up_prob + neutral_outcome):
         kelly_short = -max_leverage
     else:
-        kelly_short = np.sum(down_prob) / (np.average(down_outcome, weights=down_prob) + cost) + np.sum(up_prob + neutral_prob) / (np.average(up_outcome + neutral_outcome, weights=up_prob + neutral_prob) + cost)
+        expected_gain = -np.average(down_outcome, weights=down_prob) - cost
+        expected_loss = -np.average(up_outcome + neutral_outcome, weights=up_prob + neutral_prob) - cost
+        gain_prob = np.sum(down_prob)
+        loss_prob = np.sum(up_prob + neutral_prob)
+
+        kelly_short = -(gain_prob / -expected_loss - loss_prob / expected_gain)
 
     if kelly_short < 0 < kelly_long:
         if kelly_long + kelly_short > 0:
@@ -70,7 +84,7 @@ def kelly_bootstrap(outcomes: list[float], probs: list[float] = None, max_levera
     else:
         kelly_percentage = 0.
 
-    kelly_percentage = np.sign(kelly_percentage) * max(-max_leverage, min(max_leverage, kelly_percentage))
+    kelly_percentage = max(-max_leverage, min(max_leverage, kelly_percentage))
 
     if adjust_factor:
         kelly_percentage *= adjust_factor
