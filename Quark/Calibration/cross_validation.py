@@ -5,8 +5,10 @@ from typing import Hashable
 import numpy as np
 import pandas as pd
 
-from . import Regression
+from . import Regression, LOGGER
 from .kelly import kelly_bootstrap
+from .Boosting import Boosting
+from .Linear import Bootstrap
 
 
 class Cache(object):
@@ -168,12 +170,34 @@ class Metrics(object):
         return y_actual_selected, y_pred_selected
 
     @classmethod
-    def _compute_kelly(cls, model: Regression, x: np.ndarray, cost: float = 0.):
+    def _compute_kelly(cls, model: Regression | Bootstrap | Boosting, x: np.ndarray, cost: float = 0.):
+        if model.ensemble == 'bagging':
+            return cls._compute_kelly_bagging(model=model, x=x, cost=cost)
+        elif model.ensemble == 'boosting':
+            return cls._compute_kelly_boosting(model=model, x=x, cost=cost)
+        else:
+            LOGGER.error(f'Kelly function cannot handle ensemble type {model.ensemble} of model {model.__class__}.')
+            return 0.
+
+    @classmethod
+    def _compute_kelly_bagging(cls, model: Regression, x: np.ndarray, cost: float = 0.):
         y_pred, _, bootstrap_deviation, *_ = cls._predict(model=model, x=x, alpha=0)
 
         kelly_value = []
         for outcome, deviations in zip(y_pred, bootstrap_deviation):
             kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=cost)
+            kelly_value.append(kelly_proportion)
+
+        return np.array(kelly_value)
+
+    @classmethod
+    def _compute_kelly_boosting(cls, model: Boosting, x: np.ndarray, cost: float = 0., alpha_range: list[float] = None):
+
+        outcome_array = model.resample(x=x, alpha_range=alpha_range)
+
+        kelly_value = []
+        for outcome in outcome_array:
+            kelly_proportion = kelly_bootstrap(outcomes=outcome, cost=cost)
             kelly_value.append(kelly_proportion)
 
         return np.array(kelly_value)
@@ -469,7 +493,7 @@ class Metrics(object):
 
 
 class CrossValidation(object):
-    def __init__(self, model, folds=5, strict_no_future: bool = True, shuffle: bool = True, trade_cost: float = 0.001, **kwargs):
+    def __init__(self, model: Regression, folds=5, strict_no_future: bool = True, shuffle: bool = True, trade_cost: float = 0.001, **kwargs):
         """
         Initialize the CrossValidation object.
 
@@ -491,7 +515,7 @@ class CrossValidation(object):
         self.y_val = None
         self.y_pred = None
         self.prediction_interval = None
-        self.bootstrap_deviation = None
+        self.resampled_deviation = None
 
         self._metrics = None
 
@@ -532,6 +556,21 @@ class CrossValidation(object):
         x_train, y_train, x_val, y_val = x[train_indices], y[train_indices], x[val_indices], y[val_indices]
         return x_train, y_train, x_val, y_val, val_indices
 
+    def _predict(self, x):
+        if isinstance(self.model, Bootstrap):
+            y_pred, prediction_interval, resampled_deviation, *_ = self.model.predict(x=x)
+        elif isinstance(self.model, Boosting):
+            y_pred, prediction_interval, *_ = self.model.predict(x=x)
+            resampled_y = self.model.resample(x=x)
+            resampled_deviation = []
+            for _y, _y_resampled in zip(y_pred, resampled_y):
+                resampled_deviation.append(_y_resampled - _y)
+            resampled_deviation = np.array(resampled_deviation)
+        else:
+            raise NotImplementedError(f'Can not find validation method for {self.model.__class__}')
+
+        return y_pred, prediction_interval, resampled_deviation
+
     def validate(self, x: np.ndarray, y: np.ndarray):
         """
         Perform cross-validation and store the results in the metrics attribute.
@@ -549,7 +588,7 @@ class CrossValidation(object):
         if not self.strict_no_future:
             np.random.shuffle(indices)
 
-        fold_metrics = {'x_val': [], 'y_val': [], 'y_pred': [], 'index': [], 'prediction_interval': [], 'bootstrap_deviation': []}
+        fold_metrics = {'x_val': [], 'y_val': [], 'y_pred': [], 'index': [], 'prediction_interval': [], 'resampled_deviation': []}
 
         for fold in range(self.folds):
             if self.strict_no_future:
@@ -560,17 +599,17 @@ class CrossValidation(object):
             self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
 
             # Predict on the validation data
-            y_pred, prediction_interval, bootstrap_deviation, *_ = self.model.predict(x_val)
+            y_pred, prediction_interval, resampled_deviation = self._predict(x_val)
 
             fold_metrics['x_val'].append(x_val)
             fold_metrics['y_val'].append(y_val)
             fold_metrics['y_pred'].append(y_pred)
             fold_metrics['index'].append(val_indices)  # Store sorted indices
             fold_metrics['prediction_interval'].append(prediction_interval)
-            fold_metrics['bootstrap_deviation'].append(bootstrap_deviation)
+            fold_metrics['resampled_deviation'].append(resampled_deviation)
 
         sorted_indices = np.concatenate(fold_metrics['index'])
-        for key in ['x_val', 'y_val', 'y_pred', 'prediction_interval', 'bootstrap_deviation']:
+        for key in ['x_val', 'y_val', 'y_pred', 'prediction_interval', 'resampled_deviation']:
             values = np.concatenate(fold_metrics[key])
             fold_metrics[key] = values[np.argsort(sorted_indices)]
 
@@ -578,19 +617,19 @@ class CrossValidation(object):
         self.y_val = fold_metrics['y_val']
         self.y_pred = fold_metrics['y_pred']
         self.prediction_interval = fold_metrics['prediction_interval']
-        self.bootstrap_deviation = fold_metrics['bootstrap_deviation']
+        self.resampled_deviation = fold_metrics['resampled_deviation']
 
     def validate_out_sample(self, x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray):
         self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
 
         # Predict on the validation data
-        y_pred, prediction_interval, bootstrap_deviation, *_ = self.model.predict(x_val)
+        y_pred, prediction_interval, resampled_deviation = self._predict(x_val)
 
         self.x_val = np.array(x_val)
         self.y_val = np.array(y_val)
         self.y_pred = np.array(y_pred)
         self.prediction_interval = np.array(prediction_interval)
-        self.bootstrap_deviation = np.array(bootstrap_deviation)
+        self.resampled_deviation = np.array(resampled_deviation)
 
     def plot(self, x_axis: list | np.ndarray = None, **kwargs):
         """
@@ -663,7 +702,7 @@ class CrossValidation(object):
 
         # Plot Kelly decision
         kelly_value = []
-        for outcome, deviations in zip(self.y_pred, self.bootstrap_deviation):
+        for outcome, deviations in zip(self.y_pred, self.resampled_deviation):
             kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=self.trade_cost)
             kelly_value.append(kelly_proportion)
 

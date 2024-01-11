@@ -1,12 +1,11 @@
 import abc
 import json
 import pathlib
+from typing import overload
 
 import numpy as np
-from typing import overload
-from .. import LOGGER
 
-__all__ = ['LOGGER']
+from .. import LOGGER
 
 LOGGER = LOGGER.getChild('Calibration')
 
@@ -16,14 +15,15 @@ class Regression(object, metaclass=abc.ABCMeta):
     def fit(self, x: list | np.ndarray, y: list | np.ndarray, **kwargs) -> None: ...
 
     @overload
-    def predict(self, x: np.ndarray, alpha=0.05) -> tuple[np.ndarray, np.ndarray, np.ndarray, ...]: ...
+    def predict(self, x: np.ndarray, alpha=0.05) -> tuple[np.ndarray, np.ndarray, ...]: ...
 
     @abc.abstractmethod
     def predict(self, x: list | np.ndarray, alpha=0.05) -> tuple[float, tuple[float, float], ...]:
         """
+        note: alpha is the prob outside the center distribution, e.g. alpha = 0.1 -> lower_bound=0.05, upper_bound=0.95; alpha = 1 -> lower_bound=upper_bound=0.5
         returns a prediction value,
         and a prediction interval (lower bound and upper bound, of confidence interval {alpha}, minus the prediction value)
-        and prediction deviation (bootstrapped value - mean)
+        and prediction deviation (bootstrapped value - mean) for bootstrapping model and bagging models
         and other relevant values.
         """
         ...
@@ -44,3 +44,12 @@ class Regression(object, metaclass=abc.ABCMeta):
                 f.write(json_str)
 
         return json_dict
+
+    @property
+    def ensemble(self) -> str:
+        return 'simple'
+
+
+from .cross_validation import CrossValidation, Metrics
+
+__all__ = ['LOGGER', 'Regression', 'CrossValidation', 'Metrics']

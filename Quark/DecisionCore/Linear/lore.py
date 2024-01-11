@@ -11,7 +11,7 @@ import pandas as pd
 
 from . import LOGGER
 from ...Base import GlobalStatics
-from ...Calibration.bootstrap import LinearRegression
+from ...Calibration.Linear.bootstrap import LinearRegression
 from ...Calibration.dummies import session_dummies
 from ...Factor.future import fix_prediction_target
 from ...Strategy import StrategyMetric
