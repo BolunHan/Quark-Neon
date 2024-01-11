@@ -23,7 +23,8 @@ from ..API import historical
 from ..Backtest import simulated_env, factor_pool
 from ..Base import safe_exit, GlobalStatics
 from ..Calibration.Kernel import poly_kernel
-from ..Calibration.bootstrap import *
+from ..Calibration.Linear.bootstrap import *
+from ..Calibration.Boosting.xgboost import *
 from ..Calibration.cross_validation import CrossValidation
 from ..Calibration.dummies import is_cn_market_session, session_dummies
 from ..Misc import helper
@@ -92,7 +93,8 @@ class FactorValidation(object):
         self.factor_value: dict[float, dict[str, float]] = {}
         self.metrics = {}
 
-        self.model = RidgeRegression(alpha=1.0)
+        self.model = RidgeRegression(alpha=1.0)  # for ridge regression (build linear baseline)
+        self.model = XGBoost()
         self.coefficients: dict[str, float] = {}
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
 

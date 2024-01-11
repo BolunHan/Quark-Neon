@@ -10,3 +10,6 @@ plotly  # plotting support
 
 # for calibration
 scikit-learn
+
+# for xgb
+xgboost
