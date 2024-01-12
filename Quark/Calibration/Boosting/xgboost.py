@@ -3,6 +3,7 @@ from functools import partial
 
 import numpy as np
 from xgboost.sklearn import XGBRegressor
+from sklearn.model_selection import train_test_split
 
 from . import Boosting, LOGGER
 from ..Kernel import Scaler
@@ -126,12 +127,12 @@ class XGBoost(Boosting):
         super().__init__()
 
         self.alpha: float = alpha
-        self.lower_bound_params = dict(quantile_delta=1.0, quantile_threshold=5.0, quantile_variance=3.2) if lower_bound_params is None else lower_bound_params
-        self.upper_bound_params = dict(quantile_delta=1.0, quantile_threshold=6.0, quantile_variance=4.2) if upper_bound_params is None else upper_bound_params
+        self.lower_bound_params = dict(quantile_delta=2.0, quantile_threshold=6.0, quantile_variance=2.5) if lower_bound_params is None else lower_bound_params
+        self.upper_bound_params = dict(quantile_delta=2.0, quantile_threshold=6.0, quantile_variance=1.5) if upper_bound_params is None else upper_bound_params
 
-        self.xgb_params = {}
-        self.xgb_lower_params = {}
-        self.xgb_upper_params = {}
+        self.xgb_params = {'n_estimators': 64, 'early_stopping_rounds': 10}
+        self.xgb_lower_params = {'n_estimators': 128, 'early_stopping_rounds': 10}
+        self.xgb_upper_params = {'n_estimators': 128, 'early_stopping_rounds': 10}
 
         self.xgb_params.update(kwargs)
 
@@ -151,27 +152,37 @@ class XGBoost(Boosting):
 
         self._x_train: np.ndarray | None = None
         self._y_train: np.ndarray | None = None
+        self.val_split = 0.2
 
     def fit(self, x: list[float] | np.ndarray, y: list[float] | np.ndarray, **kwargs) -> None:
-        self.model.fit(x=x, y=y, **kwargs)
+
+        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=self.val_split)
+
+        self.model.fit(x=x_train, y=y_train, eval_set=[(x_test, y_test)], verbose=False, **kwargs)
 
         self.quantile_model_lower.fit(
-            x=x,
-            y=y,
+            x=x_train,
+            y=y_train,
+            eval_set=[(x_test, y_test)],
             quantile_alpha=self.alpha / 2,
             quantile_delta=self.lower_bound_params['quantile_delta'],
             quantile_threshold=self.lower_bound_params['quantile_threshold'],
             quantile_variance=self.lower_bound_params['quantile_variance'],
+            xgb_model=self.model.model,
+            verbose=False,
             **kwargs
         )
 
         self.quantile_model_upper.fit(
-            x=x,
-            y=y,
+            x=x_train,
+            y=y_train,
+            eval_set=[(x_test, y_test)],
             quantile_alpha=1 - self.alpha / 2,
             quantile_delta=self.upper_bound_params['quantile_delta'],
             quantile_threshold=self.upper_bound_params['quantile_threshold'],
             quantile_variance=self.upper_bound_params['quantile_variance'],
+            xgb_model=self.model.model,
+            verbose=False,
             **kwargs
         )
 
@@ -218,17 +229,21 @@ class XGBoost(Boosting):
 
         if model.alpha != quantile_alpha:
             LOGGER.debug(f'Cache is not hit! requested model with alpha {quantile_alpha:.4f}, cached model alpha {model.alpha:.4f}, model will be fitted online.')
+            x_train, x_test, y_train, y_test = train_test_split(self._x_train, self._y_train, test_size=self.val_split)
 
             if self._x_train is None or self._y_train is None:
                 raise ValueError(f'Model with alpha {quantile_alpha} is not cached, The Model {self.__class__} must be fitted before prediction!')
 
             model.fit(
-                x=self._x_train,
-                y=self._y_train,
+                x=x_train,
+                y=y_train,
+                eval_set=[(x_test, y_test)],
                 quantile_alpha=quantile_alpha,
                 quantile_delta=quantile_delta,
                 quantile_threshold=quantile_threshold,
-                quantile_variance=quantile_variance
+                quantile_variance=quantile_variance,
+                xgb_model=self.model.model,
+                verbose=False
             )
 
         return model.predict(x)
