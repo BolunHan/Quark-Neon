@@ -170,34 +170,34 @@ class Metrics(object):
         return y_actual_selected, y_pred_selected
 
     @classmethod
-    def _compute_kelly(cls, model: Regression | Bootstrap | Boosting, x: np.ndarray, cost: float = 0.):
+    def _compute_kelly(cls, model: Regression | Bootstrap | Boosting, x: np.ndarray, max_pos: float = 2., cost: float = 0.):
         if model.ensemble == 'bagging':
-            return cls._compute_kelly_bagging(model=model, x=x, cost=cost)
+            return cls._compute_kelly_bagging(model=model, x=x, max_pos=max_pos, cost=cost)
         elif model.ensemble == 'boosting':
-            return cls._compute_kelly_boosting(model=model, x=x, cost=cost)
+            return cls._compute_kelly_boosting(model=model, x=x, max_pos=max_pos, cost=cost)
         else:
             LOGGER.error(f'Kelly function cannot handle ensemble type {model.ensemble} of model {model.__class__}.')
             return 0.
 
     @classmethod
-    def _compute_kelly_bagging(cls, model: Regression, x: np.ndarray, cost: float = 0.):
+    def _compute_kelly_bagging(cls, model: Regression, x: np.ndarray, max_pos: float = 2., cost: float = 0.):
         y_pred, _, bootstrap_deviation, *_ = cls._predict(model=model, x=x, alpha=0)
 
         kelly_value = []
         for outcome, deviations in zip(y_pred, bootstrap_deviation):
-            kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=cost)
+            kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=cost, max_leverage=max_pos)
             kelly_value.append(kelly_proportion)
 
         return np.array(kelly_value)
 
     @classmethod
-    def _compute_kelly_boosting(cls, model: Boosting, x: np.ndarray, cost: float = 0., alpha_range: list[float] = None):
+    def _compute_kelly_boosting(cls, model: Boosting, x: np.ndarray, max_pos: float = 2., cost: float = 0., alpha_range: list[float] = None):
 
         outcome_array = model.resample(x=x, alpha_range=alpha_range)
 
         kelly_value = []
         for outcome in outcome_array:
-            kelly_proportion = kelly_bootstrap(outcomes=outcome, cost=cost)
+            kelly_proportion = kelly_bootstrap(outcomes=outcome, cost=cost, max_leverage=max_pos)
             kelly_value.append(kelly_proportion)
 
         return np.array(kelly_value)
@@ -357,13 +357,26 @@ class Metrics(object):
             return np.nan
 
     @classmethod
-    def compute_kelly_return(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, cost: float = 0.):
+    def compute_kelly_return(cls, model: Regression, x: np.ndarray, y_actual: np.ndarray, max_pos: float = 2., cost: float = 0.):
         kelly_return = []
 
-        kelly_decision = cls._compute_kelly(model=model, x=x, cost=cost)
+        kelly_decision = cls._compute_kelly(model=model, x=x, max_pos=max_pos, cost=cost)
+
+        current_pos = 0.
 
         for weight, outcome in zip(kelly_decision, y_actual):
-            kelly_return.append(weight * outcome)
+            if weight:
+                kelly_return.append(weight * outcome)
+
+            # if current_pos == weight:
+            #     pass
+            # else:
+            #     trade_action = weight - current_pos
+            #     current_pos = weight
+            #     trade_cost = abs(trade_action) * cost
+            #     trade_return = outcome * current_pos
+            #     kelly_return += trade_return
+            #     kelly_return -= trade_cost
 
         return np.nanmean(kelly_return)
 
@@ -511,6 +524,7 @@ class CrossValidation(object):
 
         self.fit_kwargs = kwargs
 
+        self.x_axis = None
         self.x_val = None
         self.y_val = None
         self.y_pred = None
@@ -649,7 +663,10 @@ class CrossValidation(object):
         prediction_interval = self.prediction_interval
 
         if x_axis is None:
-            x_axis = np.arange(len(y_val))
+            if self.x_axis is None:
+                x_axis = np.arange(len(y_val))
+            else:
+                x_axis = self.x_axis
 
         # Scatter plot for actual values
         fig.add_trace(
