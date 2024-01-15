@@ -1,4 +1,4 @@
-# Core function
+# core function
 PyAlgoEngine
 pandas
 numpy
@@ -13,3 +13,6 @@ scikit-learn
 
 # for xgb
 xgboost
+
+# for estimate error of random forest
+forestci
