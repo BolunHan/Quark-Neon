@@ -25,6 +25,7 @@ from ..Base import safe_exit, GlobalStatics
 from ..Calibration.Kernel import poly_kernel
 from ..Calibration.Linear.bootstrap import *
 from ..Calibration.Boosting.xgboost import *
+from ..Calibration.Bagging.RandomForest import *
 from ..Calibration.cross_validation import CrossValidation
 from ..Calibration.dummies import is_cn_market_session, session_dummies
 from ..Misc import helper
@@ -84,7 +85,7 @@ class FactorValidation(object):
         # Params for validation
         self.decoder = RecursiveDecoder(level=3)
         self.pred_target = 'Synthetic.market_price'
-        self.features = {'MACD.Index.Trigger.Synthetic'}
+        self.features = ['MACD.Index.Trigger.Synthetic']
 
         self.factor: MarketDataMonitor | None = None
         self.synthetic: SyntheticIndexMonitor | None = None
@@ -94,7 +95,6 @@ class FactorValidation(object):
         self.metrics = {}
 
         self.model = RidgeRegression(alpha=1.0)  # for ridge regression (build linear baseline)
-        self.model = XGBoost()
         self.coefficients: dict[str, float] = {}
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
 
@@ -282,8 +282,9 @@ class FactorValidation(object):
             decode_level=self.decoder.level
         )
 
-        # y = factors['target_smoothed'].to_numpy()
-        y = factors['pct_change'].to_numpy()
+        y = factors['target_smoothed'].to_numpy()
+        # y = factors['target_actual'].to_numpy()
+        # y = factors['pct_change'].to_numpy()
         return y
 
     def _cross_validation(self, x, y, factors: pd.DataFrame):
@@ -306,13 +307,12 @@ class FactorValidation(object):
         x_axis = x_axis[valid_mask]
 
         self.cv.validate(x=x, y=y)
-        fig = self.cv.plot(x=x, y=y, x_axis=x_axis)
-        fig = self.plot_synthetic(factors=factors, fig=fig)
+        self.cv.x_axis = x_axis
 
-        return fig
-
-    def plot_synthetic(self, factors: pd.DataFrame, fig, plot_wavelet: bool = True):
+    def _plot_synthetic(self, factors: pd.DataFrame, plot_wavelet: bool = True):
         import plotly.graph_objects as go
+        fig = self.cv.plot()
+
         candlestick_trace = go.Candlestick(
             name='Synthetic',
             x=factors['market_time'],
@@ -340,6 +340,7 @@ class FactorValidation(object):
         fig.update_xaxes(
             rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")],
         )
+
         fig.update_layout(
             yaxis3=dict(
                 title="Synthetic",
@@ -352,14 +353,13 @@ class FactorValidation(object):
 
         return fig
 
-    def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
+    def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame):
         """
         Dumps the cross-validation results to CSV and HTML files.
 
         Args:
             market_date (datetime.date): Current market date.
             factors (pd.DataFrame): DataFrame containing factors.
-            fig: Plotly figure from cross-validation.
         """
         dump_dir = f'Validation.{self.validation_id.split("-")[0]}'
         os.makedirs(dump_dir, exist_ok=True)
@@ -368,6 +368,7 @@ class FactorValidation(object):
         os.makedirs(entry_dir, exist_ok=True)
 
         factors.to_csv(pathlib.Path(entry_dir, f'{self.factor.name}.validation.csv'))
+        fig = self._plot_synthetic(factors=factors)
         fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.validation.html'))
 
         self.metrics[market_date] = self.cv.metrics.metrics
@@ -392,10 +393,10 @@ class FactorValidation(object):
         y = self._define_prediction(factors=factor_metrics)
 
         # Step 2: Regression analysis
-        fig = self._cross_validation(x=x, y=y, factors=factor_metrics)
+        self._cross_validation(x=x, y=y, factors=factor_metrics)
 
         # Step 3: Dump the results
-        self._dump_result(market_date=market_date, factors=factor_metrics, fig=fig)
+        self._dump_result(market_date=market_date, factors=factor_metrics)
 
     def _collect_synthetic(self, timestamp: float, current_bar: BarData | None, last_update: float, entry_log: dict[str, float]):
         """
@@ -527,7 +528,14 @@ class FactorBatchValidation(FactorValidation):
         self.poly_degree = kwargs.get('poly_degree', 2)
         self.override_cache = kwargs.get('override_cache', False)
 
-        self.features: list[str] = ['MACD.Index.Trigger.Synthetic', 'Entropy.Price.EMA']
+        self.features: list[str] = [
+            'Entropy.Price.EMA',
+            'Coherence.Volume',
+            'Coherence.Price.EMA.up', 'Coherence.Price.EMA.down', 'Coherence.Price.EMA.ratio',
+            'MACD.Index.Trigger.Synthetic',
+            'TradeFlow.EMA.Index',
+            'Aggressiveness.EMA.Index',
+        ]
         self.factor: list[MarketDataMonitor] = []
 
         self.factor_pool = factor_pool.FACTOR_POOL
@@ -544,12 +552,6 @@ class FactorBatchValidation(FactorValidation):
             list[MarketDataMonitor]: Initialized list of market data monitors.
         """
         self.factor = [
-            IndexMACDTriggerMonitor(
-                weights=self.index_weights,
-                update_interval=kwargs.get('update_interval', 60),
-                observation_window=kwargs.get('observation_window', 5),
-                confirmation_threshold=kwargs.get('confirmation_threshold', 0.)
-            ),
             EntropyEMAMonitor(
                 weights=self.index_weights,
                 update_interval=kwargs.get('update_interval', 60),
@@ -622,9 +624,14 @@ class FactorBatchValidation(FactorValidation):
             LOGGER.info('Cache overridden!')
             self.factor_pool.batch_update(factors=self.factor_value)
         else:
-            LOGGER.info('Cache updated!')
             exclude_keys = self.factor_pool.factor_names(market_date=market_date)
             self.factor_pool.batch_update(factors=self.factor_value, exclude_keys=exclude_keys)
+
+            if all([name in exclude_keys for name in pd.DataFrame(self.factor_value).T.columns]):
+                return
+
+            LOGGER.info('Cache updated!')
+
         self.factor_pool.dump()
 
     def bod(self, market_date: datetime.date, **kwargs) -> None:
@@ -653,24 +660,125 @@ class FactorBatchValidation(FactorValidation):
             factors = collect_factor(monitors=self.factor_cache)
             entry_log.update(factors)
 
-    def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
+    def _plot_factors(self, factors: pd.DataFrame, precision=4):
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        # Select relevant columns from factors
+        selected_factors = factors[['market_time'] + self.features]
+        hover_data = factors[self.features].astype(np.float64)
+
+        # Create subplot
+        fig = make_subplots(
+            rows=len(self.features) + 1,
+            cols=1,
+            shared_xaxes=False,
+            subplot_titles=['Synthetic'] + self.features,
+            row_heights=[3] + [1] * len(self.features)
+        )
+
+        candlestick_trace = go.Candlestick(
+            name='Synthetic',
+            x=factors['market_time'],
+            open=factors['Synthetic.open_price'],
+            high=factors['Synthetic.high_price'],
+            low=factors['Synthetic.low_price'],
+            close=factors['Synthetic.close_price'],
+            showlegend=True,
+        )
+        fig.add_trace(candlestick_trace, row=1, col=1)
+        fig['layout'][f'yaxis']['title'] = 'Synthetic'
+
+        # Add traces for each feature
+        for i, feature in enumerate(self.features):
+            trace = go.Scatter(
+                x=selected_factors['market_time'],
+                y=selected_factors[feature],
+                mode='lines',
+                name=feature,
+                customdata=hover_data,
+                hovertemplate='<br>'.join(
+                    ['Datetime: %{x:%Y-%m-%d:%h}'] +
+                    ['<b>' + feature + '</b><b>' + f": %{{y:.{precision}f}}" + '</b>'] +
+                    [self.features[_] + f": %{{customdata[{_}]:.{precision}f}}" for _ in range(len(self.features)) if _ != i] +
+                    ['<extra></extra>']  # otherwise another legend will be shown
+                ),
+                showlegend=True,
+            )
+
+            fig.add_trace(trace, row=i + 2, col=1)
+            # fig['layout'][f'yaxis{i + 2}']['title'] = feature
+            fig.update_layout(
+                {
+                    f'yaxis{i + 2}': dict(
+
+                        title=feature,
+                        showgrid=True,
+                        zeroline=True,
+                        showticklabels=True,
+                        showspikes=True,
+                        # spikemode='across',
+                        spikesnap='cursor',
+                        spikethickness=-2,
+                        # showline=False,
+                        # spikedash='solid'
+                    )
+                }
+            )
+
+        fig.update_layout(
+            title=dict(text="Factor Values for Synthetic"),
+            height=200 * (3 + len(self.features)),
+            template='simple_white',
+            # legend_tracegroupgap=330,
+            hovermode='x unified',
+            legend_traceorder="normal"
+        )
+
+        fig.update_traces(xaxis=f'x1')
+
+        fig.update_xaxes(
+            tickformat='%H:%M:%S',
+            gridcolor='black',
+            griddash='dash',
+            minor_griddash="dot",
+            showgrid=True,
+            spikethickness=-2,
+            rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")],
+            rangeslider_visible=False
+        )
+
+        return fig
+
+    def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame):
         """
         Dumps results for multiple factors.
 
         Args:
             market_date (datetime.date): Current market date.
             factors (pd.DataFrame): DataFrame containing factors.
-            fig: Plotly figure from cross-validation.
         """
-        dump_dir = f'BatchValidation.{self.validation_id.split("-")[0]}'
+        dump_dir = f'{self.__class__.__name__}.{self.model.__class__.__name__}.{self.validation_id.split("-")[0]}'
         os.makedirs(dump_dir, exist_ok=True)
 
         entry_dir = pathlib.Path(dump_dir, f'{market_date:%Y-%m-%d}')
         os.makedirs(entry_dir, exist_ok=True)
 
-        file_name = f'{"".join([f"[{factor.name}]" for factor in self.factor])}.validation'
-        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.csv'))
-        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.html'), include_plotlyjs='cdn')
+        if len(self.factor) > 2:
+            file_name = f'{self.__class__.__name__}'
+        else:
+            file_name = f'{"".join([f"[{factor.name}]" for factor in self.factor])}.validation'
+
+        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.factors.csv'))
+
+        fig = self._plot_synthetic(factors=factors)
+        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.pred.html'))
+
+        fig = self._plot_factors(factors=factors)
+        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.factor.html'))
+
+        self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
+        self.cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.metrics.html'))
 
         self.metrics[market_date] = self.cv.metrics.metrics
         pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
@@ -774,10 +882,10 @@ class InterTemporalValidation(FactorBatchValidation):
         x_val = self._define_inputs(factors=factor_metrics)
         y_val = self._define_prediction(factors=factor_metrics)
 
-        fig = self._out_sample_validation(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, factors=factor_metrics)
+        self._out_sample_validation(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, factors=factor_metrics)
 
         # Step 3: Dump the results
-        self._dump_result(market_date=market_date, factors=factor_metrics, fig=fig)
+        self._dump_result(market_date=market_date, factors=factor_metrics)
 
         # step 4: store factor value
         self.factor_value_storage.append(self.factor_value.copy())
@@ -798,29 +906,19 @@ class InterTemporalValidation(FactorBatchValidation):
         #     self.model.optimal_alpha(x=x_train, y=y_train)
 
         self.cv.validate_out_sample(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
-        fig = self.cv.plot(x_axis=x_axis)
-        fig = self.plot_synthetic(factors=factors, fig=fig)
-        return fig
 
-    def _dump_result(self, market_date: datetime.date, factors: pd.DataFrame, fig):
-        dump_dir = f'InterTemporalValidation.{self.validation_id.split("-")[0]}'
-        os.makedirs(dump_dir, exist_ok=True)
 
-        entry_dir = pathlib.Path(dump_dir, f'{market_date:%Y-%m-%d}')
-        os.makedirs(entry_dir, exist_ok=True)
+class GradientBoostValidation(InterTemporalValidation):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model = RandomForest()
+        # self.model = XGBoost()
+        self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
+        self.poly_degree = kwargs.get('poly_degree', 2)
 
-        if len(self.factor) > 1:
-            file_name = f'InterTemporal.validation'
-        else:
-            file_name = f'{"".join([f"[{factor.name}]" for factor in self.factor])}.validation'
-
-        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.factors.csv'))
-        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.validation.html'), include_plotlyjs='cdn')
-        self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
-        self.cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.metrics.html'))
-
-        self.metrics[market_date] = self.cv.metrics.metrics
-        pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
+    # def _define_prediction(self, factors: pd.DataFrame):
+    #     y = FactorValidation._define_prediction(self, factors=factors)
+    #     return y
 
 
 def main():
@@ -830,6 +928,7 @@ def main():
     # fv = FactorValidation()
     # fv = FactorBatchValidation()
     fv = InterTemporalValidation()
+    # fv = GradientBoostValidation()
     fv.run()
     safe_exit()
 
