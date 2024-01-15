@@ -1,10 +1,11 @@
 import json
+import tempfile
 from functools import partial
 
 import numpy as np
 from xgboost.sklearn import XGBRegressor
 from sklearn.model_selection import train_test_split
-
+import xgboost as xgb
 from . import Boosting, LOGGER
 from ..Kernel import Scaler
 
@@ -14,6 +15,116 @@ LOGGER = LOGGER.getChild('xgb')
 
 
 class XGBQuantile(object):
+    def __init__(self, **kwargs):
+        self.best_iteration: int = 0
+        self.booster: xgb.Booster | None = None
+
+        if 'alpha' in kwargs:  # assume alpha is a float from 0 to 1
+            self.alpha_range = [kwargs.get('alpha')]
+        elif 'alpha_range' in kwargs:  # assume alpha is a list of float from 0 to 1
+            self.alpha_range = sorted(kwargs.get('alpha_range'))
+
+        self.quantile = sorted(list(set([_ / 2 for _ in self.alpha_range] + [0.5] + [1 - _ / 2 for _ in self.alpha_range])))
+
+    def fit(self, x: np.ndarray, y: np.ndarray, val_split: float = 0.2, max_bin: int = 256, **kwargs):
+        evals_result = {}
+
+        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=val_split)
+        train_matrix = xgb.QuantileDMatrix(x_train, y_train, max_bin=max_bin)
+        test_matrix = xgb.QuantileDMatrix(x_test, y_test, ref=train_matrix, max_bin=max_bin)
+
+        train_params = dict(
+            objective="reg:quantileerror",
+            tree_method="hist",
+            quantile_alpha=self.quantile,
+            learning_rate=0.01,
+            subsample=0.8,
+            max_depth=8,
+            max_bin=max_bin,
+        )
+        train_params.update(kwargs)
+
+        booster = xgb.train(
+            params=train_params,
+            dtrain=train_matrix,
+            num_boost_round=128,
+            early_stopping_rounds=10,
+            # The evaluation result is a weighted average across multiple quantiles.
+            evals=[(train_matrix, "Train"), (test_matrix, "Test")],
+            evals_result=evals_result,
+            verbose_eval=False
+        )
+
+        self.booster = booster
+        self.best_iteration = booster.best_iteration
+
+        return booster
+
+    def predict(self, x: np.ndarray) -> dict[float, np.ndarray]:
+        y_pred = self.booster.inplace_predict(x, iteration_range=(0, self.best_iteration + 1))
+
+        result = {}
+
+        if len(self.quantile) == 1:
+            result[self.quantile[0]] = y_pred
+        else:
+            for i in range(len(self.quantile)):
+                alpha = self.quantile[i]
+                y_quantile = y_pred[:, i]
+                result[alpha] = y_quantile
+
+        return result
+
+    def to_json(self, fmt='dict') -> dict | str:
+
+        # Create a temporary file to store the JSON representation
+        with tempfile.NamedTemporaryFile(suffix='.json', mode='w+', delete=True) as temp_file:
+            json_path = temp_file.name
+            self.booster.save_model(json_path)
+
+            # Read the JSON file and parse it into a dictionary
+            with open(json_path, 'r') as json_file:
+                model_json = json.load(json_file)
+
+        json_dict = dict(
+            best_iteration=self.best_iteration,
+            alpha_range=self.alpha_range,
+            quantile=self.quantile,
+            model=model_json
+        )
+
+        if fmt == 'dict':
+            return json_dict
+        else:
+            return json.dumps(json_dict)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        self = cls(
+            alpha_range=json_dict['alpha_range']
+        )
+
+        with tempfile.NamedTemporaryFile(suffix='.json', mode='w+', delete=True) as temp_file:
+            json_path = temp_file.name
+            json.dump(json_dict, temp_file)
+            model = xgb.Booster(model_file=json_path)
+
+        self.booster = model
+        self.quantile = json_dict['quantile']
+        self.best_iteration = json_dict['best_iteration']
+
+        return self
+
+
+class XGBQuantileCustomLoss(object):
     """
     see https://towardsdatascience.com/regression-prediction-intervals-with-xgboost-428e0a018b for detailed explanation
     codes refactored from https://colab.research.google.com/github/benoitdescamps/benoit-descamps-blogs/blob/master/notebooks/quantile_xgb/xgboost_quantile_regression.ipynb
@@ -123,71 +234,23 @@ class XGBQuantile(object):
 
 
 class XGBoost(Boosting):
-    def __init__(self, alpha: float = 0.05, lower_bound_params: dict[str, float] = None, upper_bound_params: dict[str, float] = None, **kwargs):
+    def __init__(self, alpha: float = 0.05):
         super().__init__()
 
         self.alpha: float = alpha
-        self.lower_bound_params = dict(quantile_delta=2.0, quantile_threshold=6.0, quantile_variance=2.5) if lower_bound_params is None else lower_bound_params
-        self.upper_bound_params = dict(quantile_delta=2.0, quantile_threshold=6.0, quantile_variance=1.5) if upper_bound_params is None else upper_bound_params
-
-        self.xgb_params = {'n_estimators': 64, 'early_stopping_rounds': 10}
-        self.xgb_lower_params = {'n_estimators': 128, 'early_stopping_rounds': 10}
-        self.xgb_upper_params = {'n_estimators': 128, 'early_stopping_rounds': 10}
-
-        self.xgb_params.update(kwargs)
-
-        if 'lower_model' in self.xgb_params:
-            self.xgb_lower_params.update(self.xgb_params.pop('lower_model'))
-        else:
-            self.xgb_lower_params = self.xgb_params
-
-        if 'upper_model' in self.xgb_params:
-            self.xgb_upper_params.update(self.xgb_params.pop('upper_model'))
-        else:
-            self.xgb_upper_params = self.xgb_params
-
-        self.quantile_model_lower = XGBQuantile(**self.xgb_lower_params)
-        self.quantile_model_upper = XGBQuantile(**self.xgb_upper_params)
-        self.model = XGBQuantile(**self.xgb_params)
+        self.model = XGBQuantile(alpha=self.alpha)
+        self.model_cache = {}
 
         self._x_train: np.ndarray | None = None
         self._y_train: np.ndarray | None = None
         self.val_split = 0.2
 
     def fit(self, x: list[float] | np.ndarray, y: list[float] | np.ndarray, **kwargs) -> None:
-
-        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=self.val_split)
-
-        self.model.fit(x=x_train, y=y_train, eval_set=[(x_test, y_test)], verbose=False, **kwargs)
-
-        self.quantile_model_lower.fit(
-            x=x_train,
-            y=y_train,
-            eval_set=[(x_test, y_test)],
-            quantile_alpha=self.alpha / 2,
-            quantile_delta=self.lower_bound_params['quantile_delta'],
-            quantile_threshold=self.lower_bound_params['quantile_threshold'],
-            quantile_variance=self.lower_bound_params['quantile_variance'],
-            xgb_model=self.model.model,
-            verbose=False,
-            **kwargs
-        )
-
-        self.quantile_model_upper.fit(
-            x=x_train,
-            y=y_train,
-            eval_set=[(x_test, y_test)],
-            quantile_alpha=1 - self.alpha / 2,
-            quantile_delta=self.upper_bound_params['quantile_delta'],
-            quantile_threshold=self.upper_bound_params['quantile_threshold'],
-            quantile_variance=self.upper_bound_params['quantile_variance'],
-            xgb_model=self.model.model,
-            verbose=False,
-            **kwargs
-        )
+        self.model.fit(x=x, y=y, val_split=self.val_split)
 
         self._x_train = x
         self._y_train = y
+        self.model_cache.clear()
 
     def predict(self, x: list | np.ndarray, alpha=0.05):
         if not self.is_fitted:
@@ -203,60 +266,39 @@ class XGBoost(Boosting):
         if single_obs:
             x_array = x_array.reshape(1, -1)
 
-        y_pred = self.model.predict(x_array)
+        if alpha in self.model.alpha_range:
+            y_dict = self.model.predict(x_array)
+        else:
+            y_dict = self.predict_quantile(x=x_array, alpha=alpha)
 
-        lower_bound_params = dict(quantile_alpha=alpha / 2)
-        upper_bound_params = dict(quantile_alpha=1.0 - alpha / 2)
-        lower_bound_params.update(self.lower_bound_params)
-        upper_bound_params.update(self.upper_bound_params)
-
-        y_lower = self.predict_quantile(x_array, **lower_bound_params)
-        y_upper = self.predict_quantile(x_array, **upper_bound_params)
-
-        y_lower -= y_pred
-        y_upper -= y_pred
+        y_lower = y_dict[alpha / 2]
+        y_med = y_dict[0.5]
+        y_upper = y_dict[1 - alpha / 2]
 
         if single_obs:
-            return y_pred[0], (y_lower[0], y_upper[0])
+            return y_med[0], (y_lower[0], y_upper[0])
 
-        return y_pred, np.array([y_lower, y_upper]).T
+        return y_med, np.array([y_lower, y_upper]).T
 
-    def predict_quantile(self, x: np.ndarray, quantile_alpha: float, quantile_delta: float, quantile_threshold: float, quantile_variance: float) -> np.ndarray:
-        if quantile_alpha < 0.5:
-            model = self.quantile_model_lower
+    def predict_quantile(self, x: np.ndarray, alpha: float) -> dict[float, np.ndarray]:
+
+        if alpha in self.model_cache:
+            model = self.model_cache[alpha]
         else:
-            model = self.quantile_model_upper
+            LOGGER.debug(f'prediction interval of alpha {alpha:.4f} is not cached!')
+            model = XGBQuantile(alpha=alpha)
+            model.fit(x=self._x_train, y=self._y_train, val_split=self.val_split)
+            self.model_cache[alpha] = model
 
-        if model.alpha != quantile_alpha:
-            LOGGER.debug(f'Cache is not hit! requested model with alpha {quantile_alpha:.4f}, cached model alpha {model.alpha:.4f}, model will be fitted online.')
-            x_train, x_test, y_train, y_test = train_test_split(self._x_train, self._y_train, test_size=self.val_split)
-
-            if self._x_train is None or self._y_train is None:
-                raise ValueError(f'Model with alpha {quantile_alpha} is not cached, The Model {self.__class__} must be fitted before prediction!')
-
-            model.fit(
-                x=x_train,
-                y=y_train,
-                eval_set=[(x_test, y_test)],
-                quantile_alpha=quantile_alpha,
-                quantile_delta=quantile_delta,
-                quantile_threshold=quantile_threshold,
-                quantile_variance=quantile_variance,
-                xgb_model=self.model.model,
-                verbose=False
-            )
-
-        return model.predict(x)
+        y_dict = model.predict(x=x)
+        return y_dict
 
     def to_json(self, fmt='dict') -> dict | str:
 
         json_dict = dict(
             alpha=self.alpha,
-            lower_bound_params=self.lower_bound_params,
-            upper_bound_params=self.upper_bound_params,
-            xgb_params=self.xgb_params,
-            xgb_lower_params=self.xgb_lower_params,
-            xgb_upper_params=self.xgb_upper_params,
+            val_split=self.val_split,
+            model=self.model.to_json(fmt='dict'),
             x_train=self._x_train.tolist() if self._x_train is not None else None,
             y_train=self._y_train.tolist() if self._y_train is not None else None,
         )
@@ -277,19 +319,13 @@ class XGBoost(Boosting):
             raise TypeError(f'{cls.__name__} can not load from json {json_str}')
 
         self = cls(
-            alpha=json_dict['alpha'],
-            lower_bound_params=json_dict['lower_bound_params'],
-            upper_bound_params=json_dict['upper_bound_params'],
-            xgb_lower_params=json_dict['lower_model'],
-            xgb_upper_params=json_dict['upper_model'],
-            **json_dict['xgb_params']
+            alpha=json_dict['alpha']
         )
 
+        self.val_split = json_dict['val_split']
+        self.model = XGBQuantile.from_json(json_dict['model'])
         self._x_train = np.array(json_dict["x_train"]) if json_dict["x_train"] is not None else None
         self._y_train = np.array(json_dict["y_train"]) if json_dict["y_train"] is not None else None
-
-        if self._x_train is not None and self._y_train is not None:
-            self.fit(x=self._x_train, y=self._y_train)
 
         return self
 
