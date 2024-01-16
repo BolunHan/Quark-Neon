@@ -17,6 +17,7 @@ from PyQuantKit import MarketData, BarData
 
 from . import LOGGER, MDS, future, IndexWeight, ALPHA_0001, ALPHA_05, collect_factor
 from .Correlation import *
+from .Distribution import *
 from .LowPass import *
 from .Misc import SyntheticIndexMonitor
 from .TradeFlow import *
@@ -555,18 +556,19 @@ class FactorBatchValidation(FactorValidation):
         self.factor = [
             EntropyEMAMonitor(
                 weights=self.index_weights,
-                update_interval=kwargs.get('update_interval', 60),
+                sampling_interval=15,
+                sample_size=20,
                 alpha=ALPHA_0001,
                 discount_interval=1
             ),
             TradeCoherenceMonitor(
-                update_interval=60,
-                sample_interval=1,
+                sampling_interval=15,
+                sample_size=20,
                 weights=self.index_weights
             ),
             CoherenceEMAMonitor(
-                update_interval=60,
-                sample_interval=1,
+                sampling_interval=15,
+                sample_size=20,
                 weights=self.index_weights,
                 discount_interval=1,
                 alpha=ALPHA_0001
@@ -942,10 +944,10 @@ class FactorValidatorExperiment(InterTemporalValidation):
         # self.model = XGBoost()
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
         self.features: list[str] = [
-            'Skewness.Price.Adaptive.value',
-            'Skewness.Price.Adaptive.slope',
-            'Skewness.Price.value',
-            'Skewness.Price.slope',
+            'Skewness.PricePct.Adaptive.Index',
+            'Skewness.PricePct.Adaptive.Slope',
+            'Skewness.PricePct.Index',
+            'Skewness.PricePct.Slope',
             'MACD.Index.Trigger.Synthetic',
         ]
 
@@ -978,16 +980,17 @@ class FactorValidatorExperiment(InterTemporalValidation):
             list[MarketDataMonitor]: Initialized list of market data monitors.
         """
         self.factor = [
-            SkewnessMonitor(
-                update_interval=60 * 5,
-                sample_interval=3 * 5,
-                name='Monitor.Skewness.Price',
+            SkewnessIndexAdaptiveMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                baseline_window=100,
+                name='Monitor.Skewness.PricePct.Adaptive',
                 weights=self.index_weights
             ),
-            SkewnessAdaptiveMonitor(
-                update_interval=60 * 5,
-                sample_rate=20,
-                name='Monitor.Skewness.Price.Adaptive',
+            SkewnessIndexMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                name='Monitor.Skewness.PricePct',
                 weights=self.index_weights
             ),
             IndexMACDTriggerMonitor(

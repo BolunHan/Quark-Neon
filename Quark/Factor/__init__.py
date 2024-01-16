@@ -45,6 +45,7 @@ INDEX_WEIGHTS = IndexWeight(index_name='DummyIndex')
 
 from .TradeFlow import *
 from .Correlation import *
+from .Distribution import *
 from .Misc import *
 from .LowPass import *
 from .Decoder import *
@@ -67,13 +68,13 @@ def register_monitor(**kwargs) -> dict[str, MarketDataMonitor]:
     check_and_add(TradeFlowEMAMonitor(discount_interval=1, alpha=ALPHA_05, weights=index_weights))
 
     # price coherence monitor
-    check_and_add(CoherenceMonitor(update_interval=60, sample_interval=1, weights=index_weights))
+    check_and_add(CoherenceMonitor(sampling_interval=1, sample_size=60, weights=index_weights))
 
     # price coherence ema monitor
-    check_and_add(CoherenceEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=ALPHA_0001))
+    check_and_add(CoherenceEMAMonitor(sampling_interval=1, sample_size=60, weights=index_weights, discount_interval=1, alpha=ALPHA_0001))
 
     # trade coherence monitor
-    check_and_add(TradeCoherenceMonitor(update_interval=60, sample_interval=1, weights=index_weights))
+    check_and_add(TradeCoherenceMonitor(sampling_interval=1, sample_size=60, weights=index_weights))
 
     # synthetic index monitor
     check_and_add(SyntheticIndexMonitor(index_name=index_name, weights=index_weights))
@@ -88,10 +89,10 @@ def register_monitor(**kwargs) -> dict[str, MarketDataMonitor]:
     check_and_add(AggressivenessEMAMonitor(discount_interval=1, alpha=ALPHA_0001, weights=index_weights))
 
     # price coherence monitor
-    check_and_add(EntropyMonitor(update_interval=60, sample_interval=1, weights=index_weights))
+    check_and_add(EntropyMonitor(sampling_interval=1, sample_size=60, weights=index_weights))
 
     # price coherence monitor
-    check_and_add(EntropyEMAMonitor(update_interval=60, sample_interval=1, weights=index_weights, discount_interval=1, alpha=ALPHA_0001))
+    check_and_add(EntropyEMAMonitor(sampling_interval=1, sample_size=60, weights=index_weights, discount_interval=1, alpha=ALPHA_0001))
 
     # price coherence monitor
     check_and_add(VolatilityMonitor(weights=index_weights))
