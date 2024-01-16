@@ -62,7 +62,7 @@ class EMA(object, metaclass=abc.ABCMeta):
 
             # assign a ts on first update
             if ticker not in self._last_discount_ts:
-                self._last_discount_ts[ticker] = (timestamp // self.discount_interval )* self.discount_interval
+                self._last_discount_ts[ticker] = (timestamp // self.discount_interval) * self.discount_interval
 
             # self._discount_ema(ticker=ticker, timestamp=timestamp)
 
@@ -273,25 +273,25 @@ class FixTemporalIntervalMonitor(object, metaclass=abc.ABCMeta):
 
         if idx not in sampled_obs:
             sampled_obs[idx] = value
-            self.on_entry_add(key=idx, value=value)
+            self.on_entry_add(ticker=ticker, key=idx, value=value)
         else:
             sampled_obs[idx] = value
-            self.on_entry_update(key=idx, value=value)
+            self.on_entry_update(ticker=ticker, key=idx, value=value)
 
         for idx in list(sampled_obs):
             if idx < idx_min:
                 sampled_obs.pop(idx)
-                self.on_entry_pop(key=idx, value=value)
+                self.on_entry_pop(ticker=ticker, key=idx, value=value)
             else:
                 break
 
-    def on_entry_add(self, key, value):
+    def on_entry_add(self, ticker: str, key, value):
         pass
 
-    def on_entry_update(self, key, value):
+    def on_entry_update(self, ticker: str, key, value):
         pass
 
-    def on_entry_pop(self, key, value):
+    def on_entry_pop(self, ticker: str, key, value):
         pass
 
     def clear(self):
@@ -451,10 +451,10 @@ class AdaptiveVolumeIntervalMonitor(FixVolumeIntervalMonitor, metaclass=abc.ABCM
 
         if idx not in sampled_obs:
             sampled_obs[idx] = value
-            self.on_entry_add(key=idx, value=value)
+            self.on_entry_add(ticker=ticker, key=idx, value=value)
         else:
             sampled_obs[idx] = value
-            self.on_entry_update(key=idx, value=value)
+            self.on_entry_update(ticker=ticker, key=idx, value=value)
 
         for idx in list(sampled_obs):
             idx_ts, idx_vol = idx
@@ -464,14 +464,14 @@ class AdaptiveVolumeIntervalMonitor(FixVolumeIntervalMonitor, metaclass=abc.ABCM
                 break
             elif idx_vol < idx_vol_min:
                 sampled_obs.pop(idx)
-                self.on_entry_pop(key=idx, value=value)
+                self.on_entry_pop(ticker=ticker, key=idx, value=value)
             else:
                 break
 
         if not allow_oversampling and (to_pop := len(sampled_obs) - self.sample_rate) > 0:
             for idx in list(sampled_obs)[:to_pop]:
                 sampled_obs.pop(idx)
-                self.on_entry_pop(key=idx, value=value)
+                self.on_entry_pop(ticker=ticker, key=idx, value=value)
 
     def clear(self):
         super().clear()
