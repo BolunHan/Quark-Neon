@@ -21,10 +21,10 @@ Date: 2023-12-26
 import numpy as np
 from PyQuantKit import MarketData
 
-from .. import EMA, MDS, FixTemporalIntervalMonitor, AdaptiveVolumeIntervalMonitor, MarketDataMonitor
+from .. import EMA, MDS, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, MarketDataMonitor
 
 
-class EntropyMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
+class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
     """
     Monitors and measures the entropy of the covariance matrix.
 
@@ -38,17 +38,17 @@ class EntropyMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
     A large entropy generally indicates the end of a trend.
 
     Attributes:
-        update_interval (float): Time interval for updating the monitor.
-        sample_interval (float): Time interval for sampling market data.
+        sample_size (int): Max sample size.
+        sampling_interval (float): Time interval for sampling market data.
         weights (dict[str, float]): Weights for individual stocks in the pool.
         ignore_primary (bool): Whether to ignore the primary component (std) of the covariance matrix.
         name (str): Name of the monitor.
         monitor_id (str): Identifier for the monitor.
     """
 
-    def __init__(self, update_interval: float, sample_interval: float = 1., weights: dict[str, float] = None, pct_change: bool = False, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int = 20, weights: dict[str, float] = None, pct_change: bool = False, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
-        FixTemporalIntervalMonitor.__init__(self=self, update_interval=update_interval, sample_interval=sample_interval)
+        FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size)
 
         self.weights = weights
         self.pct_change = pct_change
@@ -76,7 +76,7 @@ class EntropyMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
 
     def clear(self) -> None:
         self._historical_price.clear()
-        FixTemporalIntervalMonitor.clear(self)
+        FixedIntervalSampler.clear(self)
 
     @classmethod
     def covariance_matrix(cls, vectors: list[list[float]] | np.ndarray) -> np.ndarray:
@@ -200,12 +200,12 @@ class EntropyMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
         return self._is_ready
 
 
-class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalMonitor):
+class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
 
-    def __init__(self, update_interval: float, sample_rate: float = 20., baseline_window: int = 5, weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.Adaptive', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int = 20, baseline_window: int = 5, weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.Adaptive', monitor_id: str = None):
         super().__init__(
-            update_interval=update_interval,
-            sample_interval=update_interval / sample_rate,
+            sampling_interval=sampling_interval,
+            sample_size=sample_size,
             weights=weights,
             pct_change=pct_change,
             ignore_primary=ignore_primary,
@@ -213,7 +213,7 @@ class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalMonitor):
             monitor_id=monitor_id
         )
 
-        AdaptiveVolumeIntervalMonitor.__init__(self=self, update_interval=update_interval, sample_rate=sample_rate, baseline_window=baseline_window)
+        AdaptiveVolumeIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size, baseline_window=baseline_window)
 
     def __call__(self, market_data: MarketData, **kwargs):
         self.accumulate_volume(market_data=market_data)
@@ -221,11 +221,11 @@ class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalMonitor):
 
     def clear(self) -> None:
         super().clear()
-        AdaptiveVolumeIntervalMonitor.clear(self)
+        AdaptiveVolumeIntervalSampler.clear(self)
 
     @property
     def is_ready(self) -> bool:
-        for ticker in self._volume_baseline['obs_acc_vol']:
+        for ticker in self._volume_baseline['obs_vol_acc']:
             if ticker not in self._volume_baseline['baseline']:
                 return False
 
@@ -239,21 +239,21 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
     Inherits from EntropyMonitor and EMA classes.
     """
 
-    def __init__(self, update_interval: float, discount_interval: float, alpha: float, sample_interval: float = 1., weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.EMA', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int,discount_interval: float, alpha: float,  weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.EMA', monitor_id: str = None):
         """
         Initializes the EntropyEMAMonitor.
 
         Args:
-            update_interval (float): Time interval for updating the monitor.
+            sample_size (int): Max sample size.
             discount_interval (float): Time interval for discounting EMA values.
             alpha (float): Exponential moving average smoothing factor.
-            sample_interval (float): Time interval for sampling market data.
+            sampling_interval (float): Time interval for sampling market data.
             weights (dict): Weights for individual stocks in the pool.
             ignore_primary (bool): Whether to ignore the primary component (std) of the covariance matrix.
             name (str): Name of the monitor.
             monitor_id (str): Identifier for the monitor.
         """
-        super().__init__(update_interval=update_interval, sample_interval=sample_interval, weights=weights, pct_change=pct_change, ignore_primary=ignore_primary, name=name, monitor_id=monitor_id)
+        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, weights=weights, pct_change=pct_change, ignore_primary=ignore_primary, name=name, monitor_id=monitor_id)
         EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
 
         self.entropy_ema = self._register_ema(name='entropy')
@@ -274,9 +274,9 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
 
         super().__call__(market_data=market_data, **kwargs)
 
-        if self.last_update + self.update_interval < timestamp:
+        if self.last_update + self.sampling_interval < timestamp:
             _ = self.value
-            self.last_update = (timestamp // self.update_interval) * self.update_interval
+            self.last_update = (timestamp // self.sampling_interval) * self.sampling_interval
 
     def clear(self):
         """

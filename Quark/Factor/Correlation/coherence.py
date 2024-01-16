@@ -27,10 +27,10 @@ import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, TransactionData
 
-from .. import EMA, MDS, FixTemporalIntervalMonitor
+from .. import EMA, MDS, FixedIntervalSampler
 
 
-class CoherenceMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
+class CoherenceMonitor(MarketDataMonitor, FixedIntervalSampler):
     """
     Monitors and measures the coherence of price percentage change.
 
@@ -38,26 +38,26 @@ class CoherenceMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
     A factor of up_dispersion / (up_dispersion + down_dispersion) is an indication of (start of) a downward trend
 
     Attributes:
-        update_interval (float): Time interval for updating the monitor.
-        sample_interval (float): Time interval for sampling market data.
+        sampling_interval (float): Time interval for sampling market data.
+        sample_size (float): max sample size
         weights (dict): Weights for individual stocks in the pool.
         name (str): Name of the monitor.
         monitor_id (str): Identifier for the monitor.
     """
 
-    def __init__(self, update_interval: float, sample_interval: float = 1., weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Price', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Price', monitor_id: str = None):
         """
         Initializes the CoherenceMonitor.
 
         Args:
-            update_interval (float): Time interval for updating the monitor.
-            sample_interval (float): Time interval for sampling market data.
+            sampling_interval (float): Time interval for sampling market data.
+            sample_size (float): max sample size
             weights (dict): Weights for individual stocks in the pool.
             name (str): Name of the monitor.
             monitor_id (str): Identifier for the monitor.
         """
         super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
-        FixTemporalIntervalMonitor.__init__(self=self, update_interval=update_interval, sample_interval=sample_interval)
+        FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size)
 
         self.weights = weights
         self._historical_price: dict[str, dict[float, float]] = {}
@@ -83,7 +83,7 @@ class CoherenceMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
         self._price_change_pct[ticker] = price_change_pct
 
     @classmethod
-    def regression(cls, y: list[float] | np.ndarray, x: list[float] | np.ndarray = None):
+    def slope(cls, y: list[float] | np.ndarray, x: list[float] | np.ndarray = None):
         """
         Calculates the slope of linear regression.
 
@@ -150,13 +150,13 @@ class CoherenceMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
         if len(x) < 3:
             return np.nan
 
-        return self.regression(y=y, x=x)
+        return self.slope(y=y, x=x)
 
     def clear(self):
         """Clears historical price and price change data."""
         self._historical_price.clear()
         self._price_change_pct.clear()
-        FixTemporalIntervalMonitor.clear(self)
+        FixedIntervalSampler.clear(self)
 
     @property
     def value(self) -> dict[str, float]:
@@ -196,20 +196,19 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
     Inherits from CoherenceMonitor and EMA classes.
     """
 
-    def __init__(self, update_interval: float, discount_interval: float, alpha: float, sample_interval: float = 1., weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Price.EMA', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, discount_interval: float, alpha: float, weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Price.EMA', monitor_id: str = None):
         """
         Initializes the CoherenceEMAMonitor.
 
         Args:
-            update_interval (float): Time interval for updating the monitor.
             discount_interval (float): Time interval for discounting EMA values.
             alpha (float): Exponential moving average smoothing factor.
-            sample_interval (float): Time interval for sampling market data.
+            sampling_interval (float): Time interval for sampling market data.
             weights (dict): Weights for individual stocks in the pool.
             name (str): Name of the monitor.
             monitor_id (str): Identifier for the monitor.
         """
-        super().__init__(update_interval=update_interval, sample_interval=sample_interval, weights=weights, name=name, monitor_id=monitor_id)
+        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, weights=weights, name=name, monitor_id=monitor_id)
         EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
 
         self.dispersion_ratio = self._register_ema(name='dispersion_ratio')
@@ -230,9 +229,9 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
 
         super().__call__(market_data=market_data, **kwargs)
 
-        if self.last_update + self.update_interval < timestamp:
+        if self.last_update + self.sampling_interval < timestamp:
             _ = self.value
-            self.last_update = (timestamp // self.update_interval) * self.update_interval
+            self.last_update = (timestamp // self.sampling_interval) * self.sampling_interval
 
     def clear(self):
         """Clears historical price, price change, and EMA data."""
@@ -272,20 +271,20 @@ class TradeCoherenceMonitor(CoherenceMonitor):
     Inherits from CoherenceMonitor class.
     """
 
-    def __init__(self, update_interval: float, sample_interval: float = 1., weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Volume', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Volume', monitor_id: str = None):
         """
         Initializes the TradeCoherenceMonitor.
 
         Args:
-            update_interval (float): Time interval for updating the monitor.
-            sample_interval (float): Time interval for sampling market data.
+            sample_size (int): Max sample size.
+            sampling_interval (float): Time interval for sampling market data.
             weights (dict): Weights for individual stocks in the pool.
             name (str): Name of the monitor.
             monitor_id (str): Identifier for the monitor.
         """
         super().__init__(
-            update_interval=update_interval,
-            sample_interval=sample_interval,
+            sampling_interval=sampling_interval,
+            sample_size=sample_size,
             weights=weights,
             name=name,
             monitor_id=monitor_id,
@@ -293,7 +292,6 @@ class TradeCoherenceMonitor(CoherenceMonitor):
 
         self._historical_volume: dict[str, dict[float, float]] = {}
         self._historical_volume_net: dict[str, dict[float, float]] = {}
-
         self._volume_pct: dict[str, float] = {}
 
     def __call__(self, market_data: MarketData, **kwargs):
@@ -320,29 +318,24 @@ class TradeCoherenceMonitor(CoherenceMonitor):
         side = trade_data.side.sign
         timestamp = trade_data.timestamp
 
+        self.log_obs(ticker=ticker, value=volume, storage=self._historical_volume, timestamp=timestamp, mode='accumulate')
+        self.log_obs(ticker=ticker, value=volume * side, storage=self._historical_volume_net, timestamp=timestamp, mode='accumulate')
+
         sampled_volume = self._historical_volume.get(ticker, {})
         sampled_volume_net = self._historical_volume_net.get(ticker, {})
 
-        # update sampled volume, net volume
-        baseline_timestamp = (timestamp // self.update_interval - 1) * self.update_interval
-        sample_timestamp = (timestamp // self.sample_interval) * self.sample_interval
-        sampled_volume[sample_timestamp] = sampled_volume.get(sample_timestamp, 0.) + volume
-        sampled_volume_net[sample_timestamp] = sampled_volume_net.get(sample_timestamp, 0.) + volume * side
+        total_volume = sum(sampled_volume.values()) if sampled_volume else 0.
+        net_volume = sum(sampled_volume_net.values()) if sampled_volume_net else 0.
+        volume_pct = net_volume / total_volume if total_volume else 0.
 
-        for ts in list(sampled_volume):
-            if ts < baseline_timestamp:
-                sampled_volume.pop(ts)
-                sampled_volume_net.pop(ts)
-            else:
-                break
+        self._volume_pct[ticker] = volume_pct
 
-        # update volume percentage change
-        baseline_volume = sum(sampled_volume.values())
-        net_volume = sum(sampled_volume_net.values())
-        self._volume_pct[ticker] = net_volume / baseline_volume
+    def clear(self):
+        super().clear()
 
-        self._historical_volume[ticker] = sampled_volume
-        self._historical_volume_net[ticker] = sampled_volume_net
+        self._historical_volume.clear()
+        self._historical_volume_net.clear()
+        self._volume_pct.clear()
 
     @property
     def value(self) -> float:
@@ -352,20 +345,26 @@ class TradeCoherenceMonitor(CoherenceMonitor):
         Returns:
             float: the 'slope' value.
         """
-        price_pct_change = []
-        volume_pct = []
+        y = []
+        x = []
 
         # Collect price and volume change data based on weights
-        if self.weights:
-            for ticker in self.weights:
-                if ticker in self._price_change_pct:
-                    price_pct_change.append(np.sqrt(self.weights[ticker]) * self._price_change_pct[ticker])
-                    volume_pct.append(np.sqrt(self.weights[ticker]) * self._volume_pct[ticker])
-        else:
-            # If no weights, use default order
-            price_pct_change.extend(self._price_change_pct.values())
-            volume_pct.extend(self._volume_pct.values())
+        for ticker in self._price_change_pct:
+            if self.weights:
+                if ticker in self.weights:
+                    weight = np.sqrt(self.weights[ticker])
 
-        slope = self.regression(x=volume_pct, y=price_pct_change)
+                    volume_pct = self._volume_pct.get(ticker, 0.) * weight
+                    price_pct_change = self._price_change_pct[ticker] * weight
 
+                    x.append(volume_pct)
+                    y.append(price_pct_change)
+            else:
+                volume_pct = self._volume_pct.get(ticker, 0.)
+                price_pct_change = self._price_change_pct[ticker]
+
+                x.append(volume_pct)
+                y.append(price_pct_change)
+
+        slope = self.slope(x=x, y=y)
         return slope
