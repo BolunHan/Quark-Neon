@@ -1,23 +1,23 @@
 from collections import deque
+from typing import Iterable
 
 import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData
 from scipy.stats import skew
 
-from .. import MDS, FixTemporalIntervalMonitor, AdaptiveVolumeIntervalMonitor
+from .. import MDS, FixTemporalIntervalMonitor, AdaptiveVolumeIntervalMonitor, Synthetic
 
 
-class SkewnessMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
+class SkewnessMonitor(MarketDataMonitor, FixTemporalIntervalMonitor, Synthetic):
 
-    def __init__(self, update_interval: float, sample_interval: float = 1., weights: dict[str, float] = None, name: str = 'Monitor.Skewness.Price', monitor_id: str = None):
+    def __init__(self, update_interval: float, sample_interval: float = 1., weights: dict[str, float] = None, name: str = 'Monitor.Skewness.PricePct', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
         FixTemporalIntervalMonitor.__init__(self=self, update_interval=update_interval, sample_interval=sample_interval)
-
-        self.weights = weights
+        Synthetic.__init__(self=self, weights=weights)
 
         self._historical_price = {}
-        self._historical_skewness = deque(maxlen=int(update_interval // sample_interval))
+        self._historical_skewness: dict[str, deque[float]] = {}
 
         self._is_ready = True
 
@@ -43,64 +43,72 @@ class SkewnessMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
         self._historical_skewness.clear()
         FixTemporalIntervalMonitor.clear(self)
 
-    def on_entry_add(self, key, value):
-        super().on_entry_add(key=key, value=value)
-        skewness = self.skewness()
-        self._historical_skewness.append(skewness)
+    def on_entry_add(self, ticker: str, key, value):
+        super().on_entry_add(ticker=ticker, key=key, value=value)
+        skewness_dict = self.skewness(ticker=ticker)
 
-    def slope(self) -> float:
-        skewness = list(self._historical_skewness)
+        if ticker not in skewness_dict:
+            return
 
-        if len(skewness) < 3:
-            return np.nan
+        skewness = skewness_dict[ticker]
 
-        x = list(range(len(skewness)))
-        x = np.vstack([x, np.ones(len(x))]).T
-        y = np.array(skewness)
+        if not np.isfinite(skewness):
+            return
 
-        slope, c = np.linalg.lstsq(x, y, rcond=None)[0]
-        return slope
-
-    def skewness(self):
-        price_matrix = []
-        weight_vector = []
-
-        if self.weights:
-            vector_length = min([len(self._historical_price.get(ticker, {})) for ticker in self.weights])
-
-            if vector_length < 3:
-                return np.nan
-
-            for ticker in self.weights:
-                if ticker in self._historical_price:
-                    price_matrix.append(list(self._historical_price[ticker].values())[-vector_length:])
-                    weight_vector.append(self.weights[ticker])
+        if ticker in self._historical_skewness:
+            historical_skewness = self._historical_skewness[ticker]
         else:
-            vector_length = min([len(_) for _ in self._historical_price.values()])
+            historical_skewness = self._historical_skewness[ticker] = deque(maxlen=int(self.update_interval // self.sample_interval))
 
-            if vector_length < 3:
-                return np.nan
+        historical_skewness.append(skewness)
 
-            price_matrix.extend([list(self._historical_price[ticker].values())[-vector_length:] for ticker in self._historical_price])
-            weight_vector.extend([1] * len(self._historical_price))
+    def slope(self) -> dict[str, float]:
+        slope_dict = {}
+        for ticker in self._historical_skewness:
+            skewness = list(self._historical_skewness[ticker])
 
-        if len(price_matrix) < 3:
-            return np.nan
+            if len(skewness) < 3:
+                slope = np.nan
+            else:
+                x = list(range(len(skewness)))
+                x = np.vstack([x, np.ones(len(x))]).T
+                y = np.array(skewness)
 
-        weighted_skewness = 0.
-        for price_vector, weight in zip(price_matrix, weight_vector):
-            price_vector = np.array(price_vector)
+                slope, c = np.linalg.lstsq(x, y, rcond=None)[0]
+
+            slope_dict[ticker] = slope
+
+        return slope_dict
+
+    def skewness(self, ticker: str = None) -> dict[str, float]:
+        skewness_dict = {}
+
+        if ticker is None:
+            tasks = list(self._historical_skewness)
+        elif isinstance(ticker, str):
+            tasks = [ticker]
+        elif isinstance(ticker, Iterable):
+            tasks = list(ticker)
+        else:
+            raise TypeError(f'Invalid ticker {ticker}, expect str, list[str] or None.')
+
+        for ticker in tasks:
+            price_vector = list(self._historical_price[ticker].values())
+
+            if len(price_vector) < 3:
+                continue
+
             price_pct_vector = np.diff(price_vector) / price_vector[:-1]
-            skewness = skew(price_pct_vector, bias=True, nan_policy='omit')
+            skewness: float = skew(price_pct_vector, bias=True, nan_policy='omit')
+            skewness_dict[ticker] = skewness
 
-            if np.isfinite(skewness):
-                weighted_skewness += skewness * weight
-
-        return weighted_skewness
+        return skewness_dict
 
     @property
     def value(self) -> dict[str, float]:
-        return {'value': self.skewness(), 'slope': self.slope()}
+        skewness = self.skewness()
+        skewness.update({'Index': self.composite(values=skewness), 'Slope': self.composite(values=self.slope())})
+        return skewness
 
     @property
     def is_ready(self) -> bool:
@@ -112,7 +120,7 @@ class SkewnessMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
 
 
 class SkewnessAdaptiveMonitor(SkewnessMonitor, AdaptiveVolumeIntervalMonitor):
-    def __init__(self, update_interval: float, sample_rate: float = 20., baseline_window: int = 5, weights: dict[str, float] = None, name: str = 'Monitor.Skewness.Price.Adaptive', monitor_id: str = None):
+    def __init__(self, update_interval: float, sample_rate: float = 20., baseline_window: int = 5, weights: dict[str, float] = None, name: str = 'Monitor.Skewness.PricePct.Adaptive', monitor_id: str = None):
         super().__init__(
             update_interval=update_interval,
             sample_interval=update_interval / sample_rate,
