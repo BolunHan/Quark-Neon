@@ -1,7 +1,9 @@
 # core function
 PyAlgoEngine
+PyQuantKit
 pandas
 numpy
+scipy
 
 # for back test
 py7zr  # historical data api
