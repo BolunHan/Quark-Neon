@@ -6,6 +6,7 @@ __package__ = 'Quark.Factor'
 import datetime
 import os
 import pathlib
+import shutil
 import uuid
 from collections import deque
 
@@ -309,7 +310,7 @@ class FactorValidation(object):
         self.cv.validate(x=x, y=y)
         self.cv.x_axis = x_axis
 
-    def _plot_synthetic(self, factors: pd.DataFrame, plot_wavelet: bool = True):
+    def _plot_cv(self, factors: pd.DataFrame, plot_wavelet: bool = True):
         import plotly.graph_objects as go
         fig = self.cv.plot()
 
@@ -368,7 +369,7 @@ class FactorValidation(object):
         os.makedirs(entry_dir, exist_ok=True)
 
         factors.to_csv(pathlib.Path(entry_dir, f'{self.factor.name}.validation.csv'))
-        fig = self._plot_synthetic(factors=factors)
+        fig = self._plot_cv(factors=factors)
         fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.validation.html'))
 
         self.metrics[market_date] = self.cv.metrics.metrics
@@ -419,7 +420,7 @@ class FactorValidation(object):
             current_bar.low_price = min(current_bar.low_price, synthetic_price)
 
         if timestamp >= last_update + self.sampling_interval:
-            timestamp_index = timestamp // self.sampling_interval * self.sampling_interval
+            timestamp_index = (timestamp // self.sampling_interval) * self.sampling_interval
 
             if current_bar is not None:
                 entry_log['Synthetic.open_price'] = current_bar.open_price
@@ -492,14 +493,14 @@ class FactorValidation(object):
             market_price = market_data.market_price
 
             if timestamp >= last_update + self.sampling_interval:
-                timestamp_index = timestamp // self.sampling_interval * self.sampling_interval
+                timestamp_index = (timestamp // self.sampling_interval) * self.sampling_interval
                 self.factor_value[timestamp_index] = entry_log = {}
 
             current_bar = self._collect_synthetic(timestamp=timestamp, current_bar=current_bar, last_update=last_update, entry_log=entry_log)
             self._collect_factor(timestamp=timestamp, last_update=last_update, entry_log=entry_log)
             self._collect_market_price(ticker=ticker, market_price=market_price, entry_log=entry_log)
 
-            last_update = timestamp // self.sampling_interval * self.sampling_interval
+            last_update = (timestamp // self.sampling_interval) * self.sampling_interval
 
 
 class FactorBatchValidation(FactorValidation):
@@ -654,8 +655,10 @@ class FactorBatchValidation(FactorValidation):
         super().eod(market_date=market_date, **kwargs)
 
     def _collect_factor(self, timestamp: float, last_update: float, entry_log: dict[str, float]):
+        # only un-cached monitors is registered
         super()._collect_factor(timestamp=timestamp, last_update=last_update, entry_log=entry_log)
 
+        # collect cached monitors
         if not self.override_cache:
             factors = collect_factor(monitors=self.factor_cache)
             entry_log.update(factors)
@@ -769,19 +772,20 @@ class FactorBatchValidation(FactorValidation):
         else:
             file_name = f'{"".join([f"[{factor.name}]" for factor in self.factor])}.validation'
 
-        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.factors.csv'))
+        if self.cv.x_val is not None:
+            fig = self._plot_cv(factors=factors)
+            fig.write_html(pathlib.Path(entry_dir, f'{file_name}.pred.html'))
 
-        fig = self._plot_synthetic(factors=factors)
-        fig.write_html(pathlib.Path(entry_dir, f'{file_name}.pred.html'))
+            self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
+            self.cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.metrics.html'))
+
+            self.metrics[market_date] = self.cv.metrics.metrics
+            pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
+
+        factors.to_csv(pathlib.Path(entry_dir, f'{file_name}.factors.csv'))
 
         fig = self._plot_factors(factors=factors)
         fig.write_html(pathlib.Path(entry_dir, f'{file_name}.factor.html'))
-
-        self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
-        self.cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.metrics.html'))
-
-        self.metrics[market_date] = self.cv.metrics.metrics
-        pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
 
     def reset(self):
         """
@@ -856,8 +860,13 @@ class InterTemporalValidation(FactorBatchValidation):
         self.factor_value_storage = deque(maxlen=self.training_days)
 
     def validation(self, market_date: datetime.date):
+
         if not self.factor_value_storage:
             self.factor_value_storage.append(self.factor_value.copy())
+            factor_metrics = pd.DataFrame(self.factor_value).T
+            _ = self._define_inputs(factors=factor_metrics)
+            _ = self._define_prediction(factors=factor_metrics)
+            self._dump_result(market_date=market_date, factors=factor_metrics)
             return
 
         LOGGER.info(f'{market_date} validation started with {len(self.factor_value_storage):,} days obs.')
@@ -906,6 +915,7 @@ class InterTemporalValidation(FactorBatchValidation):
         #     self.model.optimal_alpha(x=x_train, y=y_train)
 
         self.cv.validate_out_sample(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
+        self.cv.x_axis = x_axis
 
 
 class GradientBoostValidation(InterTemporalValidation):
@@ -914,22 +924,127 @@ class GradientBoostValidation(InterTemporalValidation):
         self.model = RandomForest()
         # self.model = XGBoost()
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
-        self.poly_degree = kwargs.get('poly_degree', 2)
+        self.poly_degree = kwargs.get('poly_degree', 1)
 
-    # def _define_prediction(self, factors: pd.DataFrame):
-    #     y = FactorValidation._define_prediction(self, factors=factors)
-    #     return y
+    def _define_prediction(self, factors: pd.DataFrame):
+        y = FactorValidation._define_prediction(self, factors=factors)
+        return y
+
+
+class FactorValidatorExperiment(InterTemporalValidation):
+    """
+    this validator is designed for experiments
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model = RidgeRegression(alpha=0.1)
+        # self.model = XGBoost()
+        self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
+        self.features: list[str] = [
+            'Skewness.Price.Adaptive.value',
+            'Skewness.Price.Adaptive.slope',
+            'Skewness.Price.value',
+            'Skewness.Price.slope',
+            'MACD.Index.Trigger.Synthetic',
+        ]
+
+        self.cache_dir = kwargs.get('cache_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'tmp_factor_cache'))
+
+        # experimenting with the factors requires clearing caches regularly
+        if os.path.isdir(self.cache_dir) and self.override_cache:
+            shutil.rmtree(self.cache_dir)  # remove dir and all contains
+            LOGGER.info(f'Factor cache {self.cache_dir} removed!')
+
+        validation_id = 1
+
+        while True:
+            dump_dir = f'{self.__class__.__name__}.{self.model.__class__.__name__}.{validation_id}'
+            if os.path.isdir(dump_dir):
+                validation_id += 1
+            else:
+                break
+
+        self.validation_id = kwargs.get('validation_id', f'{validation_id}-val')
+
+    def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
+        """
+        Initializes multiple factors for validation.
+
+        Args:
+            **kwargs: Additional parameters for factor configuration.
+
+        Returns:
+            list[MarketDataMonitor]: Initialized list of market data monitors.
+        """
+        self.factor = [
+            SkewnessMonitor(
+                update_interval=60 * 5,
+                sample_interval=3 * 5,
+                name='Monitor.Skewness.Price',
+                weights=self.index_weights
+            ),
+            SkewnessAdaptiveMonitor(
+                update_interval=60 * 5,
+                sample_rate=20,
+                name='Monitor.Skewness.Price.Adaptive',
+                weights=self.index_weights
+            ),
+            IndexMACDTriggerMonitor(
+                weights=self.index_weights,
+                update_interval=60,
+                observation_window=5,
+                confirmation_threshold=0.0001
+            )
+        ]
+
+        self.synthetic = SyntheticIndexMonitor(
+            index_name='Synthetic',
+            weights=self.index_weights
+
+        )
+
+        self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
+
+        for _ in self.factor:
+            MDS.add_monitor(_)
+
+        MDS.add_monitor(self.synthetic)
+
+        if not self.override_cache:
+            MDS.add_monitor(self.factor_cache)
+
+        return self.factor
+
+    def init_cache(self, market_date: datetime.date):
+        self.factor_pool.load(market_date=market_date, factor_dir=self.cache_dir)
+        factor_existed = self.factor_pool.factor_names(market_date=market_date)
+
+        for factor in self.factor:
+            factor_prefix = factor.name.removeprefix('Monitor.')
+
+            for _ in factor_existed:
+                if factor_prefix in _:
+                    factor.enabled = False
+                    LOGGER.info(f'Factor {factor.name} found in the factor cache, and will be disabled.')
+                    break
+
+    def update_cache(self, market_date: datetime):
+        self.factor_pool.batch_update(factors=self.factor_value)
+        self.factor_pool.dump(factor_dir=self.cache_dir)
 
 
 def main():
     """
     Main function to run factor validation or batch validation.
     """
-    # fv = FactorValidation()
-    # fv = FactorBatchValidation()
-    fv = InterTemporalValidation()
-    # fv = GradientBoostValidation()
-    fv.run()
+
+    # validator = FactorValidation()
+    # validator = FactorBatchValidation()
+    # validator = InterTemporalValidation()
+    # validator = GradientBoostValidation()
+    validator = FactorValidatorExperiment(override_cache=True)
+    validator.run()
     safe_exit()
 
 
