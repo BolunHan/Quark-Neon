@@ -17,7 +17,7 @@ Date: 2023-12-27
 """
 
 from AlgoEngine.Engine import MarketDataMonitor
-from PyQuantKit import MarketData, TradeData
+from PyQuantKit import MarketData, TradeData, TransactionData
 
 from .. import EMA, Synthetic, MDS
 
@@ -44,15 +44,15 @@ class TradeFlowMonitor(MarketDataMonitor):
         Args:
         - market_data (MarketData): Market data to update the monitor.
         """
-        if isinstance(market_data, TradeData):
+        if isinstance(market_data, (TradeData, TransactionData)):
             return self._on_trade(trade_data=market_data)
 
-    def _on_trade(self, trade_data: TradeData):
+    def _on_trade(self, trade_data: TradeData | TransactionData):
         """
         Handle trade data to update net trade volume flow.
 
         Args:
-        - trade_data (TradeData): Trade data to handle.
+        - trade_data: Trade data to handle.
         """
         ticker = trade_data.ticker
         volume = trade_data.volume
@@ -108,12 +108,12 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
         self._trade_flow = self._register_ema(name='trade_flow')
         self._trade_volume = self._register_ema(name='trade_volume')
 
-    def _on_trade(self, trade_data: TradeData):
+    def _on_trade(self, trade_data: TradeData | TransactionData):
         """
         Handle trade data to update net trade volume flow and accumulate EMAs.
 
         Args:
-        - trade_data (TradeData): Trade data to handle.
+        - trade_data: Trade data to handle.
         """
         ticker = trade_data.ticker
         volume = trade_data.volume

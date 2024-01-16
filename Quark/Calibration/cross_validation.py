@@ -536,8 +536,8 @@ class CrossValidation(object):
     @classmethod
     def _select_data(cls, x: np.ndarray, y: np.ndarray, indices: np.ndarray, fold: int, n_folds: int, shuffle: bool = False):
         n = len(x)
-        start_idx = n // n_folds * fold
-        end_idx = n // n_folds * (fold + 1) if fold < n_folds - 1 else n
+        start_idx = (n // n_folds) * fold
+        end_idx = (n // n_folds) * (fold + 1) if fold < n_folds - 1 else n
 
         val_indices = indices[start_idx:end_idx].copy()
         train_indices = np.setdiff1d(indices, val_indices).copy()
@@ -557,8 +557,8 @@ class CrossValidation(object):
             start_idx = n // (n_folds * 2)
             end_idx = n // n_folds
         else:
-            start_idx = n // n_folds * fold
-            end_idx = n // n_folds * (fold + 1) if fold < n_folds - 1 else n
+            start_idx = (n // n_folds) * fold
+            end_idx = (n // n_folds) * (fold + 1) if fold < n_folds - 1 else n
 
         train_indices = indices[0: start_idx].copy()
         val_indices = indices[start_idx:end_idx].copy()

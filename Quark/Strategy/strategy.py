@@ -117,7 +117,7 @@ class Strategy(object):
         if self.mode == 'sampling':
             if self._last_update_ts + self.profile.sampling_interval > timestamp:
                 return
-            self._last_update_ts = timestamp // self.profile.sampling_interval * self.profile.sampling_interval
+            self._last_update_ts = (timestamp // self.profile.sampling_interval) * self.profile.sampling_interval
 
         # market_price = market_data.market_price
         # ticker = market_data.ticker

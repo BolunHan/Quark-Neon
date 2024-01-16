@@ -20,15 +20,17 @@ LOGGER = LOGGER.getChild('FactorPool')
 
 class FactorPool(object):
     FACTOR_MAPPING = {
-        'index_value': 'Monitor.SyntheticIndex',
-        'TradeFlow.EMA.Sum': 'Monitor.TradeFlow.EMA',
-        'Coherence.Price.Ratio.EMA': 'Monitor.Coherence.Price.EMA',
-        'Coherence.Volume': 'Monitor.Coherence.Volume',
-        'TA.MACD.Index': 'Monitor.TA.MACD',
-        'Aggressiveness.Net': 'Monitor.Aggressiveness',
-        'Aggressiveness.EMA.Net': 'Monitor.Aggressiveness.EMA',
         'Entropy.Price': 'Monitor.Entropy.Price',
         'Entropy.Price.EMA': 'Monitor.Entropy.Price.EMA',
+        'Coherence.Volume': 'Monitor.Coherence.Volume',
+        'Coherence.Price.EMA.up': 'Monitor.Coherence.Price.EMA',
+        'Coherence.Price.EMA.down': 'Monitor.Coherence.Price.EMA',
+        'Coherence.Price.EMA.ratio': 'Monitor.Coherence.Price.EMA',
+        'TA.MACD.Index': 'Monitor.TA.MACD',
+        'MACD.Index.Trigger.Synthetic': 'Monitor.MACD.Trigger',
+        'TradeFlow.EMA.Index': 'Monitor.TradeFlow.EMA',
+        'Aggressiveness.Net': 'Monitor.Aggressiveness',
+        'Aggressiveness.EMA.Index': 'Monitor.Aggressiveness.EMA',
         'Volatility.Daily.Index': 'Monitor.Volatility.Daily'
     }
 
@@ -63,7 +65,7 @@ class FactorPool(object):
         storage = None
 
         for timestamp in factors:
-            timestamp = timestamp // self.log_interval * self.log_interval
+            timestamp = (timestamp // self.log_interval) * self.log_interval
 
             if market_date is None:
                 market_time = datetime.datetime.fromtimestamp(timestamp, tz=GlobalStatics.TIME_ZONE)
@@ -92,7 +94,7 @@ class FactorPool(object):
     @classmethod
     def locate_timestamp(cls, timestamp: float, key_range: Iterable[float] = None, step: float = None) -> float:
         if key_range is None:
-            return timestamp // step * step
+            return (timestamp // step) * step
 
         for _ in key_range:
             if _ < timestamp:
@@ -100,7 +102,7 @@ class FactorPool(object):
 
             return _
 
-        return timestamp // step * step
+        return (timestamp // step) * step
 
     @classmethod
     def locate_cache_index(cls, timestamp: float, key_range: list[float] = None, start_idx: int = 0) -> int:
@@ -279,7 +281,7 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
         if idx < len(key_range):
             key = key_range[idx]
         else:
-            key = self.timestamp // self.factor_pool.log_interval * self.factor_pool.log_interval
+            key = (self.timestamp // self.factor_pool.log_interval) * self.factor_pool.log_interval
 
         self.cache_index = idx
 

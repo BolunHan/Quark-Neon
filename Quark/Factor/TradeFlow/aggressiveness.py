@@ -17,7 +17,7 @@ Date: 2023-12-27
 """
 import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
-from PyQuantKit import MarketData, TradeData
+from PyQuantKit import MarketData, TradeData, TransactionData
 
 from .. import EMA, Synthetic, MDS, DEBUG_MODE
 
@@ -51,15 +51,15 @@ class AggressivenessMonitor(MarketDataMonitor):
         Args:
         - market_data (MarketData): Market data to update the monitor.
         """
-        if isinstance(market_data, TradeData):
+        if isinstance(market_data, (TradeData, TransactionData)):
             self._on_trade(trade_data=market_data)
 
-    def _on_trade(self, trade_data: TradeData):
+    def _on_trade(self, trade_data: TradeData | TransactionData):
         """
         Handle trade data to update aggressive buying/selling volumes.
 
         Args:
-        - trade_data (TradeData): Trade data to handle.
+        - trade_data : Trade data to handle.
         """
         ticker = trade_data.ticker
         price = trade_data.market_price
@@ -204,12 +204,12 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
             if not (0 <= adjusted_volume_ratio <= 1):
                 raise ValueError(f'{ticker} {self.__class__.__name__} encounter invalid value, total_volume={total_volume}, aggressiveness={aggressiveness_volume}, side={side}')
 
-    def _on_trade(self, trade_data: TradeData):
+    def _on_trade(self, trade_data: TradeData | TransactionData):
         """
         Handle trade data to update aggressive buying/selling volumes and accumulate EMAs.
 
         Args:
-        - trade_data (TradeData): Trade data to handle.
+        - trade_data: Trade data to handle.
         """
         ticker = trade_data.ticker
         self._accumulate_ema(ticker=ticker, trade_volume=trade_data.volume, replace_na=0.)  # to avoid redundant calculation, timestamp is not passed-in, so that the discount function will not be triggered

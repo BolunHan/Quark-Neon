@@ -93,7 +93,7 @@ class MACDMonitor(MarketDataMonitor, Synthetic):
 
         if last_update is None or last_update + self.update_interval < timestamp:
             macd.update_macd(close_price=self._price.get(ticker, market_price))
-            macd.timestamp = timestamp // self.update_interval * self.update_interval
+            macd.timestamp = (timestamp // self.update_interval) * self.update_interval
 
         self._price[ticker] = market_price
 
@@ -179,7 +179,7 @@ class MACDTriggerMonitor(MarketDataMonitor):
         if last_update is None or last_update + self.update_interval < timestamp:
             close_price = self._price.get(ticker, market_price)
             macd.update_macd(close_price=close_price)
-            macd.timestamp = timestamp // self.update_interval * self.update_interval
+            macd.timestamp = (timestamp // self.update_interval) * self.update_interval
             last_macd = macd_storage[-1] if macd_storage else 0.
             macd_adjusted = macd.macd_histogram / close_price
             macd_storage.append(macd_adjusted)

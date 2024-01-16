@@ -25,12 +25,12 @@ Date: 2023-12-26
 
 import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
-from PyQuantKit import MarketData, TradeData
+from PyQuantKit import MarketData, TradeData, TransactionData
 
-from .. import EMA, MDS, LOGGER
+from .. import EMA, MDS, FixTemporalIntervalMonitor
 
 
-class CoherenceMonitor(MarketDataMonitor):
+class CoherenceMonitor(MarketDataMonitor, FixTemporalIntervalMonitor):
     """
     Monitors and measures the coherence of price percentage change.
 
@@ -57,25 +57,12 @@ class CoherenceMonitor(MarketDataMonitor):
             monitor_id (str): Identifier for the monitor.
         """
         super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        FixTemporalIntervalMonitor.__init__(self=self, update_interval=update_interval, sample_interval=sample_interval)
 
         self.weights = weights
-        self.update_interval = update_interval
-        self.sample_interval = sample_interval
         self._historical_price: dict[str, dict[float, float]] = {}
         self._price_change_pct: dict[str, float] = {}
         self._is_ready = True
-
-        # Warning for update_interval
-        if update_interval <= 0:
-            LOGGER.warning(f'{self.name} should have a positive update_interval')
-
-        # Warning for sample_interval by Shannon's Theorem
-        if update_interval / 2 < sample_interval:
-            LOGGER.warning(f"{self.name} should have a smaller sample_interval by Shannon's Theorem, max value {update_interval / 2}")
-
-        # Error if sample_interval is not a fraction of update_interval
-        if not (update_interval / sample_interval).is_integer():
-            LOGGER.error(f"{self.name} should have a smaller sample_interval that is a fraction of the update_interval")
 
     def __call__(self, market_data: MarketData, **kwargs):
         """
@@ -88,36 +75,12 @@ class CoherenceMonitor(MarketDataMonitor):
         market_price = market_data.market_price
         timestamp = market_data.timestamp
 
-        self._log_price(ticker=ticker, market_price=market_price, timestamp=timestamp)
+        self.log_obs(ticker=ticker, value=market_price, timestamp=timestamp, storage=self._historical_price)
 
         # update price pct change
         baseline_price = list(self._historical_price[ticker].values())[0]  # the sampled_price must be ordered! Guaranteed by consistency of the order of trade data
         price_change_pct = market_price / baseline_price - 1
         self._price_change_pct[ticker] = price_change_pct
-
-    def _log_price(self, ticker: str, market_price: float, timestamp: float):
-        """
-        Logs sampled prices for historical price tracking.
-
-        Args:
-            ticker (str): Ticker symbol of the stock.
-            market_price (float): Current market price.
-            timestamp (float): Timestamp of the market data.
-        """
-        sampled_price = self._historical_price.get(ticker, {})
-
-        # update sampled price
-        baseline_timestamp = (timestamp // self.update_interval - 1) * self.update_interval
-        sample_timestamp = timestamp // self.sample_interval * self.sample_interval
-        sampled_price[sample_timestamp] = market_price
-
-        for ts in list(sampled_price):
-            if ts < baseline_timestamp:
-                sampled_price.pop(ts)
-            else:
-                break
-
-        self._historical_price[ticker] = sampled_price
 
     @classmethod
     def regression(cls, y: list[float] | np.ndarray, x: list[float] | np.ndarray = None):
@@ -193,6 +156,7 @@ class CoherenceMonitor(MarketDataMonitor):
         """Clears historical price and price change data."""
         self._historical_price.clear()
         self._price_change_pct.clear()
+        FixTemporalIntervalMonitor.clear(self)
 
     @property
     def value(self) -> dict[str, float]:
@@ -268,7 +232,7 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
 
         if self.last_update + self.update_interval < timestamp:
             _ = self.value
-            self.last_update = timestamp // self.update_interval * self.update_interval
+            self.last_update = (timestamp // self.update_interval) * self.update_interval
 
     def clear(self):
         """Clears historical price, price change, and EMA data."""
@@ -341,15 +305,15 @@ class TradeCoherenceMonitor(CoherenceMonitor):
         """
         super().__call__(market_data=market_data)
 
-        if isinstance(market_data, TradeData):
+        if isinstance(market_data, (TradeData, TransactionData)):
             self._on_trade(trade_data=market_data)
 
-    def _on_trade(self, trade_data: TradeData):
+    def _on_trade(self, trade_data: TradeData | TransactionData):
         """
         Updates volume and net volume based on trade data.
 
         Args:
-            trade_data (TradeData): Trade data object containing volume and side information.
+            trade_data: Trade data object containing volume and side information.
         """
         ticker = trade_data.ticker
         volume = trade_data.volume
@@ -361,7 +325,7 @@ class TradeCoherenceMonitor(CoherenceMonitor):
 
         # update sampled volume, net volume
         baseline_timestamp = (timestamp // self.update_interval - 1) * self.update_interval
-        sample_timestamp = timestamp // self.sample_interval * self.sample_interval
+        sample_timestamp = (timestamp // self.sample_interval) * self.sample_interval
         sampled_volume[sample_timestamp] = sampled_volume.get(sample_timestamp, 0.) + volume
         sampled_volume_net[sample_timestamp] = sampled_volume_net.get(sample_timestamp, 0.) + volume * side
 

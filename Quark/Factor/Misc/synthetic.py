@@ -21,7 +21,7 @@ Date: 2023-12-27
 import datetime
 
 from AlgoEngine.Engine import MarketDataMonitor
-from PyQuantKit import MarketData, TradeData, BarData
+from PyQuantKit import MarketData, TradeData, TransactionData, BarData
 
 from .. import Synthetic, MDS, TIME_ZONE
 
@@ -73,7 +73,7 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
             self._last_bar_data = self._active_bar_data
             bar_data = self._active_bar_data = BarData(
                 ticker=self.index_name,
-                bar_start_time=datetime.datetime.fromtimestamp(timestamp // self.interval * self.interval, tz=TIME_ZONE),
+                bar_start_time=datetime.datetime.fromtimestamp((timestamp // self.interval) * self.interval, tz=TIME_ZONE),
                 timestamp=(timestamp // self.interval + 1) * self.interval,  # by definition, timestamp when the bar ends
                 bar_span=datetime.timedelta(seconds=self.interval),
                 high_price=index_price,
@@ -87,7 +87,7 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
         else:
             bar_data = self._active_bar_data
 
-        if isinstance(market_data, TradeData):
+        if isinstance(market_data, (TradeData, TransactionData)):
             bar_data.volume += market_data.volume
             bar_data.notional += market_data.notional
             bar_data.trade_count += 1

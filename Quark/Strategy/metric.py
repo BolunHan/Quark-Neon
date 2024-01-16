@@ -145,7 +145,7 @@ class StrategyMetric(object):
 
         # update observation timestamp
         if self._last_update + self.sample_interval < timestamp:
-            timestamp = timestamp // self.sample_interval * self.sample_interval
+            timestamp = (timestamp // self.sample_interval) * self.sample_interval
             self.select_factors(factors=factors, timestamp=timestamp)
             self._last_update = timestamp
 
