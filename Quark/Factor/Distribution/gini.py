@@ -1,22 +1,19 @@
-from collections import deque
 from typing import Iterable
 
 import numpy as np
 from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData
-from scipy.stats import skew
 
 from .. import MDS, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, Synthetic
 
 
-class SkewnessMonitor(MarketDataMonitor, FixedIntervalSampler):
+class GiniMonitor(MarketDataMonitor, FixedIntervalSampler):
 
-    def __init__(self, sampling_interval: float, sample_size: int, name: str = 'Monitor.Skewness.PricePct', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, name: str = 'Monitor.Gini.PricePct', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
         FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size)
 
         self.register_sampler(name='price', mode='update')
-        self._historical_skewness: dict[str, deque[float]] = {}
 
         self._is_ready = True
 
@@ -29,53 +26,11 @@ class SkewnessMonitor(MarketDataMonitor, FixedIntervalSampler):
         self.log_obs(ticker=ticker, timestamp=timestamp, price=market_price)
 
     def clear(self) -> None:
-        self._historical_skewness.clear()
         FixedIntervalSampler.clear(self)
 
-    def on_entry_added(self, ticker: str, name: str, value):
-        super().on_entry_added(ticker=ticker, name=name, value=value)
-
-        if name != 'price':
-            return
-
-        skewness_dict = self.skewness(ticker=ticker, drop_last=True)  # calculate the skewness without the new entry
-
-        if ticker not in skewness_dict:
-            return
-
-        skewness = skewness_dict[ticker]
-
-        if not np.isfinite(skewness):
-            return
-
-        if ticker in self._historical_skewness:
-            historical_skewness = self._historical_skewness[ticker]
-        else:
-            historical_skewness = self._historical_skewness[ticker] = deque(maxlen=self.sample_size)
-
-        historical_skewness.append(skewness)
-
-    def slope(self) -> dict[str, float]:
-        slope_dict = {}
-        for ticker in self._historical_skewness:
-            skewness = list(self._historical_skewness[ticker])
-
-            if len(skewness) < 3:
-                slope = np.nan
-            else:
-                x = list(range(len(skewness)))
-                x = np.vstack([x, np.ones(len(x))]).T
-                y = np.array(skewness)
-
-                slope, c = np.linalg.lstsq(x, y, rcond=None)[0]
-
-            slope_dict[ticker] = slope
-
-        return slope_dict
-
-    def skewness(self, ticker: str = None, drop_last: bool = False) -> dict[str, float]:
+    def gini_impurity(self, ticker: str = None, drop_last: bool = False) -> dict[str, float]:
         historical_price = self.get_sampler(name='price')
-        skewness_dict = {}
+        gini_dict = {}
 
         if ticker is None:
             tasks = list(historical_price)
@@ -96,29 +51,33 @@ class SkewnessMonitor(MarketDataMonitor, FixedIntervalSampler):
                 continue
 
             price_pct_vector = np.diff(price_vector) / price_vector[:-1]
-            # noinspection PyTypeChecker
-            skewness: float = skew(price_pct_vector, bias=True, nan_policy='omit')
-            skewness_dict[ticker] = skewness
 
-        return skewness_dict
+            n = len(price_pct_vector)
+            n_up = sum([1 for _ in price_pct_vector if _ > 0])
+            n_down = sum([1 for _ in price_pct_vector if _ < 0])
+
+            gini = 1 - (n_up / n) ** 2 - (n_down / n) ** 2
+            gini_dict[ticker] = gini
+
+        return gini_dict
 
     @property
     def value(self) -> dict[str, float]:
-        skewness = self.skewness()
-        return skewness
+        gini = self.gini_impurity()
+        return gini
 
     @property
     def is_ready(self) -> bool:
-        for _ in self.get_sampler(name='price').values():
+        for _ in historical_price.values():
             if len(_) < 3:
                 return False
 
         return self._is_ready
 
 
-class SkewnessIndexMonitor(SkewnessMonitor, Synthetic):
+class GiniIndexMonitor(GiniMonitor, Synthetic):
 
-    def __init__(self, sampling_interval: float, sample_size: int, weights: dict[str, float] = None, name: str = 'Monitor.Skewness.PricePct.Index', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, weights: dict[str, float] = None, name: str = 'Monitor.Gini.PricePct.Index', monitor_id: str = None):
         super().__init__(
             sampling_interval=sampling_interval,
             sample_size=sample_size,
@@ -141,13 +100,13 @@ class SkewnessIndexMonitor(SkewnessMonitor, Synthetic):
         Synthetic.clear(self)
 
     @property
-    def value(self) -> dict[str, float]:
-        skewness = self.skewness()
-        return {'Index': self.composite(values=skewness), 'Slope': self.composite(values=self.slope())}
+    def value(self) -> float:
+        gini_impurity = self.gini_impurity()
+        return np.log2(self.composite(values=gini_impurity))
 
 
-class SkewnessAdaptiveMonitor(SkewnessMonitor, AdaptiveVolumeIntervalSampler):
-    def __init__(self, sampling_interval: float, sample_size: int, baseline_window: int, aligned_interval: bool = False, name: str = 'Monitor.Skewness.PricePct.Adaptive', monitor_id: str = None):
+class GiniAdaptiveMonitor(GiniMonitor, AdaptiveVolumeIntervalSampler):
+    def __init__(self, sampling_interval: float, sample_size: int, baseline_window: int, aligned_interval: bool = False, name: str = 'Monitor.Gini.PricePct.Adaptive', monitor_id: str = None):
         super().__init__(
             sampling_interval=sampling_interval,
             sample_size=sample_size,
@@ -155,13 +114,7 @@ class SkewnessAdaptiveMonitor(SkewnessMonitor, AdaptiveVolumeIntervalSampler):
             monitor_id=monitor_id
         )
 
-        AdaptiveVolumeIntervalSampler.__init__(
-            self=self,
-            sampling_interval=sampling_interval,
-            sample_size=sample_size,
-            baseline_window=baseline_window,
-            aligned_interval=aligned_interval
-        )
+        AdaptiveVolumeIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size, baseline_window=baseline_window, aligned_interval=aligned_interval)
 
     def __call__(self, market_data: MarketData, **kwargs):
         self.accumulate_volume(market_data=market_data)
@@ -180,9 +133,9 @@ class SkewnessAdaptiveMonitor(SkewnessMonitor, AdaptiveVolumeIntervalSampler):
         return self._is_ready
 
 
-class SkewnessIndexAdaptiveMonitor(SkewnessAdaptiveMonitor, Synthetic):
+class GiniIndexAdaptiveMonitor(GiniAdaptiveMonitor, Synthetic):
 
-    def __init__(self, sampling_interval: float, sample_size: int, baseline_window: int, aligned_interval: bool = False, weights: dict[str, float] = None, name: str = 'Monitor.Skewness.PricePct.Index.Adaptive', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, baseline_window: int, aligned_interval: bool = False, weights: dict[str, float] = None, name: str = 'Monitor.Gini.PricePct.Index.Adaptive', monitor_id: str = None):
         super().__init__(
             sampling_interval=sampling_interval,
             sample_size=sample_size,
@@ -207,6 +160,6 @@ class SkewnessIndexAdaptiveMonitor(SkewnessAdaptiveMonitor, Synthetic):
         Synthetic.clear(self)
 
     @property
-    def value(self) -> dict[str, float]:
-        skewness = self.skewness()
-        return {'Index': self.composite(values=skewness), 'Slope': self.composite(values=self.slope())}
+    def value(self) -> float:
+        gini = self.gini_impurity()
+        return self.composite(values=gini)

@@ -54,7 +54,8 @@ class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
         self.pct_change = pct_change
         self.ignore_primary = ignore_primary
 
-        self._historical_price = {}
+        self.register_sampler(name='price', mode='update')
+
         self._is_ready = True
 
     def __call__(self, market_data: MarketData, **kwargs):
@@ -72,10 +73,9 @@ class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
         market_price = market_data.market_price
 
         timestamp = market_data.timestamp
-        self.log_obs(ticker=ticker, value=market_price, timestamp=timestamp, storage=self._historical_price)
+        self.log_obs(ticker=ticker, timestamp=timestamp, price=market_price)
 
     def clear(self) -> None:
-        self._historical_price.clear()
         FixedIntervalSampler.clear(self)
 
     @classmethod
@@ -143,27 +143,28 @@ class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
         Returns:
             float: Entropy value.
         """
+        historical_price = self.get_sampler(name='price')
         price_matrix = []
         weight_vector = []
 
         if self.weights:
-            vector_length = min([len(self._historical_price.get(ticker, {})) for ticker in self.weights])
+            vector_length = min([len(historical_price.get(ticker, {})) for ticker in self.weights])
 
             if vector_length < 3:
                 return np.nan
 
             for ticker in self.weights:
-                if ticker in self._historical_price:
-                    price_matrix.append(list(self._historical_price[ticker].values())[-vector_length:])
+                if ticker in historical_price:
+                    price_matrix.append(list(historical_price[ticker].values())[-vector_length:])
                     weight_vector.append(self.weights[ticker])
         else:
-            vector_length = min([len(_) for _ in self._historical_price.values()])
+            vector_length = min([len(_) for _ in historical_price.values()])
 
             if vector_length < 3:
                 return np.nan
 
-            price_matrix.extend([list(self._historical_price[ticker].values())[-vector_length:] for ticker in self._historical_price])
-            weight_vector.extend([1] * len(self._historical_price))
+            price_matrix.extend([list(historical_price[ticker].values())[-vector_length:] for ticker in historical_price])
+            weight_vector.extend([1] * len(historical_price))
 
         if len(price_matrix) < 3:
             return np.nan
@@ -193,7 +194,7 @@ class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
         Returns:
             bool: True if the monitor is ready, False otherwise.
         """
-        for _ in self._historical_price.values():
+        for _ in self.get_sampler(name='price').values():
             if len(_) < 3:
                 return False
 
@@ -202,7 +203,7 @@ class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
 
 class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
 
-    def __init__(self, sampling_interval: float, sample_size: int = 20, baseline_window: int = 5, weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.Adaptive', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int = 20, baseline_window: int = 100, weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.Adaptive', monitor_id: str = None):
         super().__init__(
             sampling_interval=sampling_interval,
             sample_size=sample_size,
@@ -226,7 +227,7 @@ class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
     @property
     def is_ready(self) -> bool:
         for ticker in self._volume_baseline['obs_vol_acc']:
-            if ticker not in self._volume_baseline['baseline']:
+            if ticker not in self._volume_baseline['sampling_interval']:
                 return False
 
         return self._is_ready
@@ -239,7 +240,7 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
     Inherits from EntropyMonitor and EMA classes.
     """
 
-    def __init__(self, sampling_interval: float, sample_size: int,discount_interval: float, alpha: float,  weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.EMA', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, discount_interval: float, alpha: float, weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.EMA', monitor_id: str = None):
         """
         Initializes the EntropyEMAMonitor.
 
@@ -256,7 +257,7 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, weights=weights, pct_change=pct_change, ignore_primary=ignore_primary, name=name, monitor_id=monitor_id)
         EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
 
-        self.entropy_ema = self._register_ema(name='entropy')
+        self.entropy_ema = self.register_ema(name='entropy')
         self.last_update = 0.
 
     def __call__(self, market_data: MarketData, **kwargs):
@@ -269,8 +270,8 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         ticker = market_data.ticker
         timestamp = market_data.timestamp
 
-        self._discount_ema(ticker='entropy', timestamp=timestamp)
-        self._discount_all(timestamp=timestamp)
+        self.discount_ema(ticker='entropy', timestamp=timestamp)
+        self.discount_all(timestamp=timestamp)
 
         super().__call__(market_data=market_data, **kwargs)
 
@@ -285,7 +286,7 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         super().clear()
         EMA.clear(self)
 
-        self.entropy_ema = self._register_ema(name='entropy')
+        self.entropy_ema = self.register_ema(name='entropy')
         self.last_update = 0.
 
     @property
@@ -297,5 +298,5 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
             float: EMA of entropy.
         """
         entropy = super().value
-        self._update_ema(ticker='entropy', entropy=entropy)
+        self.update_ema(ticker='entropy', entropy=entropy)
         return self.entropy_ema.get('entropy', np.nan)
