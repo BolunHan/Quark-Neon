@@ -90,7 +90,7 @@ class FactorValidation(object):
         self.features = ['MACD.Index.Trigger.Synthetic']
 
         self.factor: MarketDataMonitor | None = None
-        self.synthetic: SyntheticIndexMonitor | None = None
+        self.synthetic = SyntheticIndexMonitor(index_name='Synthetic', weights=self.index_weights)
         self.subscription = set()
         self.replay: ProgressiveReplay | None = None
         self.factor_value: dict[float, dict[str, float]] = {}
@@ -117,12 +117,6 @@ class FactorValidation(object):
             confirmation_threshold=kwargs.get('confirmation_threshold', 0.)
         )
 
-        self.synthetic = SyntheticIndexMonitor(
-            index_name='Synthetic',
-            weights=self.index_weights
-
-        )
-
         MDS.add_monitor(self.factor)
         MDS.add_monitor(self.synthetic)
 
@@ -145,7 +139,7 @@ class FactorValidation(object):
 
         # A lite setting for fast debugging
         if DUMMY_WEIGHT:
-            for _ in list(index_weight.keys())[5:]:
+            for _ in list(index_weight.keys())[10:]:
                 index_weight.pop(_)
 
         # Step 0: Update index weights
@@ -206,6 +200,9 @@ class FactorValidation(object):
         Resets the factor and factor_value data.
         """
         self.factor.clear()
+        MDS.clear()
+        self.init_factor()
+
         self.factor_value.clear()
         self.decoder.clear()
         self.cv.clear()
@@ -541,7 +538,7 @@ class FactorBatchValidation(FactorValidation):
         self.factor: list[MarketDataMonitor] = []
 
         self.factor_pool = factor_pool.FACTOR_POOL
-        self.factor_cache: MarketDataMonitor | None = None
+        self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
     def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
         """
@@ -590,14 +587,6 @@ class FactorBatchValidation(FactorValidation):
                 weights=self.index_weights
             )
         ]
-
-        self.synthetic = SyntheticIndexMonitor(
-            index_name='Synthetic',
-            weights=self.index_weights
-
-        )
-
-        self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
         for _ in self.factor:
             MDS.add_monitor(_)
@@ -793,9 +782,10 @@ class FactorBatchValidation(FactorValidation):
         """
         Resets multiple factors.
         """
-        for _ in self.factor:
-            _.clear()
-            _.enabled = True
+
+        MDS.clear()
+        self.factor.clear()
+        self.init_factor()
 
         self.synthetic.clear()
         self.factor_value.clear()
@@ -944,10 +934,14 @@ class FactorValidatorExperiment(InterTemporalValidation):
         # self.model = XGBoost()
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
         self.features: list[str] = [
-            'Skewness.PricePct.Adaptive.Index',
-            'Skewness.PricePct.Adaptive.Slope',
-            'Skewness.PricePct.Index',
-            'Skewness.PricePct.Slope',
+            'Skewness.PricePct.Index.Adaptive.Index',
+            'Skewness.PricePct.Index.Adaptive.Slope',
+            'Gini.PricePct.Index.Adaptive',
+            'Coherence.Price.Adaptive.up',
+            'Coherence.Price.Adaptive.down',
+            'Coherence.Price.Adaptive.ratio',
+            'Coherence.Volume.up',
+            'Coherence.Volume.down',
             'MACD.Index.Trigger.Synthetic',
         ]
 
@@ -984,13 +978,26 @@ class FactorValidatorExperiment(InterTemporalValidation):
                 sampling_interval=3 * 5,
                 sample_size=20,
                 baseline_window=100,
-                name='Monitor.Skewness.PricePct.Adaptive',
-                weights=self.index_weights
+                weights=self.index_weights,
+                aligned_interval=False
             ),
-            SkewnessIndexMonitor(
+            GiniIndexAdaptiveMonitor(
                 sampling_interval=3 * 5,
                 sample_size=20,
-                name='Monitor.Skewness.PricePct',
+                baseline_window=100,
+                weights=self.index_weights
+            ),
+            CoherenceAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights,
+                center_mode='median',
+                aligned_interval=True
+            ),
+            TradeCoherenceMonitor(
+                sampling_interval=15,
+                sample_size=20,
                 weights=self.index_weights
             ),
             IndexMACDTriggerMonitor(
@@ -1000,12 +1007,6 @@ class FactorValidatorExperiment(InterTemporalValidation):
                 confirmation_threshold=0.0001
             )
         ]
-
-        self.synthetic = SyntheticIndexMonitor(
-            index_name='Synthetic',
-            weights=self.index_weights
-
-        )
 
         self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
