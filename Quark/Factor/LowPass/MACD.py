@@ -244,7 +244,7 @@ class IndexMACDTriggerMonitor(MACDTriggerMonitor, Synthetic):
 
     def __call__(self, market_data: MarketData, **kwargs):
         super().__call__(market_data=market_data, **kwargs)
-        self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
+        self.update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
         self._update_macd(ticker='Synthetic', market_price=self.synthetic_index, timestamp=market_data.timestamp)
 
     def clear(self):

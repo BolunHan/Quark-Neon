@@ -177,9 +177,9 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
 
         self.normalized = normalized
 
-        self._aggressive_buy: dict[str, float] = self._register_ema(name='aggressive_buy')  # EMA of aggressive buying volume
-        self._aggressive_sell: dict[str, float] = self._register_ema(name='aggressive_sell')  # EMA of aggressive selling volume
-        self._trade_volume: dict[str, float] = self._register_ema(name='trade_volume')  # EMA of total trade volume
+        self._aggressive_buy: dict[str, float] = self.register_ema(name='aggressive_buy')  # EMA of aggressive buying volume
+        self._aggressive_sell: dict[str, float] = self.register_ema(name='aggressive_sell')  # EMA of aggressive selling volume
+        self._trade_volume: dict[str, float] = self.register_ema(name='trade_volume')  # EMA of total trade volume
 
     def _update_aggressiveness(self, ticker: str, volume: float, side: int, timestamp: float):
         """
@@ -192,9 +192,9 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         - timestamp (float): Trade timestamp.
         """
         if side > 0:
-            self._accumulate_ema(ticker=ticker, timestamp=timestamp, replace_na=0., aggressive_buy=volume, aggressive_sell=0.)
+            self.accumulate_ema(ticker=ticker, timestamp=timestamp, replace_na=0., aggressive_buy=volume, aggressive_sell=0.)
         else:
-            self._accumulate_ema(ticker=ticker, timestamp=timestamp, replace_na=0., aggressive_buy=0., aggressive_sell=volume)
+            self.accumulate_ema(ticker=ticker, timestamp=timestamp, replace_na=0., aggressive_buy=0., aggressive_sell=volume)
 
         if DEBUG_MODE:
             total_volume = self._trade_volume[ticker]
@@ -212,7 +212,7 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         - trade_data: Trade data to handle.
         """
         ticker = trade_data.ticker
-        self._accumulate_ema(ticker=ticker, trade_volume=trade_data.volume, replace_na=0.)  # to avoid redundant calculation, timestamp is not passed-in, so that the discount function will not be triggered
+        self.accumulate_ema(ticker=ticker, replace_na=0., trade_volume=trade_data.volume)  # to avoid redundant calculation, timestamp is not passed-in, so that the discount function will not be triggered
         super()._on_trade(trade_data=trade_data)
 
     def __call__(self, market_data: MarketData, **kwargs):
@@ -225,8 +225,8 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         ticker = market_data.ticker
         timestamp = market_data.timestamp
 
-        self._discount_ema(ticker=ticker, timestamp=timestamp)
-        self._discount_all(timestamp=timestamp)
+        self.discount_ema(ticker=ticker, timestamp=timestamp)
+        self.discount_all(timestamp=timestamp)
 
         return super().__call__(market_data=market_data, **kwargs)
 
@@ -236,9 +236,9 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         EMA.clear(self)
         Synthetic.clear(self)
 
-        self._aggressive_buy: dict[str, float] = self._register_ema(name='aggressive_buy')  # EMA of aggressive buying volume
-        self._aggressive_sell: dict[str, float] = self._register_ema(name='aggressive_sell')  # EMA of aggressive selling volume
-        self._trade_volume: dict[str, float] = self._register_ema(name='trade_volume')  # EMA of total trade volume
+        self._aggressive_buy: dict[str, float] = self.register_ema(name='aggressive_buy')  # EMA of aggressive buying volume
+        self._aggressive_sell: dict[str, float] = self.register_ema(name='aggressive_sell')  # EMA of aggressive selling volume
+        self._trade_volume: dict[str, float] = self.register_ema(name='trade_volume')  # EMA of total trade volume
 
     def aggressiveness_adjusted(self):
         """

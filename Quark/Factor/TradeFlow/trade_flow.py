@@ -105,8 +105,8 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
 
         self.normalized = normalized
 
-        self._trade_flow = self._register_ema(name='trade_flow')
-        self._trade_volume = self._register_ema(name='trade_volume')
+        self._trade_flow = self.register_ema(name='trade_flow')
+        self._trade_volume = self.register_ema(name='trade_volume')
 
     def _on_trade(self, trade_data: TradeData | TransactionData):
         """
@@ -120,7 +120,7 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
         side = trade_data.side.sign
         timestamp = trade_data.timestamp
 
-        self._accumulate_ema(ticker=ticker, timestamp=timestamp, trade_flow=volume * side, trade_volume=volume)
+        self.accumulate_ema(ticker=ticker, timestamp=timestamp, trade_flow=volume * side, trade_volume=volume)
 
     def __call__(self, market_data: MarketData, **kwargs):
         """
@@ -132,8 +132,8 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
         ticker = market_data.ticker
         timestamp = market_data.timestamp
 
-        self._discount_ema(ticker=ticker, timestamp=timestamp)
-        self._discount_all(timestamp=timestamp)
+        self.discount_ema(ticker=ticker, timestamp=timestamp)
+        self.discount_all(timestamp=timestamp)
 
         super().__call__(market_data=market_data, **kwargs)
 
@@ -143,8 +143,8 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
         EMA.clear(self)
         Synthetic.clear(self)
 
-        self._trade_flow = self._register_ema(name='trade_flow')
-        self._trade_volume = self._register_ema(name='trade_volume')
+        self._trade_flow = self.register_ema(name='trade_flow')
+        self._trade_volume = self.register_ema(name='trade_volume')
 
     def trade_flow_adjusted(self):
         """

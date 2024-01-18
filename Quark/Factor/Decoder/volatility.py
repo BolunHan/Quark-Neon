@@ -50,7 +50,7 @@ class VolatilityMonitor(MarketDataMonitor, Synthetic):
         Args:
         - market_data (MarketData): Market data to update the monitor.
         """
-        self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
+        self.update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
 
     def clear(self):
         """

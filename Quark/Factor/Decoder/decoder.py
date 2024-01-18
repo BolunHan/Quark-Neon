@@ -114,7 +114,7 @@ class IndexDecoderMonitor(DecoderMonitor, Synthetic):
         Args:
             market_data (MarketData): Market data object containing price information.
         """
-        self._update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
+        self.update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
         self.update_decoder(ticker='synthetic', market_price=self.synthetic_index, timestamp=market_data.timestamp)
 
     def clear(self):

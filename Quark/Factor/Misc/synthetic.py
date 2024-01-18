@@ -62,7 +62,7 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
         timestamp = market_data.timestamp
         market_price = market_data.market_price
 
-        self._update_synthetic(ticker=ticker, market_price=market_price)
+        self.update_synthetic(ticker=ticker, market_price=market_price)
 
         if ticker not in self.weights:
             return
