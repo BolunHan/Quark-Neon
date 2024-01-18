@@ -22,6 +22,19 @@ class IndexWeight(dict):
         for _ in self:
             self[_] /= total_weight
 
+    def composite(self, values: dict[str, float], replace_na: float = 0.):
+        weighted_sum = 0.
+
+        for ticker, weight in self.items():
+            value = values.get(ticker, replace_na)
+
+            if np.isnan(value):
+                weighted_sum += replace_na * self[ticker]
+            else:
+                weighted_sum += value * self[ticker]
+
+        return weighted_sum
+
     @property
     def components(self) -> list[str]:
         return list(self.keys())
@@ -40,19 +53,19 @@ class EMA(object, metaclass=abc.ABCMeta):
             LOGGER.warning(f'{self.__class__.__name__} should have a positive discount_interval')
 
         self._last_discount_ts: dict[str, float] = {}
-        self._history: dict[str, dict[str, float]] = {}
-        self._current: dict[str, dict[str, float]] = {}
-        self._window: dict[str, dict[str, deque[float]]] = {}
-        self.ema: dict[str, dict[str, float]] = {}
+        self._history: dict[str, dict[str, float]] = getattr(self, '_history', {})
+        self._current: dict[str, dict[str, float]] = getattr(self, '_current', {})
+        self._window: dict[str, dict[str, deque[float]]] = getattr(self, '_window', {})
+        self.ema: dict[str, dict[str, float]] = getattr(self, 'ema', {})
 
-    def _register_ema(self, name):
+    def register_ema(self, name):
         self._history[name] = {}
         self._current[name] = {}
         self._window[name] = {}
         _ = self.ema[name] = {}
         return _
 
-    def _update_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **update_data: float):
+    def update_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **update_data: float):
         if timestamp:
             last_discount = self._last_discount_ts.get(ticker, 0.)
 
@@ -78,7 +91,7 @@ class EMA(object, metaclass=abc.ABCMeta):
                     else:
                         self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
-    def _accumulate_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **accumulative_data: float):
+    def accumulate_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **accumulative_data: float):
         if timestamp:
             last_discount = self._last_discount_ts.get(ticker, 0.)
 
@@ -119,7 +132,7 @@ class EMA(object, metaclass=abc.ABCMeta):
                     else:
                         self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
 
-    def _discount_ema(self, ticker: str, timestamp: float):
+    def discount_ema(self, ticker: str, timestamp: float):
         last_update = self._last_discount_ts.get(ticker, timestamp)
 
         # a discount event is triggered
@@ -175,9 +188,9 @@ class EMA(object, metaclass=abc.ABCMeta):
 
         return discontinued
 
-    def _discount_all(self, timestamp: float):
+    def discount_all(self, timestamp: float):
         for _ in self._check_discontinuity(timestamp=timestamp, tolerance=1):
-            self._discount_ema(ticker=_, timestamp=timestamp)
+            self.discount_ema(ticker=_, timestamp=timestamp)
 
     def clear(self):
         self._last_discount_ts.clear()
@@ -197,19 +210,9 @@ class Synthetic(object, metaclass=abc.ABCMeta):
         self.synthetic_base_price = 1.
 
     def composite(self, values: dict[str, float], replace_na: float = 0.):
-        weighted_sum = 0.
+        return self.weights.composite(values=values, replace_na=replace_na)
 
-        for ticker, weight in self.weights.items():
-            value = values.get(ticker, replace_na)
-
-            if np.isnan(value):
-                weighted_sum += replace_na * self.weights[ticker]
-            else:
-                weighted_sum += value * self.weights[ticker]
-
-        return weighted_sum
-
-    def _update_synthetic(self, ticker: str, market_price: float):
+    def update_synthetic(self, ticker: str, market_price: float):
         if ticker not in self.weights:
             return
 
@@ -291,6 +294,8 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         self.sampling_interval = sampling_interval
         self.sample_size = sample_size
 
+        self.sample_storage = getattr(self, 'sample_storage', {})
+
         # Warning for sampling_interval
         if sampling_interval <= 0:
             LOGGER.warning(f'{self.__class__.__name__} should have a positive sampling_interval')
@@ -299,46 +304,69 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         if sample_size <= 2:
             LOGGER.warning(f"{self.__class__.__name__} should have a larger sample_size, by Shannon's Theorem, sample_size should be at least 2")
 
-    def log_obs(self, ticker: str, value: float, timestamp: float, storage: dict[str, dict[float, float]], mode='update'):
-        """
-        Logs an observation for the given ticker at the specified timestamp.
+    def register_sampler(self, name: str, mode: str = 'update'):
+        if name in self.sample_storage:
+            raise ValueError(f'name {name} already registered in {self.__class__.__name__}!')
 
-        Parameters:
-        - ticker (str): Ticker symbol for the observation.
-        - value (float): Value of the observation.
-        - timestamp (float): Timestamp of the observation.
-        - storage (Dict[str, Dict[float, float]]): Storage dictionary for sampled observations.
-        - mode (str): choose to update / override the value of active entry or accumulate it.
-        """
-        if ticker in storage:
-            sampled_obs = storage[ticker]
-        else:
-            sampled_obs = storage[ticker] = {}
+        if mode not in ['update', 'accumulate']:
+            raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
+
+        self.sample_storage[name] = dict(
+            storage={},
+            mode=mode
+        )
+
+    def get_sampler(self, name: str) -> dict[str, dict]:
+        if name not in self.sample_storage:
+            raise ValueError(f'name {name} not found in {self.__class__.__name__}!')
+
+        return self.sample_storage[name]['storage']
+
+    def log_obs(self, ticker: str, timestamp: float, observation: dict[str, ...] = None, **kwargs):
+        observation_copy = {}
+
+        if observation is not None:
+            observation_copy.update(observation)
+
+        observation_copy.update(kwargs)
 
         idx = timestamp // self.sampling_interval
         idx_min = idx - self.sample_size
 
-        if idx not in sampled_obs:
-            sampled_obs[idx] = value
-            self.on_entry_added(ticker=ticker, key=idx, value=value)
-        else:
-            if mode == 'update':
-                sampled_obs[idx] = value
-            elif mode == 'accumulate':
-                sampled_obs[idx] += value
+        for obs_name, obs_value in observation_copy.items():
+            if obs_name not in self.sample_storage:
+                raise ValueError(f'Invalid observation name {obs_name}')
+
+            sampler = self.sample_storage[obs_name]
+            storage = sampler['storage']
+            mode = sampler['mode']
+
+            if ticker in storage:
+                obs_storage = storage[ticker]
             else:
-                raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
+                obs_storage = storage[ticker] = {}
 
-            self.on_entry_updated(ticker=ticker, key=idx, value=value)
-
-        for idx in list(sampled_obs):
-            if idx < idx_min:
-                sampled_obs.pop(idx)
-                self.on_entry_removed(ticker=ticker, key=idx, value=value)
+            if idx not in obs_storage:
+                obs_storage[idx] = obs_value
+                self.on_entry_added(ticker=ticker, name=obs_name, value=obs_value)
             else:
-                break
+                if mode == 'update':
+                    obs_storage[idx] = obs_value
+                elif mode == 'accumulate':
+                    obs_storage[idx] += obs_value
+                else:
+                    raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
 
-    def on_entry_added(self, ticker: str, key, value):
+                self.on_entry_updated(ticker=ticker, name=obs_name, value=obs_storage[idx])
+
+            for idx_pop in list(obs_storage):
+                if idx_pop < idx_min:
+                    _ = obs_storage.pop(idx_pop)
+                    self.on_entry_removed(ticker=ticker, name=obs_name, value=_)
+                else:
+                    break
+
+    def on_entry_added(self, ticker: str, name: str, value):
         """
         Callback method triggered when a new entry is added.
 
@@ -349,7 +377,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         pass
 
-    def on_entry_updated(self, ticker: str, key, value):
+    def on_entry_updated(self, ticker: str, name: str, value):
         """
         Callback method triggered when an existing entry is updated.
 
@@ -360,7 +388,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         pass
 
-    def on_entry_removed(self, ticker: str, key, value):
+    def on_entry_removed(self, ticker: str, name: str, value):
         """
         Callback method triggered when an entry is removed.
 
@@ -375,7 +403,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         Clears all stored data.
         """
-        pass
+        self.sample_storage.clear()
 
 
 class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
@@ -456,7 +484,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
             else:
                 raise ValueError('Must assign market_data, or ticker and volume')
 
-    def log_obs(self, ticker: str, value: float, storage: dict[str, dict[float, float]], volume_accumulated: float = None, mode: str = 'update'):
+    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, **kwargs):
         """
         Logs an observation for the given ticker at the specified volume-accumulated timestamp.
 
@@ -470,12 +498,13 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         if volume_accumulated is None:
             volume_accumulated = self._accumulated_volume.get(ticker, 0.)
 
-        super().log_obs(ticker=ticker, value=value, timestamp=volume_accumulated, storage=storage)
+        super().log_obs(ticker=ticker, timestamp=volume_accumulated, observation=observation, **kwargs)
 
     def clear(self):
         """
         Clears all stored data, including accumulated volumes.
         """
+        super().clear()
         self._accumulated_volume.clear()
 
 
@@ -513,7 +542,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
     """
 
-    def __init__(self, sampling_interval: float = 60., sample_size: int = 20, baseline_window: int = 100):
+    def __init__(self, sampling_interval: float = 60., sample_size: int = 20, baseline_window: int = 100, aligned_interval: bool = True):
         """
         Initialize the AdaptiveVolumeIntervalSampler.
 
@@ -521,17 +550,20 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         - sampling_interval (float): Temporal interval between consecutive samples for generating the baseline. Default is 60.
         - sample_size (int): Number of samples to be stored. Default is 20.
         - baseline_window (int): Number of observations used for baseline calculation. Default is 100.
+        - aligned (bool): Whether the sampling of each ticker is aligned (same temporal interval)
         """
         super().__init__(sampling_interval=sampling_interval, sample_size=sample_size)
         self.baseline_window = baseline_window
+        self.aligned_interval = aligned_interval
 
         self._volume_baseline = {
             'baseline': {},  # type: dict[str, float]
-            'obs_vol_acc_start': {},  # type: dict[str, float],
-            'obs_vol_acc': {},  # type: dict[str, dict[float,float]],
+            'sampling_interval': {},  # type: dict[str, float]
+            'obs_vol_acc_start': {},  # type: dict[str, float]
+            'obs_vol_acc': {},  # type: dict[str, dict[float,float]]
         }
 
-    def _update_volume_baseline(self, ticker: str, timestamp: float, volume_accumulated: float = None, min_obs: int = 5) -> float | None:
+    def _update_volume_baseline(self, ticker: str, timestamp: float, volume_accumulated: float = None, min_obs: int = None) -> float | None:
         """
         Updates and calculates the baseline volume for a given ticker.
 
@@ -544,7 +576,9 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         - float | None: Calculated baseline volume or None if the baseline is not ready.
 
         """
+        min_obs = self.sample_size if min_obs is None else min_obs
         volume_baseline = self._volume_baseline['baseline']
+        volume_sampling_interval = self._volume_baseline['sampling_interval']
 
         if ticker in volume_baseline:
             return volume_baseline[ticker]
@@ -572,8 +606,8 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         elif len(obs_vol_acc) == self.baseline_window:
             baseline_ready = True
         else:
-            LOGGER.error(f'{self.__class__.__name__} baseline validity check failed! {ticker} data missed, expect {self.baseline_window} observation, got {len(obs_vol_acc)}.')
-            baseline_ready = False
+            LOGGER.debug(f'{self.__class__.__name__} baseline validity check failed! {ticker} data missed, expect {self.baseline_window} observation, got {len(obs_vol_acc)}.')
+            baseline_ready = True
 
         obs_vol = {}
         vol_acc_last = 0.
@@ -601,9 +635,12 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         if baseline_ready:
             volume_baseline[ticker] = baseline_est
 
+        if baseline_est is not None:
+            volume_sampling_interval[ticker] = baseline_est
+
         return baseline_est
 
-    def log_obs(self, ticker: str, value: float, storage: dict[str, dict[tuple[float, float], float]], volume_accumulated: float = None, mode: str = 'update', timestamp: float = None, allow_oversampling: bool = False):
+    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, allow_oversampling: bool = False, **kwargs):
         """
         Logs an observation for the given ticker at the specified volume-accumulated timestamp.
 
@@ -619,26 +656,52 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         - ValueError: If timestamp is not provided.
 
         """
+        # step 0: copy the observation
+        observation_copy = {}
+
+        if observation is not None:
+            observation_copy.update(observation)
+
+        observation_copy.update(kwargs)
+
         if volume_accumulated is None:
             volume_accumulated = self._accumulated_volume.get(ticker, 0.)
 
-        if ticker in storage:
-            sampled_obs = storage[ticker]
-        else:
-            sampled_obs = storage[ticker] = {}
-
-        if timestamp is None:
-            raise ValueError(f'{self.__class__.__name__} requires a timestamp input!')
-
+        # step 1: calculate sampling interval
         volume_sampling_interval = self._update_volume_baseline(ticker=ticker, timestamp=timestamp, volume_accumulated=volume_accumulated)
 
-        # baseline still in generating process, fallback to fixed temporal interval mode
+        # step 2: calculate index
         if volume_sampling_interval is None:
+            # baseline still in generating process, fallback to fixed temporal interval mode
             idx_ts = timestamp // self.sampling_interval
             idx_vol = 0
         elif volume_sampling_interval <= 0 or not np.isfinite(volume_sampling_interval):
             LOGGER.error(f'Invalid volume update interval for {ticker}, expect positive float, got {volume_sampling_interval}')
             return
+        elif self.aligned_interval:
+            volume_sampling_interval = 0.
+            volume_accumulated = 0.
+
+            volume_baseline = self._volume_baseline['baseline']
+            sampling_interval = self._volume_baseline['sampling_interval']
+            weights = getattr(self, 'weights', {})
+
+            for ticker in self._accumulated_volume:
+                vol_acc = self._accumulated_volume.get(ticker, 0.)
+                weight = weights.get(ticker, 1.)
+                vol_sampling_interval = volume_baseline.get(ticker, sampling_interval.get(ticker, 0.))
+
+                if not weight:
+                    continue
+
+                if not vol_sampling_interval:
+                    continue
+
+                volume_accumulated += vol_acc * weight
+                volume_sampling_interval += vol_sampling_interval * weight
+
+            idx_ts = timestamp // self.sampling_interval if allow_oversampling else 0.
+            idx_vol = volume_accumulated // volume_sampling_interval
         else:
             idx_ts = timestamp // self.sampling_interval if allow_oversampling else 0.
             idx_vol = volume_accumulated // volume_sampling_interval
@@ -646,36 +709,50 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         idx = (idx_ts, idx_vol)
         idx_vol_min = idx_vol - self.sample_size
 
-        if idx not in sampled_obs:
-            sampled_obs[idx] = value
-            self.on_entry_added(ticker=ticker, key=idx, value=value)
-        else:
-            if mode == 'update':
-                sampled_obs[idx] = value
-            elif mode == 'accumulate':
-                sampled_obs[idx] += value
+        # step 3: update sampler
+        for obs_name, obs_value in observation_copy.items():
+            if obs_name not in self.sample_storage:
+                raise ValueError(f'Invalid observation name {obs_name}')
+
+            sampler = self.sample_storage[obs_name]
+            storage = sampler['storage']
+            mode = sampler['mode']
+
+            if ticker in storage:
+                obs_storage = storage[ticker]
             else:
-                raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
-            self.on_entry_updated(ticker=ticker, key=idx, value=value)
+                obs_storage = storage[ticker] = {}
 
-        for idx in list(sampled_obs):
-            idx_ts, idx_vol = idx
-
-            # fallback to aligned mode
-            if idx_vol == 0:
-                allow_oversampling = False
-                break
-            elif idx_vol < idx_vol_min:
-                sampled_obs.pop(idx)
-                self.on_entry_removed(ticker=ticker, key=idx, value=value)
+            if idx not in obs_storage:
+                obs_storage[idx] = obs_value
+                self.on_entry_added(ticker=ticker, name=obs_name, value=obs_value)
             else:
-                break
+                if mode == 'update':
+                    obs_storage[idx] = obs_value
+                elif mode == 'accumulate':
+                    obs_storage[idx] += obs_value
+                else:
+                    raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
+                self.on_entry_updated(ticker=ticker, name=obs_name, value=obs_storage[idx])
 
-        # allow max sample size of len(sampled_obs) + 1 entries. (the extra entry is the active entry)
-        if not allow_oversampling and (to_pop := len(sampled_obs) + 1 - self.sample_size) > 0:
-            for idx in list(sampled_obs)[:to_pop]:
-                sampled_obs.pop(idx)
-                self.on_entry_removed(ticker=ticker, key=idx, value=value)
+            for idx_pop in list(obs_storage):
+                idx_ts, idx_vol = idx_pop
+
+                # fallback to aligned mode
+                if idx_vol == 0:
+                    allow_oversampling = False
+                    break
+                elif idx_vol < idx_vol_min:
+                    _ = obs_storage.pop(idx_pop)
+                    self.on_entry_removed(ticker=ticker, name=obs_name, value=_)
+                else:
+                    break
+
+            # allow max sample size of len(sampled_obs) + 1 entries. (the extra entry is the active entry)
+            if not allow_oversampling and (to_pop := len(obs_storage) + 1 - self.sample_size) > 0:
+                for idx_pop in list(obs_storage)[:to_pop]:
+                    _ = obs_storage.pop(idx_pop)
+                    self.on_entry_removed(ticker=ticker, name=obs_name, value=_)
 
     def clear(self):
         """
@@ -684,5 +761,6 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         super().clear()
 
         self._volume_baseline['baseline'].clear()
+        self._volume_baseline['sampling_interval'].clear()
         self._volume_baseline['obs_vol_acc_start'].clear()
         self._volume_baseline['obs_vol_acc'].clear()
