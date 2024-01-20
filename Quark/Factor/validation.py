@@ -110,11 +110,10 @@ class FactorValidation(object):
         Returns:
             MarketDataMonitor: Initialized market data monitor.
         """
-        self.factor = IndexMACDTriggerMonitor(
+        self.factor = DivergenceIndexAdaptiveMonitor(
             weights=self.index_weights,
-            update_interval=kwargs.get('update_interval', 60),
-            observation_window=kwargs.get('observation_window', 5),
-            confirmation_threshold=kwargs.get('confirmation_threshold', 0.)
+            sampling_interval=15,
+            baseline_window=20
         )
 
         MDS.add_monitor(self.factor)
@@ -570,11 +569,10 @@ class FactorBatchValidation(FactorValidation):
                 discount_interval=1,
                 alpha=ALPHA_0001
             ),
-            IndexMACDTriggerMonitor(
+            DivergenceIndexAdaptiveMonitor(
                 weights=self.index_weights,
-                update_interval=60,
-                observation_window=5,
-                confirmation_threshold=0.0001
+                sampling_interval=15,
+                baseline_window=20
             ),
             TradeFlowEMAMonitor(
                 discount_interval=1,
@@ -934,15 +932,18 @@ class FactorValidatorExperiment(InterTemporalValidation):
         # self.model = XGBoost()
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
         self.features: list[str] = [
-            'Skewness.PricePct.Index.Adaptive.Index',
-            'Skewness.PricePct.Index.Adaptive.Slope',
-            'Gini.PricePct.Index.Adaptive',
-            'Coherence.Price.Adaptive.up',
-            'Coherence.Price.Adaptive.down',
-            'Coherence.Price.Adaptive.ratio',
-            'Coherence.Volume.up',
-            'Coherence.Volume.down',
-            'MACD.Index.Trigger.Synthetic',
+            # 'Skewness.PricePct.Index.Adaptive.Index',
+            # 'Skewness.PricePct.Index.Adaptive.Slope',
+            # 'Gini.PricePct.Index.Adaptive',
+            # 'Coherence.Price.Adaptive.up',
+            # 'Coherence.Price.Adaptive.down',
+            # 'Coherence.Price.Adaptive.ratio',
+            # 'Coherence.Volume.up',
+            # 'Coherence.Volume.down',
+            # 'MACD.Index.Trigger.Synthetic',
+            'EMA.Divergence.Index.Adaptive.Index',
+            'EMA.Divergence.Index.Adaptive.Diff',
+            'EMA.Divergence.Index.Adaptive.Diff.EMA',
         ]
 
         self.cache_dir = kwargs.get('cache_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'tmp_factor_cache'))
@@ -974,37 +975,36 @@ class FactorValidatorExperiment(InterTemporalValidation):
             list[MarketDataMonitor]: Initialized list of market data monitors.
         """
         self.factor = [
-            SkewnessIndexAdaptiveMonitor(
-                sampling_interval=3 * 5,
-                sample_size=20,
-                baseline_window=100,
+            # SkewnessIndexAdaptiveMonitor(
+            #     sampling_interval=3 * 5,
+            #     sample_size=20,
+            #     baseline_window=100,
+            #     weights=self.index_weights,
+            #     aligned_interval=False
+            # ),
+            # GiniIndexAdaptiveMonitor(
+            #     sampling_interval=3 * 5,
+            #     sample_size=20,
+            #     baseline_window=100,
+            #     weights=self.index_weights
+            # ),
+            # CoherenceAdaptiveMonitor(
+            #     sampling_interval=15,
+            #     sample_size=20,
+            #     baseline_window=100,
+            #     weights=self.index_weights,
+            #     center_mode='median',
+            #     aligned_interval=True
+            # ),
+            # TradeCoherenceMonitor(
+            #     sampling_interval=15,
+            #     sample_size=20,
+            #     weights=self.index_weights
+            # ),
+            DivergenceIndexAdaptiveMonitor(
                 weights=self.index_weights,
-                aligned_interval=False
-            ),
-            GiniIndexAdaptiveMonitor(
-                sampling_interval=3 * 5,
-                sample_size=20,
-                baseline_window=100,
-                weights=self.index_weights
-            ),
-            CoherenceAdaptiveMonitor(
                 sampling_interval=15,
-                sample_size=20,
-                baseline_window=100,
-                weights=self.index_weights,
-                center_mode='median',
-                aligned_interval=True
-            ),
-            TradeCoherenceMonitor(
-                sampling_interval=15,
-                sample_size=20,
-                weights=self.index_weights
-            ),
-            IndexMACDTriggerMonitor(
-                weights=self.index_weights,
-                update_interval=60,
-                observation_window=5,
-                confirmation_threshold=0.0001
+                baseline_window=20,
             )
         ]
 
