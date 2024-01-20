@@ -40,7 +40,7 @@ class IndexWeight(dict):
         return list(self.keys())
 
 
-class EMA(object, metaclass=abc.ABCMeta):
+class EMA(object):
     def __init__(self, discount_interval: float, alpha: float = None, window: int = None):
         self.discount_interval = discount_interval
         self.alpha = alpha if alpha else 1 - 2 / (window + 1)
@@ -200,6 +200,80 @@ class EMA(object, metaclass=abc.ABCMeta):
         self.ema.clear()
 
 
+class MACD(object):
+    """
+    This model calculates the MACD absolute value (not the relative / adjusted value)
+
+    use update_macd method to update the close price
+    """
+
+    def __init__(self, short_window=12, long_window=26, signal_window=9):
+        self.short_window = short_window
+        self.long_window = long_window
+        self.signal_window = signal_window
+
+        self.ema_short = None
+        self.ema_long = None
+
+        self.macd_line = None
+        self.signal_line = None
+        self.macd_diff = None
+        self.price = None
+
+    @classmethod
+    def update_ema(cls, value: float, memory: float, window: int):
+        alpha = 2 / (window + 1)
+        ema = alpha * value + (1 - alpha) * memory
+        return ema
+
+    def calculate_macd(self, price: float) -> dict[str, float]:
+        self.price = price
+        ema_short = price if self.ema_short is None else self.ema_short
+        ema_long = price if self.ema_long is None else self.ema_long
+
+        ema_short = self.update_ema(value=price, memory=ema_short, window=self.short_window)
+        ema_long = self.update_ema(value=price, memory=ema_long, window=self.long_window)
+
+        macd_line = ema_short - ema_long
+
+        signal_line = macd_line if self.signal_line is None else self.signal_line
+
+        signal_line = self.update_ema(value=macd_line, memory=signal_line, window=self.signal_window)
+        macd_diff = macd_line - signal_line
+
+        return dict(
+            ema_short=ema_short,
+            ema_long=ema_long,
+            macd_line=macd_line,
+            signal_line=signal_line,
+            macd_diff=macd_diff
+        )
+
+    def update_macd(self, price: float) -> dict[str, float]:
+        macd_dict = self.calculate_macd(price=price)
+
+        self.ema_short = macd_dict['ema_short']
+        self.ema_long = macd_dict['ema_long']
+        self.macd_line = macd_dict['macd_line']
+        self.signal_line = macd_dict['signal_line']
+        self.macd_diff = macd_dict['macd_diff']
+
+        return macd_dict
+
+    def get_macd_values(self) -> dict[str, float]:
+        return dict(
+            ema_short=self.ema_short,
+            ema_long=self.ema_long,
+            macd_line=self.macd_line,
+            signal_line=self.signal_line,
+            macd_diff=self.macd_diff
+        )
+
+    @property
+    def macd_diff_adjusted(self):
+        return self.macd_diff / self.price
+
+
 class Synthetic(object, metaclass=abc.ABCMeta):
     def __init__(self, weights: dict[str, float]):
         self.weights: IndexWeight = weights if isinstance(weights, IndexWeight) else IndexWeight(index_name='synthetic', **weights)
@@ -302,7 +376,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
 
         # Warning for sample_interval by Shannon's Theorem
         if sample_size <= 2:
-            LOGGER.warning(f"{self.__class__.__name__} should have a larger sample_size, by Shannon's Theorem, sample_size should be at least 2")
+            LOGGER.warning(f"{self.__class__.__name__} should have a larger sample_size, by Shannon's Theorem, sample_size should be greater than 2")
 
     def register_sampler(self, name: str, mode: str = 'update'):
         if name in self.sample_storage:
@@ -404,6 +478,16 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         Clears all stored data.
         """
         self.sample_storage.clear()
+
+    def last_obs(self, name: str) -> dict[str, float]:
+        sampler = self.get_sampler(name=name)
+        last_obs = {}
+
+        for ticker, observation in sampler.items():
+            if observation:
+                last_obs[ticker] = list(observation.values())[-1]
+
+        return last_obs
 
 
 class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
@@ -686,10 +770,9 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             sampling_interval = self._volume_baseline['sampling_interval']
             weights = getattr(self, 'weights', {})
 
-            for ticker in self._accumulated_volume:
-                vol_acc = self._accumulated_volume.get(ticker, 0.)
-                weight = weights.get(ticker, 1.)
-                vol_sampling_interval = volume_baseline.get(ticker, sampling_interval.get(ticker, 0.))
+            for component, vol_acc in self._accumulated_volume.items():
+                weight = weights.get(component, 0.)
+                vol_sampling_interval = volume_baseline.get(component, sampling_interval.get(component, 0.))
 
                 if not weight:
                     continue
