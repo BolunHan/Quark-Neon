@@ -1,11 +1,10 @@
-from .MACD import MACDMonitor, MACDTriggerMonitor, IndexMACDTriggerMonitor
-
+from .divergence import DivergenceMonitor, DivergenceAdaptiveMonitor, DivergenceIndexAdaptiveMonitor
 from .. import add_monitor, INDEX_WEIGHTS
 
 MONITOR = {}
 
-add_monitor(MACDMonitor(weights=INDEX_WEIGHTS, update_interval=60), monitors=MONITOR, register=False)
-add_monitor(MACDTriggerMonitor(update_interval=60, observation_window=5, confirmation_threshold=0.0001), monitors=MONITOR, register=False)
-add_monitor(IndexMACDTriggerMonitor(weights=INDEX_WEIGHTS, update_interval=60, observation_window=5, confirmation_threshold=0.0001), monitors=MONITOR, register=False)
+add_monitor(DivergenceMonitor(sampling_interval=15), monitors=MONITOR, register=False)
+add_monitor(DivergenceAdaptiveMonitor(sampling_interval=15, baseline_window=15, aligned_interval=False), monitors=MONITOR, register=False)
+add_monitor(DivergenceIndexAdaptiveMonitor(weights=INDEX_WEIGHTS, sampling_interval=15, baseline_window=15, aligned_interval=False), monitors=MONITOR, register=False)
 
-__all__ = ['MACDMonitor', 'MACDTriggerMonitor', 'IndexMACDTriggerMonitor']
+__all__ = ['DivergenceMonitor', 'DivergenceAdaptiveMonitor', 'DivergenceIndexAdaptiveMonitor']
