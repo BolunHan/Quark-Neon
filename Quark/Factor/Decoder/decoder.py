@@ -25,6 +25,7 @@ from PyQuantKit import MarketData
 from .. import MDS, Synthetic
 from ..decoder import OnlineDecoder, Wavelet
 
+
 class DecoderMonitor(MarketDataMonitor, OnlineDecoder):
     """
     Monitors and decodes market data into different trends.
