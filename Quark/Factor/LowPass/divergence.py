@@ -64,7 +64,7 @@ class DivergenceMonitor(MarketDataMonitor, FixedIntervalSampler):
 
     def macd_value(self):
         macd_dict = {}
-        price_dict = self.last_obs(name='price')
+        price_dict = self.active_obs(name='price')
 
         for ticker, macd in self._macd.items():
             last_price = price_dict[ticker]

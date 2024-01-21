@@ -58,6 +58,19 @@ class EMA(object):
         self._window: dict[str, dict[str, deque[float]]] = getattr(self, '_window', {})
         self.ema: dict[str, dict[str, float]] = getattr(self, 'ema', {})
 
+    @classmethod
+    def calculate_ema(cls, value: float, memory: float = None, window: int = None, alpha: float = None):
+        if alpha is None and window is None:
+            raise ValueError('Must assign value to alpha or window.')
+        elif alpha is None:
+            alpha = 2 / (window + 1)
+
+        if memory is None:
+            return value
+
+        ema = alpha * value + (1 - alpha) * memory
+        return ema
+
     def register_ema(self, name):
         self._history[name] = {}
         self._current[name] = {}
@@ -87,9 +100,9 @@ class EMA(object):
                     memory = self._history[entry_name].get(ticker)
 
                     if memory is None:
-                        self.ema[entry_name][ticker] = replace_na * self.alpha + current * (1 - self.alpha)
+                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=replace_na, alpha=self.alpha)
                     else:
-                        self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
+                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=memory, alpha=self.alpha)
 
     def accumulate_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **accumulative_data: float):
         if timestamp:
@@ -128,9 +141,9 @@ class EMA(object):
                     memory = self._history[entry_name].get(ticker)
 
                     if memory is None:
-                        self.ema[entry_name][ticker] = replace_na * self.alpha + current * (1 - self.alpha)
+                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=replace_na, alpha=self.alpha)
                     else:
-                        self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
+                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=memory, alpha=self.alpha)
 
     def discount_ema(self, ticker: str, timestamp: float):
         last_update = self._last_discount_ts.get(ticker, timestamp)
@@ -221,10 +234,8 @@ class MACD(object):
         self.price = None
 
     @classmethod
-    def update_ema(cls, value: float, memory: float, window: int):
-        alpha = 2 / (window + 1)
-        ema = alpha * value + (1 - alpha) * memory
-        return ema
+    def update_ema(cls, value: float, memory: float, window: int = None, alpha: float = None):
+        return EMA.calculate_ema(value=value, memory=memory, window=window, alpha=alpha)
 
     def calculate_macd(self, price: float) -> dict[str, float]:
         self.price = price
@@ -479,7 +490,12 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         self.sample_storage.clear()
 
-    def last_obs(self, name: str) -> dict[str, float]:
+    def loc_obs(self, name: str, ticker: str, index: int) -> float:
+        sampler = self.get_sampler(name=name)
+        observation = sampler.get(ticker, {})
+        return list(observation.values())[index]
+
+    def active_obs(self, name: str) -> dict[str, float]:
         sampler = self.get_sampler(name=name)
         last_obs = {}
 
