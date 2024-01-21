@@ -527,10 +527,20 @@ class FactorBatchValidation(FactorValidation):
         self.override_cache = kwargs.get('override_cache', False)
 
         self.features: list[str] = [
-            'Entropy.Price.EMA',
-            'Coherence.Volume',
-            'Coherence.Price.EMA.up', 'Coherence.Price.EMA.down', 'Coherence.Price.EMA.ratio',
-            'MACD.Index.Trigger.Synthetic',
+            'Skewness.PricePct.Index.Adaptive.Index',
+            'Skewness.PricePct.Index.Adaptive.Slope',
+            'Gini.PricePct.Index.Adaptive',
+            'Coherence.Price.Adaptive.up',
+            'Coherence.Price.Adaptive.down',
+            'Coherence.Price.Adaptive.ratio',
+            'Coherence.Volume.up',
+            'Coherence.Volume.down',
+            'Entropy.Price.Adaptive',
+            'Entropy.Price',
+            'Entropy.PricePct.Adaptive',
+            'EMA.Divergence.Index.Adaptive.Index',
+            'EMA.Divergence.Index.Adaptive.Diff',
+            'EMA.Divergence.Index.Adaptive.Diff.EMA',
             'TradeFlow.EMA.Index',
             'Aggressiveness.EMA.Index',
         ]
@@ -550,29 +560,54 @@ class FactorBatchValidation(FactorValidation):
             list[MarketDataMonitor]: Initialized list of market data monitors.
         """
         self.factor = [
-            EntropyEMAMonitor(
-                weights=self.index_weights,
+            CoherenceAdaptiveMonitor(
                 sampling_interval=15,
                 sample_size=20,
-                alpha=ALPHA_0001,
-                discount_interval=1
+                baseline_window=100,
+                weights=self.index_weights,
+                center_mode='median',
+                aligned_interval=True
             ),
             TradeCoherenceMonitor(
                 sampling_interval=15,
                 sample_size=20,
                 weights=self.index_weights
             ),
-            CoherenceEMAMonitor(
+            EntropyMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyAdaptiveMonitor(
                 sampling_interval=15,
                 sample_size=20,
                 weights=self.index_weights,
-                discount_interval=1,
-                alpha=ALPHA_0001
+                ignore_primary=False,
+                pct_change=True,
+                name='Monitor.Entropy.PricePct.Adaptive'
+            ),
+            GiniIndexAdaptiveMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights
+            ),
+            SkewnessIndexAdaptiveMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights,
+                aligned_interval=False
             ),
             DivergenceIndexAdaptiveMonitor(
                 weights=self.index_weights,
                 sampling_interval=15,
-                baseline_window=20
+                baseline_window=20,
             ),
             TradeFlowEMAMonitor(
                 discount_interval=1,
@@ -908,7 +943,7 @@ class InterTemporalValidation(FactorBatchValidation):
         self.cv.x_axis = x_axis
 
 
-class GradientBoostValidation(InterTemporalValidation):
+class HybridValidation(InterTemporalValidation):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model = RandomForest()
@@ -932,18 +967,22 @@ class FactorValidatorExperiment(InterTemporalValidation):
         # self.model = XGBoost()
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
         self.features: list[str] = [
-            # 'Skewness.PricePct.Index.Adaptive.Index',
-            # 'Skewness.PricePct.Index.Adaptive.Slope',
-            # 'Gini.PricePct.Index.Adaptive',
-            # 'Coherence.Price.Adaptive.up',
-            # 'Coherence.Price.Adaptive.down',
-            # 'Coherence.Price.Adaptive.ratio',
-            # 'Coherence.Volume.up',
-            # 'Coherence.Volume.down',
-            # 'MACD.Index.Trigger.Synthetic',
+            'Skewness.PricePct.Index.Adaptive.Index',
+            'Skewness.PricePct.Index.Adaptive.Slope',
+            'Gini.PricePct.Index.Adaptive',
+            'Coherence.Price.Adaptive.up',
+            'Coherence.Price.Adaptive.down',
+            'Coherence.Price.Adaptive.ratio',
+            'Coherence.Volume.up',
+            'Coherence.Volume.down',
+            'Entropy.Price.Adaptive',
+            'Entropy.Price',
+            'Entropy.PricePct.Adaptive',
             'EMA.Divergence.Index.Adaptive.Index',
             'EMA.Divergence.Index.Adaptive.Diff',
             'EMA.Divergence.Index.Adaptive.Diff.EMA',
+            # 'Trade.Clustering.Index.Adaptive.Index',
+            # 'Trade.Clustering.Index.Adaptive.Weighted',
         ]
 
         self.cache_dir = kwargs.get('cache_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'tmp_factor_cache'))
@@ -975,37 +1014,61 @@ class FactorValidatorExperiment(InterTemporalValidation):
             list[MarketDataMonitor]: Initialized list of market data monitors.
         """
         self.factor = [
-            # SkewnessIndexAdaptiveMonitor(
-            #     sampling_interval=3 * 5,
-            #     sample_size=20,
-            #     baseline_window=100,
-            #     weights=self.index_weights,
-            #     aligned_interval=False
-            # ),
-            # GiniIndexAdaptiveMonitor(
-            #     sampling_interval=3 * 5,
-            #     sample_size=20,
-            #     baseline_window=100,
-            #     weights=self.index_weights
-            # ),
-            # CoherenceAdaptiveMonitor(
-            #     sampling_interval=15,
-            #     sample_size=20,
-            #     baseline_window=100,
-            #     weights=self.index_weights,
-            #     center_mode='median',
-            #     aligned_interval=True
-            # ),
-            # TradeCoherenceMonitor(
-            #     sampling_interval=15,
-            #     sample_size=20,
-            #     weights=self.index_weights
-            # ),
+            CoherenceAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights,
+                center_mode='median',
+                aligned_interval=True
+            ),
+            TradeCoherenceMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights,
+                ignore_primary=False,
+                pct_change=True,
+                name='Monitor.Entropy.PricePct.Adaptive'
+            ),
+            GiniIndexAdaptiveMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights
+            ),
+            SkewnessIndexAdaptiveMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights,
+                aligned_interval=False
+            ),
             DivergenceIndexAdaptiveMonitor(
                 weights=self.index_weights,
                 sampling_interval=15,
                 baseline_window=20,
-            )
+            ),
+            # TradeClusteringIndexAdaptiveMonitor(
+            #     weights=self.index_weights,
+            #     sampling_interval=15,
+            #     sample_size=20,
+            #     baseline_window=100
+            # )
         ]
 
         self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
@@ -1046,8 +1109,8 @@ def main():
     # validator = FactorValidation()
     # validator = FactorBatchValidation()
     # validator = InterTemporalValidation()
-    # validator = GradientBoostValidation()
-    validator = FactorValidatorExperiment(override_cache=True)
+    validator = HybridValidation()
+    # validator = FactorValidatorExperiment(override_cache=True)
     validator.run()
     safe_exit()
 
