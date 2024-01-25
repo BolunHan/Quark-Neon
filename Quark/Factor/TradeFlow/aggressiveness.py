@@ -16,13 +16,12 @@ Author: Bolun
 Date: 2023-12-27
 """
 import numpy as np
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, TransactionData
 
-from .. import EMA, Synthetic, MDS, DEBUG_MODE
+from .. import EMA, Synthetic, FactorMonitor, DEBUG_MODE
 
 
-class AggressivenessMonitor(MarketDataMonitor):
+class AggressivenessMonitor(FactorMonitor):
     """
     Monitors the aggressiveness of buy/sell trades and provides aggregated values.
 
@@ -32,11 +31,7 @@ class AggressivenessMonitor(MarketDataMonitor):
     """
 
     def __init__(self, name: str = 'Monitor.Aggressiveness', monitor_id: str = None):
-        super().__init__(
-            name=name,
-            monitor_id=monitor_id,
-            mds=MDS
-        )
+        super().__init__(name=name, monitor_id=monitor_id)
 
         self._last_update: dict[str, float] = dict()
         self._trade_price: dict[str, dict[int, float]] = dict()
@@ -128,6 +123,15 @@ class AggressivenessMonitor(MarketDataMonitor):
         self._trade_price.clear()
         self._aggressive_buy.clear()
         self._aggressive_sell.clear()
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Net'
+        ] + [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}.Buy' for ticker in subscription
+        ] + [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}.Sell' for ticker in subscription
+        ]
 
     @property
     def value(self) -> dict[str, float]:
@@ -256,6 +260,15 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
                 aggressive_sell[ticker] = self._aggressive_sell.get(ticker, 0.) / volume
 
         return aggressive_buy, aggressive_sell
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Index'
+        ] + [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}.Buy' for ticker in subscription
+        ] + [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}.Sell' for ticker in subscription
+        ]
 
     @property
     def value(self) -> dict[str, float]:

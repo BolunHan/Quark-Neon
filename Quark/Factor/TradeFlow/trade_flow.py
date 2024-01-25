@@ -16,13 +16,12 @@ Author: Bolun
 Date: 2023-12-27
 """
 
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, TransactionData
 
-from .. import EMA, Synthetic, MDS
+from .. import EMA, Synthetic, FactorMonitor
 
 
-class TradeFlowMonitor(MarketDataMonitor):
+class TradeFlowMonitor(FactorMonitor):
     """
     Monitors net trade volume flow for each underlying and provides the values, with unit of share.
 
@@ -32,7 +31,7 @@ class TradeFlowMonitor(MarketDataMonitor):
     """
 
     def __init__(self, name: str = 'Monitor.TradeFlow', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
 
         self._trade_flow = dict()
         self._is_ready = True
@@ -63,6 +62,11 @@ class TradeFlowMonitor(MarketDataMonitor):
     def clear(self):
         """Clear the monitor data."""
         self._trade_flow.clear()
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
+        ]
 
     @property
     def value(self) -> dict[str, float]:
@@ -169,6 +173,13 @@ class TradeFlowEMAMonitor(TradeFlowMonitor, EMA, Synthetic):
             return normalized_trade_flow
         else:
             return super().value
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Index'
+        ] + [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
+        ]
 
     @property
     def value(self) -> dict[str, float]:

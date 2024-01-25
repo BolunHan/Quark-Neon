@@ -1,18 +1,17 @@
 import warnings
 
 import numpy as np
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, TransactionData
 from statsmodels.tools.sm_exceptions import InterpolationWarning
 from statsmodels.tsa.stattools import adfuller
 
-from .. import MDS, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, Synthetic, EMA
+from .. import FactorMonitor, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, Synthetic, EMA
 
 
-class TradeClusteringMonitor(MarketDataMonitor, FixedIntervalSampler):
+class TradeClusteringMonitor(FactorMonitor, FixedIntervalSampler):
 
     def __init__(self, sampling_interval: float, sample_size: int = 20, name: str = 'Monitor.Trade.Clustering', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size)
 
         self.register_sampler(name='price')
@@ -83,6 +82,11 @@ class TradeClusteringMonitor(MarketDataMonitor, FixedIntervalSampler):
     def clear(self):
         self._unit_root.clear()
         FixedIntervalSampler.clear(self)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
+        ]
 
     @property
     def value(self) -> dict[str, float]:
@@ -164,6 +168,12 @@ class TradeClusteringIndexAdaptiveMonitor(TradeClusteringAdaptiveMonitor, Synthe
     def clear(self):
         super().clear()
         Synthetic.clear(self)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Index',
+            f'{self.name.removeprefix("Monitor.")}.Weighted',
+        ]
 
     @property
     def value(self) -> dict[str, float]:

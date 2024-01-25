@@ -1,30 +1,10 @@
-"""
-This script defines classes for monitoring and measuring the entropy of the covariance matrix
-for a stock pool. It extends the CoherenceMonitor class and includes functionalities for calculating
-covariance matrices, entropy, and exponential moving averages (EMA).
-
-Classes:
-- EntropyMonitor: Monitors and measures the entropy of the covariance matrix for price vectors.
-- EntropyEMAMonitor: Extends EntropyMonitor and includes an EMA for entropy.
-
-Usage:
-1. Instantiate the desired monitor class with appropriate parameters.
-2. Call the instance with market data to update the monitor.
-3. Retrieve the entropy values using the 'value' property of the monitor instance.
-
-Note: This script assumes the availability of PyQuantKit, numpy, CoherenceMonitor, and EMA.
-
-Author: Bolun
-Date: 2023-12-26
-"""
-
 import numpy as np
 from PyQuantKit import MarketData
 
-from .. import EMA, MDS, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, MarketDataMonitor
+from .. import FactorMonitor, EMA,  FixedIntervalSampler, AdaptiveVolumeIntervalSampler
 
 
-class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
+class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
     """
     Monitors and measures the entropy of the covariance matrix.
 
@@ -47,7 +27,7 @@ class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
     """
 
     def __init__(self, sampling_interval: float, sample_size: int = 20, weights: dict[str, float] = None, pct_change: bool = False, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size)
 
         self.weights = weights
@@ -134,6 +114,11 @@ class EntropyMonitor(MarketDataMonitor, FixedIntervalSampler):
 
         t = e * np.log2(e)
         return -np.sum(t)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}'
+        ]
 
     @property
     def value(self) -> float:

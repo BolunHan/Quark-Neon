@@ -1,3 +1,4 @@
+import abc
 from functools import partial
 from typing import Iterable
 
@@ -11,7 +12,20 @@ TIME_ZONE = GlobalStatics.TIME_ZONE
 DEBUG_MODE = GlobalStatics.DEBUG_MODE
 
 
-def add_monitor(monitor: MarketDataMonitor, **kwargs) -> dict[str, MarketDataMonitor]:
+class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
+    def __init__(self, name: str, monitor_id: str = None):
+        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+
+    @abc.abstractmethod
+    def factor_names(self, subscription: list[str]) -> list[str]: ...
+
+    """
+    This method returns a list of string, corresponding with the keys of the what .value returns.
+    This method is design to facilitate facter caching functions.
+    """
+
+
+def add_monitor(monitor: FactorMonitor, **kwargs) -> dict[str, FactorMonitor]:
     monitors = kwargs.get('monitors', {})
     factors = kwargs.get('factors', None)
     register = kwargs.get('register', True)
@@ -51,7 +65,7 @@ from .LowPass import *
 from .Decoder import *
 
 
-def register_monitor(**kwargs) -> dict[str, MarketDataMonitor]:
+def register_monitor(**kwargs) -> dict[str, FactorMonitor]:
     monitors = kwargs.get('monitors', {})
     index_name = kwargs.get('index_name', 'SyntheticIndex')
     index_weights = IndexWeight(index_name=index_name, **kwargs.get('index_weights', INDEX_WEIGHTS))
@@ -79,9 +93,6 @@ def register_monitor(**kwargs) -> dict[str, MarketDataMonitor]:
     # synthetic index monitor
     check_and_add(SyntheticIndexMonitor(index_name=index_name, weights=index_weights))
 
-    # MACD monitor
-    check_and_add(MACDMonitor(weights=index_weights, update_interval=60))
-
     # aggressiveness monitor
     check_and_add(AggressivenessMonitor())
 
@@ -106,12 +117,12 @@ def register_monitor(**kwargs) -> dict[str, MarketDataMonitor]:
     return monitors
 
 
-def collect_factor(monitors: dict[str, MarketDataMonitor] | list[MarketDataMonitor] | MarketDataMonitor) -> dict[str, float]:
+def collect_factor(monitors: dict[str, FactorMonitor] | list[FactorMonitor] | FactorMonitor) -> dict[str, float]:
     factors = {}
 
     if isinstance(monitors, dict):
         monitors = list(monitors.values())
-    elif isinstance(monitors, MarketDataMonitor):
+    elif isinstance(monitors, FactorMonitor):
         monitors = [monitors]
 
     for monitor in monitors:  # type: MarketDataMonitor
@@ -140,7 +151,7 @@ __all__ = [
     # from Decoder module
     'DecoderMonitor', 'IndexDecoderMonitor', 'VolatilityMonitor',
     # from LowPass module
-    'MACDMonitor', 'MACDTriggerMonitor', 'IndexMACDTriggerMonitor',
+    'TradeClusteringMonitor', 'TradeClusteringAdaptiveMonitor', 'TradeClusteringIndexAdaptiveMonitor', 'DivergenceMonitor', 'DivergenceAdaptiveMonitor', 'DivergenceIndexAdaptiveMonitor',
     # from Misc module
     'SyntheticIndexMonitor',
     # from TradeFlow module

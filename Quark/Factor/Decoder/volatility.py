@@ -17,13 +17,12 @@ Date: 2023-12-27
 """
 
 import numpy as np
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData
 
-from .. import MDS, Synthetic
+from .. import Synthetic, FactorMonitor
 
 
-class VolatilityMonitor(MarketDataMonitor, Synthetic):
+class VolatilityMonitor(FactorMonitor, Synthetic):
     """
     Class for monitoring market data and calculating a weighted index based on daily volatility.
 
@@ -34,7 +33,7 @@ class VolatilityMonitor(MarketDataMonitor, Synthetic):
     """
 
     def __init__(self, weights: dict[str, float], name: str = 'Monitor.Volatility.Daily', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         Synthetic.__init__(self=self, weights=weights)
 
         # External data that must be assigned
@@ -79,6 +78,13 @@ class VolatilityMonitor(MarketDataMonitor, Synthetic):
             volatility_adjusted[ticker] = (self.last_price[ticker] / self.base_price[ticker] - 1) / self.daily_volatility[ticker]
 
         return volatility_adjusted
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Index'
+        ] + [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
+        ]
 
     @property
     def value(self) -> dict[str, float]:

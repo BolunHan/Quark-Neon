@@ -19,14 +19,13 @@ Author: Bolun
 Date: 2023-12-26
 """
 
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData
 
-from .. import MDS, Synthetic
+from .. import Synthetic, FactorMonitor
 from ..decoder import OnlineDecoder, Wavelet
 
 
-class DecoderMonitor(MarketDataMonitor, OnlineDecoder):
+class DecoderMonitor(FactorMonitor, OnlineDecoder):
     """
     Monitors and decodes market data into different trends.
 
@@ -49,7 +48,7 @@ class DecoderMonitor(MarketDataMonitor, OnlineDecoder):
     """
 
     def __init__(self, confirmation_level: float = 0.005, timeout: float = 15 * 60, up_threshold: float = 0.01, down_threshold: float = 0.01, retrospective: bool = False, name: str = 'Monitor.Decoder', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         OnlineDecoder.__init__(self=self, confirmation_level=confirmation_level, timeout=timeout, up_threshold=up_threshold, down_threshold=down_threshold, retrospective=retrospective)
 
         self._is_ready = False  # This monitor does not have a valid .value function, so it is never ready
@@ -72,6 +71,11 @@ class DecoderMonitor(MarketDataMonitor, OnlineDecoder):
         Clears the historical price, price change, and decoder state history.
         """
         OnlineDecoder.clear(self)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
+        ]
 
     @property
     def value(self) -> dict[str, list[Wavelet]]:

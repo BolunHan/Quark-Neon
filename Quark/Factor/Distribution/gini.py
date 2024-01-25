@@ -1,16 +1,15 @@
 from typing import Iterable
 
 import numpy as np
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData
 
-from .. import MDS, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, Synthetic
+from .. import FixedIntervalSampler, AdaptiveVolumeIntervalSampler, Synthetic, FactorMonitor
 
 
-class GiniMonitor(MarketDataMonitor, FixedIntervalSampler):
+class GiniMonitor(FactorMonitor, FixedIntervalSampler):
 
     def __init__(self, sampling_interval: float, sample_size: int, name: str = 'Monitor.Gini.PricePct', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size)
 
         self.register_sampler(name='price', mode='update')
@@ -61,6 +60,11 @@ class GiniMonitor(MarketDataMonitor, FixedIntervalSampler):
 
         return gini_dict
 
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}'
+        ]
+
     @property
     def value(self) -> dict[str, float]:
         gini = self.gini_impurity()
@@ -68,7 +72,7 @@ class GiniMonitor(MarketDataMonitor, FixedIntervalSampler):
 
     @property
     def is_ready(self) -> bool:
-        for _ in historical_price.values():
+        for _ in self.get_sampler('price').values():
             if len(_) < 3:
                 return False
 

@@ -1,18 +1,17 @@
 from collections import deque
 
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, TransactionData
 
-from .. import Synthetic, MDS, MACD, FixedIntervalSampler, AdaptiveVolumeIntervalSampler
+from .. import Synthetic, MACD, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, FactorMonitor
 
 
-class DivergenceMonitor(MarketDataMonitor, FixedIntervalSampler):
+class DivergenceMonitor(FactorMonitor, FixedIntervalSampler):
     """
     a MACD monitor to measure the divergence of the MA
     """
 
     def __init__(self, sampling_interval: float, name: str = 'Monitor.EMA.Divergence', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=3)
 
         self._macd: dict[str, MACD] = {}
@@ -97,6 +96,11 @@ class DivergenceMonitor(MarketDataMonitor, FixedIntervalSampler):
 
         return macd_diff_ema_dict
 
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
+        ]
+
     @property
     def value(self) -> dict[str, float]:
         result = {}
@@ -158,6 +162,13 @@ class DivergenceIndexAdaptiveMonitor(DivergenceAdaptiveMonitor, Synthetic):
     def clear(self):
         super().clear()
         Synthetic.clear(self)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Index',
+            f'{self.name.removeprefix("Monitor.")}.Diff',
+            f'{self.name.removeprefix("Monitor.")}.Diff.EMA'
+        ]
 
     @property
     def value(self) -> dict[str, float]:
@@ -275,6 +286,13 @@ class DivergenceAdaptiveTriggerIndexMonitor(DivergenceAdaptiveTriggerMonitor, Sy
         self.update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
         self.accumulate_volume(ticker='Synthetic', volume=market_data.notional if isinstance(market_data, (TradeData, TransactionData)) else 0)
         self.log_obs(ticker='Synthetic', timestamp=market_data.timestamp, price=self.synthetic_index)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Synthetic',
+        ] + [
+            f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
+        ]
 
     def clear(self):
         super().clear()

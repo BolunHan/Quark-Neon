@@ -2,17 +2,16 @@ from collections import deque
 from typing import Iterable
 
 import numpy as np
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData
 from scipy.stats import skew
 
-from .. import MDS, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, Synthetic
+from .. import FixedIntervalSampler, AdaptiveVolumeIntervalSampler, Synthetic, FactorMonitor
 
 
-class SkewnessMonitor(MarketDataMonitor, FixedIntervalSampler):
+class SkewnessMonitor(FactorMonitor, FixedIntervalSampler):
 
     def __init__(self, sampling_interval: float, sample_size: int, name: str = 'Monitor.Skewness.PricePct', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=sample_size)
 
         self.register_sampler(name='price', mode='update')
@@ -102,6 +101,11 @@ class SkewnessMonitor(MarketDataMonitor, FixedIntervalSampler):
 
         return skewness_dict
 
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}'
+        ]
+
     @property
     def value(self) -> dict[str, float]:
         skewness = self.skewness()
@@ -139,6 +143,12 @@ class SkewnessIndexMonitor(SkewnessMonitor, Synthetic):
     def clear(self) -> None:
         super().clear()
         Synthetic.clear(self)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Index',
+            f'{self.name.removeprefix("Monitor.")}.Slope'
+        ]
 
     @property
     def value(self) -> dict[str, float]:
@@ -205,6 +215,12 @@ class SkewnessIndexAdaptiveMonitor(SkewnessAdaptiveMonitor, Synthetic):
     def clear(self) -> None:
         super().clear()
         Synthetic.clear(self)
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.Index',
+            f'{self.name.removeprefix("Monitor.")}.Slope'
+        ]
 
     @property
     def value(self) -> dict[str, float]:

@@ -20,13 +20,12 @@ Date: 2023-12-27
 
 import datetime
 
-from AlgoEngine.Engine import MarketDataMonitor
 from PyQuantKit import MarketData, TradeData, TransactionData, BarData
 
-from .. import Synthetic, MDS, TIME_ZONE
+from .. import Synthetic, FactorMonitor, TIME_ZONE
 
 
-class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
+class SyntheticIndexMonitor(FactorMonitor, Synthetic):
     """
     Monitors market data and generates synthetic bar data for index price and volume movement.
 
@@ -39,7 +38,7 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
     """
 
     def __init__(self, index_name: str, weights: dict[str, float], interval: float = 60., name='Monitor.SyntheticIndex', monitor_id: str = None):
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
         Synthetic.__init__(self=self, weights=weights)
 
         self.index_name = index_name
@@ -116,6 +115,18 @@ class SyntheticIndexMonitor(MarketDataMonitor, Synthetic):
             return False
         else:
             return self._is_ready
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        return [
+            f'{self.name.removeprefix("Monitor.")}.market_price',
+            f'{self.name.removeprefix("Monitor.")}.high_price',
+            f'{self.name.removeprefix("Monitor.")}.low_price',
+            f'{self.name.removeprefix("Monitor.")}.open_price',
+            f'{self.name.removeprefix("Monitor.")}.close_price',
+            f'{self.name.removeprefix("Monitor.")}.volume',
+            f'{self.name.removeprefix("Monitor.")}.notional',
+            f'{self.name.removeprefix("Monitor.")}.trade_count',
+        ]
 
     @property
     def value(self) -> dict[str, float]:
