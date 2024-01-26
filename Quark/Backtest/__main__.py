@@ -6,222 +6,466 @@ import pathlib
 import sys
 import time
 import traceback
-import uuid
+
+import pandas as pd
+from AlgoEngine.Engine import ProgressiveReplay, SimMatch
+from PyQuantKit import TradeData, TransactionSide, MarketData
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
 from . import LOGGER
-from . import factor_pool
 from . import simulated_env
-from ..API import historical
+from ..API import historical, external
 from ..Base import GlobalStatics
-from ..DecisionCore.Linear import LinearDecisionCore as Core
-from ..Misc import helper
-from ..Factor import SyntheticIndexMonitor, VolatilityMonitor
+from ..DecisionCore.decision_core import MajorityDecisionCore as Core
+from ..DataLore.data_lore import LinearDataLore
+from ..Factor import *
+from ..Factor.factor_pool import FACTOR_POOL, FactorPoolDummyMonitor
 from ..Strategy import Strategy, MDS
+from ..Profile import cn
 
-# params
-INDEX_NAME = '000016.SH'
-MARKET_DATE = START_DATE = datetime.date(2023, 1, 1)
-END_DATE = datetime.date(2023, 6, 1)
-OVERRIDE_FACTOR_CACHE = False
-DUMMY_CORE = True
-TEST_ID = str(uuid.uuid4())
-
-# status
-TEST_ID_SHORT = TEST_ID.split('-')[0]
-IS_INITIALIZED = False
-EPOCH_TS = 0.
-CALENDAR = simulated_env.trade_calendar(start_date=START_DATE, end_date=END_DATE)
-FACTORS = ['SyntheticIndex.Price', 'Monitor.TradeFlow.EMA', 'Monitor.Coherence.Price.EMA', 'Monitor.Coherence.Volume', 'Monitor.SyntheticIndex', 'Monitor.TA.MACD', 'Monitor.Aggressiveness.EMA', 'Monitor.Entropy.Price.EMA']
-FACTOR_POOL = factor_pool.FACTOR_POOL
-STRATEGY = Strategy(
-    index_ticker=INDEX_NAME,
-    index_weights=helper.load_dict(
-        file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'index_weights.{INDEX_NAME}.{MARKET_DATE:%Y%m%d}.json'),
-        json_dict=simulated_env.query_index_weights(index_name=INDEX_NAME, market_date=MARKET_DATE)
-    ),
-    mode='sampling'
-)
+DUMMY_WEIGHT = False
+cn.profile_cn_override()
 
 
-def init_cache_daily(tickers: list[str], look_back: int = 90):
-    import pickle
+class BackTest(object):
+    def __init__(self, index_name: str, start_date: datetime.date, end_date: datetime.date, **kwargs):
+        # statics
+        self.index_name = index_name
+        self.start_date = start_date
+        self.end_date = end_date
+        self.override_cache = kwargs.get('override_cache', False)
+        self.use_dummy_core = kwargs.get('dummy_core', False)
+        self.sampling_interval = kwargs.get('sampling_interval', 10.)
+        self.cache_dir = kwargs.get('cache_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'Factors'))
+        self.test_id = kwargs.get('test_id', self._get_test_id())
+        self.dump_dir = kwargs.get('dump_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'TestResult.{self.test_id}'))
+        self.calendar = simulated_env.trade_calendar(start_date=self.start_date, end_date=self.end_date)
+        self.factor_pool = FACTOR_POOL
+        self.features: list[str] = [
+            'Skewness.PricePct.Index.Adaptive.Index',
+            'Skewness.PricePct.Index.Adaptive.Slope',
+            'Gini.PricePct.Index.Adaptive',
+            'Coherence.Price.Adaptive.up',
+            'Coherence.Price.Adaptive.down',
+            'Coherence.Price.Adaptive.ratio',
+            'Coherence.Volume.up',
+            'Coherence.Volume.down',
+            'Entropy.Price.Adaptive',
+            'Entropy.Price',
+            'Entropy.PricePct.Adaptive',
+            'EMA.Divergence.Index.Adaptive.Index',
+            'EMA.Divergence.Index.Adaptive.Diff',
+            'EMA.Divergence.Index.Adaptive.Diff.EMA',
+            'TradeFlow.EMA.Index',
+            'Aggressiveness.EMA.Index',
+        ]
 
-    start_date = START_DATE - datetime.timedelta(days=look_back)
-    end_date = END_DATE
+        # local variable (over each iteration)
+        self.market_date: datetime.date = self.calendar[0]
+        self.index_weights: IndexWeight = IndexWeight(self.index_name, simulated_env.query(ticker=self.index_name, market_date=self.market_date, topic='index_weights'))
+        self.factor: list[FactorMonitor] = []
+        self.factor_cache: FactorPoolDummyMonitor | None = None
+        self.synthetic: SyntheticIndexMonitor = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights)
 
-    cache_path = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'data_cache.{INDEX_NAME}.{start_date:%Y%m%d}.{end_date:%Y%m%d}.pkl')
+        # flags
+        self.epoch_ts = 0.
 
-    if os.path.isfile(cache_path):
-        with open(cache_path, 'rb') as f:
-            simulated_env.DATA_CACHE.update(pickle.load(f))
-        return
+        # initialize strategy
+        self.strategy: Strategy | None = self._get_strategy()
+        self.engine = self.strategy.engine
+        self.event_engine = self.engine.event_engine
+        self.topic_set = self.engine.topic_set
+        self.sim_match = {}
 
-    for ticker in tickers:
-        LOGGER.info(f'initializing cache for {ticker} from {start_date}, {end_date}')
-        simulated_env.preload_daily_cache(ticker=ticker, start_date=start_date, end_date=end_date)
+    def _preload_cache(self, look_back: int = 90):
+        start_date = self.start_date - datetime.timedelta(days=look_back)
+        end_date = self.end_date
 
-    with open(cache_path, 'wb') as f:
-        pickle.dump(simulated_env.DATA_CACHE, f)
+        cache_path = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'data_cache.{self.index_name}.{start_date:%Y%m%d}.{end_date:%Y%m%d}.pkl')
 
+        if os.path.isfile(cache_path):
+            external.load_cache(cache_file=cache_path)
+            return
 
-def bod(market_date: datetime.date, **kwargs):
-    global MARKET_DATE
-    global IS_INITIALIZED
-    global EPOCH_TS
+        for ticker in list(self.index_weights) + [self.index_name]:
+            LOGGER.info(f'initializing cache for {ticker} from {start_date}, {end_date}')
+            simulated_env.preload_daily_cache(ticker=ticker, start_date=start_date, end_date=end_date)
 
-    if market_date not in CALENDAR:
-        return
+        simulated_env.dump_cache(cache_file=cache_path)
 
-    MARKET_DATE = market_date
-    dump_dir = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'TestResult.{TEST_ID_SHORT}')
+    def _update_index_weights(self, market_date: datetime.date):
+        index_weights = simulated_env.query(ticker=self.index_name, market_date=market_date, topic='index_weights')
 
-    # startup task 0: load index weights
-    index_weights = simulated_env.query_index_weights(index_name=INDEX_NAME, market_date=MARKET_DATE)
-    STRATEGY.index_weights = index_weights
+        if DUMMY_WEIGHT:
+            LOGGER.warning('Using dummy index weights for faster debugging.')
+            for _ in list(index_weights.keys())[5:]:
+                index_weights.pop(_)
 
-    # backtest specific action 0: initializing cache
-    if not IS_INITIALIZED:
-        init_cache_daily(tickers=list(index_weights.keys()) + [INDEX_NAME])
+        self.index_weights.clear()
+        self.index_weights.update(index_weights)
+        self.index_weights.normalize()
 
-    # startup task 1: update subscription
-    subscription = set(index_weights.keys())
+        self.synthetic.weights = self.index_weights
+        self.strategy.index_weights = self.index_weights
 
-    # backtest specific action 1: unzip data
-    historical.unzip_batch(market_date=market_date, ticker_list=subscription)
-    STRATEGY.subscription.clear()
-
-    # backtest specific action 2: load factor pool
-    FACTOR_POOL.load(market_date=MARKET_DATE)
-    factor_existed = FACTOR_POOL.monitor_names(market_date=MARKET_DATE)
-    if factor_existed and not OVERRIDE_FACTOR_CACHE:
-        LOGGER.info(f'FACTOR_POOL loaded factors {factor_existed}, using local caches!')
-        factor_tasks = [_ for _ in FACTORS if _ not in factor_existed]
-    else:
-        factor_tasks = FACTORS
-
-    if 'replay' in kwargs:
-        replay = kwargs['replay']
+    def _update_subscription(self, replay: ProgressiveReplay):
+        subscription = set(self.index_weights.keys())
 
         for _ in subscription:
-            if _ not in STRATEGY.subscription:
+            if _ not in self.strategy.subscription:
                 replay.add_subscription(ticker=_, dtype='TradeData')
 
-        for _ in STRATEGY.subscription:
+        for _ in self.strategy.subscription:
             if _ not in subscription:
                 replay.remove_subscription(ticker=_, dtype='TradeData')
 
-    STRATEGY.subscription.update(subscription)
+        self.strategy.subscription.clear()
+        self.strategy.subscription.update(subscription)
 
-    # startup task 2: update monitors
-    # for backtest purpose, the monitors is only registered once
-    STRATEGY.clear()
-    monitors = STRATEGY.register(factors=factor_tasks)
+    @classmethod
+    def _get_test_id(cls):
+        test_id = 1
 
-    if not OVERRIDE_FACTOR_CACHE:
-        factor_dummy_monitor = factor_pool.FactorPoolDummyMonitor()
-        MDS.add_monitor(factor_dummy_monitor)
-        STRATEGY.monitors[factor_dummy_monitor.name] = factor_dummy_monitor
+        while True:
+            dump_dir = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'TestResult.{test_id}')
+            if os.path.isdir(dump_dir):
+                test_id += 1
+            else:
+                break
 
-    # OPTIONAL: task 2.1: update baseline for Monitor.SyntheticIndex
-    monitor: SyntheticIndexMonitor = monitors.get('Monitor.SyntheticIndex')
-    if monitor:
-        last_close_price = helper.load_dict(
-            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'last_close.{MARKET_DATE:%Y%m%d}.json'),
-            json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
+        return test_id
+
+    def _get_strategy(self):
+        strategy = Strategy(
+            index_ticker=self.index_name,
+            index_weights=self.index_weights,
+            mode='sampling'
         )
-        monitor.base_price.clear()
-        monitor.base_price.update(last_close_price)
-        monitor.synthetic_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
 
-    # OPTIONAL: task 2.2: update baseline for Monitor.VolatilityMonitor
-    monitor: VolatilityMonitor = monitors.get('Monitor.Volatility.Daily')
-    if monitor:
-        last_close_price = helper.load_dict(
-            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'last_close.{MARKET_DATE:%Y%m%d}.json'),
-            json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
-        )
-        monitor.base_price.clear()
-        monitor.base_price.update(last_close_price)
-        monitor.synthetic_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
-        daily_volatility = helper.load_dict(
-            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'volatility.daily.{MARKET_DATE:%Y%m%d}.json'),
-            json_dict={_: simulated_env.query_volatility_daily(ticker=_, market_date=MARKET_DATE, window=20) for _ in index_weights}  # in production, delete this line
-        )
-        monitor.daily_volatility.clear()
-        monitor.daily_volatility.update(daily_volatility)
-        monitor.index_volatility = simulated_env.query_volatility_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, window=20)
+        strategy.subscription.update(self.index_weights.keys())
+        strategy.engine.add_handler(on_bod=self.bod)
+        strategy.engine.add_handler(on_eod=self.eod)
+        return strategy
 
-    # OPTIONAL: task 2.3: update baseline for Monitor.SyntheticIndex
-    monitor: SyntheticIndexMonitor = monitors.get('Monitor.Decoder.Index')
-    if monitor:
-        last_close_price = helper.load_dict(
-            file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'last_close.{MARKET_DATE:%Y%m%d}.json'),
-            json_dict={_: simulated_env.query_daily(ticker=_, market_date=MARKET_DATE, key='preclose') for _ in index_weights}  # in production, delete this line
-        )
-        monitor.base_price.clear()
-        monitor.base_price.update(last_close_price)
-        monitor.synthetic_base_price = simulated_env.query_daily(ticker=INDEX_NAME, market_date=MARKET_DATE, key='preclose')
-
-    # startup task 3: initialize decision core
-    if not DUMMY_CORE:
-        if not IS_INITIALIZED:
-            STRATEGY.decision_core = Core(ticker=INDEX_NAME, decode_level=3, data_source=dump_dir)
+    def _sim_match_synthetic(self, timestamp: float, index_price: float):
+        if self.index_name in self.sim_match:
+            sim_match = self.sim_match[self.index_name]
         else:
-            try:
-                # the decision core is not available in backtest env, for the index tick data is not found.
-                STRATEGY.decision_core = STRATEGY.decision_core.load(file_dir=dump_dir, file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json')
-            except Exception as _:
-                # STRATEGY.decision_core = DummyDecisionCore()  # in production mode, just throw the error and stop the program
-                LOGGER.warning(f'{market_date} failed to load decision core! traceback: {traceback.format_exc()}')
+            sim_match = self.sim_match[self.index_name] = SimMatch(ticker=self.index_name)
+            sim_match.register(event_engine=self.event_engine, topic_set=self.topic_set)
 
-    # backtest-specific codes
-    if not IS_INITIALIZED:
-        IS_INITIALIZED = True
+        # simulate 2 index trade data
+        fake_data = TradeData(
+            ticker=self.index_name,
+            side=TransactionSide.LongOpen,
+            trade_volume=1,
+            timestamp=timestamp,
+            trade_price=index_price
+        )
 
-    EPOCH_TS = time.time()
+        MDS.on_market_data(market_data=fake_data)
+        sim_match.__call__(market_data=fake_data)
+
+        fake_data = TradeData(
+            ticker=self.index_name,
+            side=TransactionSide.ShortOpen,
+            trade_volume=1,
+            timestamp=timestamp,
+            trade_price=index_price
+        )
+
+        MDS.on_market_data(market_data=fake_data)
+        sim_match.__call__(market_data=fake_data)
+
+    def initialize_factor(self) -> list[FactorMonitor]:
+        self.factor = [
+            CoherenceAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights,
+                center_mode='median',
+                aligned_interval=True
+            ),
+            TradeCoherenceMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights
+            ),
+            EntropyAdaptiveMonitor(
+                sampling_interval=15,
+                sample_size=20,
+                weights=self.index_weights,
+                ignore_primary=False,
+                pct_change=True,
+                name='Monitor.Entropy.PricePct.Adaptive'
+            ),
+            GiniIndexAdaptiveMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights
+            ),
+            SkewnessIndexAdaptiveMonitor(
+                sampling_interval=3 * 5,
+                sample_size=20,
+                baseline_window=100,
+                weights=self.index_weights,
+                aligned_interval=False
+            ),
+            DivergenceIndexAdaptiveMonitor(
+                weights=self.index_weights,
+                sampling_interval=15,
+                baseline_window=20,
+            )
+        ]
+
+        self.factor_cache = FactorPoolDummyMonitor(factor_pool=self.factor_pool)
+
+        for _ in self.factor:
+            MDS.add_monitor(_)
+            self.strategy.monitors[_.name] = _
+
+        MDS.add_monitor(self.synthetic)
+        self.strategy.monitors[self.synthetic.name] = self.synthetic
+        self.strategy.synthetic = self.synthetic
+
+        if not self.override_cache:
+            MDS.add_monitor(self.factor_cache)
+            self.strategy.monitors[self.factor_cache.name] = self.factor_cache
+
+        return self.factor
+
+    def initialize_cache(self, market_date: datetime.date):
+        if self.override_cache:
+            return
+
+        self.factor_pool.load(market_date=market_date, factor_dir=self.cache_dir)
+        factor_existed = self.factor_pool.factor_names(market_date=market_date)
+
+        for factor in self.factor:
+            factor_names = factor.factor_names(subscription=list(self.strategy.subscription))
+
+            if all([_ in factor_existed for _ in factor_names]):
+                factor.enabled = False
+                LOGGER.info(f'Factor {factor.name} found in the factor cache, and will be disabled.')
+
+    def initialize_baseline(self, market_date: datetime.date):
+        for monitor in self.factor + [self.synthetic]:
+            if isinstance(monitor, SyntheticIndexMonitor):
+                last_close_price = {_: simulated_env.query(ticker=_, market_date=market_date, topic='preclose') for _ in self.index_weights}
+                monitor.base_price.update(last_close_price)
+                monitor.synthetic_base_price = simulated_env.query(ticker=self.index_name, market_date=market_date, topic='preclose')
+            elif isinstance(monitor, VolatilityMonitor):
+                last_close_price = {_: simulated_env.query(ticker=_, market_date=market_date, topic='preclose') for _ in self.index_weights}
+                monitor.base_price.update(last_close_price)
+                monitor.synthetic_base_price = simulated_env.query(ticker=self.index_name, market_date=market_date, topic='preclose')
+                daily_volatility = {_: simulated_env.query(ticker=_, market_date=market_date, topic='volatility') for _ in self.index_weights}
+                monitor.daily_volatility.update(daily_volatility)
+                monitor.index_volatility = simulated_env.query(ticker=self.index_name, market_date=market_date, topic='volatility')
+            elif isinstance(monitor, IndexDecoderMonitor):
+                last_close_price = {_: simulated_env.query(ticker=_, market_date=market_date, topic='preclose') for _ in self.index_weights}
+                monitor.base_price.update(last_close_price)
+                monitor.synthetic_base_price = simulated_env.query(ticker=self.index_name, market_date=market_date, topic='preclose')
+
+    def initialize_decision_core(self, market_date: datetime.date):
+        if self.use_dummy_core:
+            return
+
+        data_lore = LinearDataLore(
+            ticker=self.index_name,
+            alpha=0.05,
+            trade_cost=0.0001,
+            poly_degree=2,
+            pred_length=15 * 60,
+            bootstrap_samples=100,
+            bootstrap_block_size=0.05
+        )
+
+        self.strategy.decision_core = Core(
+            ticker=self.index_name,
+            data_lore=data_lore
+        )
+
+        data_lore.inputs_var.clear()
+        data_lore.inputs_var.extend(self.features)
+
+        try:
+            self.strategy.decision_core = self.strategy.decision_core.load(
+                file_dir=self.dump_dir,
+                file_pattern=r'decision_core\.(\d{4}-\d{2}-\d{2})\.json'
+            )
+        except Exception as _:
+            # STRATEGY.decision_core = DummyDecisionCore()  # in production mode, just throw the error and stop the program
+            LOGGER.warning(f'{market_date} failed to load decision core! traceback: {traceback.format_exc()}')
+
+    def initialize_position_management(self):
+        from AlgoEngine.Strategies import RISK_PROFILE
+
+        RISK_PROFILE.set_rule(ticker=self.index_name, key='max_trade_long', value=20)
+        RISK_PROFILE.set_rule(ticker=self.index_name, key='max_trade_short', value=20)
+        # RISK_PROFILE.set_rule(ticker=self.index_name, key='max_exposure_long', value=100)
+        # RISK_PROFILE.set_rule(ticker=self.index_name, key='max_exposure_short', value=100)
+
+    def update_cache(self, market_date: datetime):
+        if self.override_cache:
+            LOGGER.info(f'Cache {market_date} overridden!')
+            self.factor_pool.batch_update(factors=self.strategy.strategy_metric.factor_value)
+        else:
+            exclude_keys = self.factor_pool.factor_names(market_date=market_date)
+            self.factor_pool.batch_update(factors=self.strategy.strategy_metric.factor_value, exclude_keys=exclude_keys)
+
+            if all([name in exclude_keys for name in pd.DataFrame(self.strategy.strategy_metric.factor_value).T.columns]):
+                return
+
+            LOGGER.info('Cache updated!')
+
+        self.factor_pool.dump(factor_dir=self.cache_dir)
+
+    def update_decision_core(self, market_date: datetime.date):
+        # in production mode, the market_date in kwargs is optional
+        self.strategy.decision_core.calibrate(
+            factor_value=self.strategy.strategy_metric.factor_value,
+            market_date=market_date,
+            trace_back=5,
+            dump_dir=pathlib.Path(self.dump_dir, f'{market_date:%Y-%m-%d}')
+        )
+
+    def dump_result(self, market_date: datetime.date):
+        dump_dir = pathlib.Path(self.dump_dir, f'{market_date:%Y-%m-%d}')
+        os.makedirs(dump_dir, exist_ok=True)
+
+        self.strategy.decision_core.dump(self.dump_dir.joinpath(f'decision_core.{market_date}.json'))
+        self.strategy.strategy_metric.dump(dump_dir.joinpath(f'metrics.{market_date}.csv'))
+        self.strategy.strategy_metric.trade_info.to_csv(dump_dir.joinpath(f'trade.summary.{market_date}.csv'))
+        # self.strategy.strategy_metric.plot_prediction().to_html(dump_dir.joinpath(f'metrics.prediction.{market_date}.html'))
+        # self.strategy.strategy_metric.plot_trades().to_html(dump_dir.joinpath(f'metrics.trades.{market_date}.html'))
+
+    def reset(self):
+        self.factor.clear()
+        self.strategy.mds.clear()
+        self.strategy.clear()
+        self.factor_pool.clear()
+        self.factor_cache.clear()
+
+    def run(self, **kwargs):
+        self._preload_cache()
+
+        replay = ProgressiveReplay(
+            loader=historical.loader,
+            tickers=list(self.index_weights),
+            dtype=['TradeData'],
+            start_date=self.start_date,
+            end_date=self.end_date,
+            calendar=self.calendar,
+            bod=self.bod,
+            eod=self.eod,
+            tick_size=kwargs.get('progress_tick_size', 0.001),
+        )
+
+        start_ts = 0.
+        self.event_engine.start()
+
+        for market_data in replay:  # type: MarketData
+            ticker = market_data.ticker
+
+            if not start_ts:
+                start_ts = time.time()
+
+            if ticker not in self.sim_match:
+                _ = self.sim_match[ticker] = SimMatch(ticker=ticker)
+                _.register(event_engine=self.event_engine, topic_set=self.topic_set)
+
+            if self.strategy.engine.multi_threading:
+                self.engine.lock.acquire()
+                self.event_engine.put(topic=self.topic_set.push(market_data=market_data), market_data=market_data)
+            else:
+                self.engine.mds.on_market_data(market_data=market_data)
+                self.engine.position_tracker.on_market_data(market_data=market_data)
+                self.engine.__call__(market_data=market_data)
+                self.sim_match[ticker](market_data=market_data)
+            self._sim_match_synthetic(timestamp=market_data.timestamp, index_price=self.synthetic.index_price)
+
+        LOGGER.info(f'All done! time_cost: {time.time() - start_ts:,.3}s')
+
+    def bod(self, market_date: datetime.date, replay: ProgressiveReplay, **kwargs) -> None:
+        if market_date not in self.calendar:
+            return
+
+        LOGGER.info(f'Starting {market_date} bod process...')
+        self.market_date = market_date
+
+        # Startup task 0: Update subscription
+        self._update_index_weights(market_date=market_date)
+
+        # Backtest specific Startup action 1: Unzip data
+        historical.unzip_batch(market_date=market_date, ticker_list=self.index_weights.keys())
+
+        # Startup task 2: Update subscription and replay
+        self._update_subscription(replay=replay)
+
+        # Startup task 3: Update caches
+        self.initialize_factor()
+
+        # Backtest specific Startup task 3.1: Update caches
+        self.initialize_cache(market_date=market_date)
+
+        # startup task 4: initialize baseline
+        self.initialize_baseline(market_date=market_date)
+
+        # startup task 5: override decision core
+        self.initialize_decision_core(market_date=market_date)
+
+        # startup task 6: register strategy
+        self.strategy.register()
+
+        # startup task 7: update risk profile
+        self.initialize_position_management()
+
+        # reset timer
+        self.epoch_ts = time.time()
+
+    def eod(self, market_date: datetime.date, **kwargs) -> None:
+        if market_date not in self.calendar:
+            return
+
+        # EoD task 0: dump factor cache
+        self.update_cache(market_date=market_date)
+
+        # EoD task 1: calibrate decision core
+        self.update_decision_core(market_date=market_date)
+
+        # OPTIONAL EoD task 2: dump metrics, to validate factor cache
+        self.dump_result(market_date=market_date)
+
+        # OPTIONAL EoD task 3: clear and reset environment
+        self.reset()
+
+        LOGGER.info(f'Backtest epoch {market_date} complete! Time costs {time.time() - self.epoch_ts}')
 
 
-def eod(market_date: datetime.date = MARKET_DATE, **kwargs):
-    if market_date not in CALENDAR:
-        return
+def main():
+    MDS.init_cn_override()
 
-    dump_dir = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, f'TestResult.{TEST_ID_SHORT}')
+    tester = BackTest(
+        index_name='000016.SH',
+        start_date=datetime.date(2023, 1, 1),
+        end_date=datetime.date(2023, 6, 1)
+    )
 
-    os.makedirs(dump_dir, exist_ok=True)
+    tester.run()
 
-    # EoD task 0: update FACTOR_POOL and serialize factors
-    if OVERRIDE_FACTOR_CACHE:
-        FACTOR_POOL.batch_update(factors=STRATEGY.strategy_metric.factor_value)
-    else:
-        exclude_keys = FACTOR_POOL.factor_names(market_date=MARKET_DATE)
-        FACTOR_POOL.batch_update(factors=STRATEGY.strategy_metric.factor_value, exclude_keys=exclude_keys)
-    FACTOR_POOL.dump()
-
-    # EoD task 1: calibrate decision core
-    cal_report = STRATEGY.decision_core.calibrate(metric=STRATEGY.strategy_metric, market_date=MARKET_DATE)  # in production mode, the market_date in kwargs is optional
-    if cal_report:
-        LOGGER.info(f'calibration report:\n' + '\n'.join([f"{_}: {cal_report[_]}" for _ in cal_report]))
-    STRATEGY.decision_core.dump(dump_dir.joinpath(f'decision_core.{MARKET_DATE}.json'))
-
-    # OPTIONAL EoD task 2: dump metrics, to validate factor cache
-    STRATEGY.strategy_metric.dump(dump_dir.joinpath(f'metric.{MARKET_DATE}.csv'))
-
-    # OPTIONAL EoD task 3: clear and reset environment
-    STRATEGY.clear()
-    FACTOR_POOL.clear()
-
-    LOGGER.info(f'Backtest epoch {market_date} complete! Time costs {time.time() - EPOCH_TS}')
-
-
-STRATEGY.engine.add_handler(on_bod=bod)
-STRATEGY.engine.add_handler(on_eod=eod)
 
 if __name__ == '__main__':
-    STRATEGY.engine.back_test(
-        start_date=START_DATE,
-        end_date=END_DATE,
-        data_loader=historical.loader,
-        mode='sampling'
-    )
+    main()
