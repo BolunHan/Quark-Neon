@@ -12,30 +12,33 @@ from collections import deque
 
 import numpy as np
 import pandas as pd
-from AlgoEngine.Engine import MarketDataMonitor, ProgressiveReplay
+from AlgoEngine.Engine import ProgressiveReplay
 from PyQuantKit import MarketData, BarData
 
-from . import LOGGER, MDS, future, IndexWeight, ALPHA_0001, ALPHA_05, collect_factor
+from . import LOGGER, MDS, IndexWeight, ALPHA_0001, ALPHA_05, collect_factor, FactorMonitor
 from .Correlation import *
 from .Distribution import *
 from .LowPass import *
 from .Misc import SyntheticIndexMonitor
 from .TradeFlow import *
-from ..API import historical
-from ..Backtest import simulated_env, factor_pool
-from ..Base import safe_exit, GlobalStatics
-from ..Calibration.Kernel import poly_kernel
-from ..Calibration.Linear.bootstrap import *
-from ..Calibration.Boosting.xgboost import *
-from ..Calibration.Bagging.RandomForest import *
-from ..Calibration.cross_validation import CrossValidation
-from ..Calibration.dummies import is_cn_market_session, session_dummies
-from ..Misc import helper
 from .decoder import RecursiveDecoder
+from .factor_pool import FACTOR_POOL, FactorPoolDummyMonitor
+from ..API import historical
+from ..Backtest import simulated_env
+from ..Base import safe_exit, GlobalStatics
+from ..Calibration.Boosting.xgboost import *
+from ..Calibration.Linear.bootstrap import *
+from ..Calibration.cross_validation import CrossValidation
+from ..Calibration.dummies import is_market_session
+from ..DataLore.utils import define_inputs, define_prediction
+from ..Misc import helper
+from ..Profile import cn
 
+cn.profile_cn_override()
 LOGGER = LOGGER.getChild('validation')
 DUMMY_WEIGHT = False
 TIME_ZONE = GlobalStatics.TIME_ZONE
+RANGE_BREAK = GlobalStatics.RANGE_BREAK
 
 
 class FactorValidation(object):
@@ -86,21 +89,20 @@ class FactorValidation(object):
 
         # Params for validation
         self.decoder = RecursiveDecoder(level=3)
-        self.pred_target = 'Synthetic.market_price'
+        self.pred_target = 'SyntheticIndex.market_price'
         self.features = ['MACD.Index.Trigger.Synthetic']
 
-        self.factor: MarketDataMonitor | None = None
-        self.synthetic = SyntheticIndexMonitor(index_name='Synthetic', weights=self.index_weights)
+        self.factor: FactorMonitor | None = None
+        self.synthetic = SyntheticIndexMonitor(index_name='SyntheticIndex', weights=self.index_weights)
         self.subscription = set()
         self.replay: ProgressiveReplay | None = None
         self.factor_value: dict[float, dict[str, float]] = {}
         self.metrics = {}
 
         self.model = RidgeRegression(alpha=1.0)  # for ridge regression (build linear baseline)
-        self.coefficients: dict[str, float] = {}
         self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
 
-    def init_factor(self, **kwargs) -> MarketDataMonitor:
+    def init_factor(self, **kwargs) -> FactorMonitor:
         """
         Initializes the factor for validation.
 
@@ -128,22 +130,23 @@ class FactorValidation(object):
         Args:
             market_date (datetime.date): Date for which to update index weights.
         """
-        index_weight = IndexWeight(
+        index_weights = IndexWeight(
             index_name=self.index_name,
             **helper.load_dict(
                 file_path=pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f'index_weights.{self.index_name}.{market_date:%Y%m%d}.json'),
-                json_dict=simulated_env.query_index_weights(index_name=self.index_name, market_date=market_date)
+                json_dict=simulated_env.query(ticker=self.index_name, market_date=market_date, topic='index_weights')
             )
         )
 
         # A lite setting for fast debugging
         if DUMMY_WEIGHT:
-            for _ in list(index_weight.keys())[10:]:
-                index_weight.pop(_)
+            for _ in list(index_weights.keys())[10:]:
+                index_weights.pop(_)
 
         # Step 0: Update index weights
-        self.index_weights.update(index_weight)
+        self.index_weights.update(index_weights)
         self.index_weights.normalize()
+        self.synthetic.weights = self.index_weights
 
     def _update_subscription(self):
         """
@@ -180,6 +183,8 @@ class FactorValidation(object):
         # Startup task 2: Update replay
         self._update_subscription()
 
+        self.init_factor()
+
     def eod(self, market_date: datetime.date, **kwargs) -> None:
         """
         Executes the end-of-day process.
@@ -200,7 +205,6 @@ class FactorValidation(object):
         """
         self.factor.clear()
         MDS.clear()
-        self.init_factor()
 
         self.factor_value.clear()
         self.decoder.clear()
@@ -236,53 +240,16 @@ class FactorValidation(object):
         Args:
             factors (pd.DataFrame): DataFrame containing factors.
         """
-        factors['market_time'] = [datetime.datetime.fromtimestamp(_) for _ in factors.index]
+        factors['market_time'] = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in factors.index]
         factors['bias'] = 1.
 
-        x_matrix = factors.loc[:, list(self.features)]
-
-        invalid_factor: pd.DataFrame = x_matrix.loc[:, x_matrix.nunique() == 1]
-        if not invalid_factor.empty:
-            LOGGER.error(f'Invalid factor {invalid_factor.columns}, add epsilon to avoid multicolinearity')
-            for name in invalid_factor.columns:
-                x_matrix[name] = 1 + np.random.normal(scale=0.1, size=len(x_matrix))
-
-        x_matrix['bias'] = 1.
-
-        for _ in x_matrix.columns:
-            self.coefficients[_] = 0.
-
-        x = x_matrix.to_numpy()
+        x = define_inputs(factor_value=factors, input_vars=self.features, poly_degree=1).to_numpy()
 
         return x
 
     def _define_prediction(self, factors: pd.DataFrame):
-        """
-        Defines the prediction target for regression analysis.
-
-        Args:
-            factors (pd.DataFrame): DataFrame containing factors.
-        """
-        future.fix_prediction_target(
-            factors=factors,
-            key=self.pred_target,
-            session_filter=lambda ts: is_cn_market_session(ts)['is_valid'],
-            inplace=True,
-            pred_length=15 * 60
-        )
-
-        future.wavelet_prediction_target(
-            factors=factors,
-            key=self.pred_target,
-            session_filter=lambda ts: is_cn_market_session(ts)['is_valid'],
-            inplace=True,
-            decoder=self.decoder,
-            decode_level=self.decoder.level
-        )
-
-        y = factors['target_smoothed'].to_numpy()
-        # y = factors['target_actual'].to_numpy()
-        # y = factors['pct_change'].to_numpy()
+        y = define_prediction(factor_value=factors, pred_var='target_smoothed', decoder=self.decoder, key=f'{self.synthetic.name.removeprefix("Monitor.")}.market_price')
+        y = y.to_numpy()
         return y
 
     def _cross_validation(self, x, y, factors: pd.DataFrame):
@@ -304,7 +271,7 @@ class FactorValidation(object):
         y = y[valid_mask]
         x_axis = x_axis[valid_mask]
 
-        self.cv.validate(x=x, y=y)
+        self.cv.cross_validate(x=x, y=y)
         self.cv.x_axis = x_axis
 
     def _plot_cv(self, factors: pd.DataFrame, plot_wavelet: bool = True):
@@ -314,10 +281,10 @@ class FactorValidation(object):
         candlestick_trace = go.Candlestick(
             name='Synthetic',
             x=factors['market_time'],
-            open=factors['Synthetic.open_price'],
-            high=factors['Synthetic.high_price'],
-            low=factors['Synthetic.low_price'],
-            close=factors['Synthetic.close_price'],
+            open=factors[f'{self.synthetic.index_name}.open_price'],
+            high=factors[f'{self.synthetic.index_name}.high_price'],
+            low=factors[f'{self.synthetic.index_name}.low_price'],
+            close=factors[f'{self.synthetic.index_name}.close_price'],
             yaxis='y3'
         )
         fig.add_trace(candlestick_trace)
@@ -336,7 +303,7 @@ class FactorValidation(object):
                 fig.add_trace(trace)
 
         fig.update_xaxes(
-            rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")],
+            rangebreaks=RANGE_BREAK,
         )
 
         fig.update_layout(
@@ -420,15 +387,15 @@ class FactorValidation(object):
             timestamp_index = (timestamp // self.sampling_interval) * self.sampling_interval
 
             if current_bar is not None:
-                entry_log['Synthetic.open_price'] = current_bar.open_price
-                entry_log['Synthetic.close_price'] = current_bar.close_price
-                entry_log['Synthetic.high_price'] = current_bar.high_price
-                entry_log['Synthetic.low_price'] = current_bar.low_price
-                entry_log['Synthetic.notional'] = current_bar.notional
+                entry_log[f'{self.synthetic.index_name}.open_price'] = current_bar.open_price
+                entry_log[f'{self.synthetic.index_name}.close_price'] = current_bar.close_price
+                entry_log[f'{self.synthetic.index_name}.high_price'] = current_bar.high_price
+                entry_log[f'{self.synthetic.index_name}.low_price'] = current_bar.low_price
+                entry_log[f'{self.synthetic.index_name}.notional'] = current_bar.notional
 
             current_bar = BarData(
                 ticker='Synthetic',
-                bar_start_time=datetime.datetime.fromtimestamp(timestamp_index),
+                bar_start_time=datetime.datetime.fromtimestamp(timestamp_index, tz=TIME_ZONE),
                 bar_span=datetime.timedelta(seconds=self.sampling_interval),
                 open_price=synthetic_price,
                 close_price=synthetic_price,
@@ -480,7 +447,7 @@ class FactorValidation(object):
         current_bar: BarData | None = None
 
         for market_data in self.replay:  # type: MarketData
-            if not is_cn_market_session(market_data.timestamp)['is_valid']:
+            if not is_market_session(market_data.timestamp):
                 continue
 
             MDS.on_market_data(market_data=market_data)
@@ -525,6 +492,7 @@ class FactorBatchValidation(FactorValidation):
 
         self.poly_degree = kwargs.get('poly_degree', 2)
         self.override_cache = kwargs.get('override_cache', False)
+        self.cache_dir = None
 
         self.features: list[str] = [
             'Skewness.PricePct.Index.Adaptive.Index',
@@ -544,12 +512,12 @@ class FactorBatchValidation(FactorValidation):
             'TradeFlow.EMA.Index',
             'Aggressiveness.EMA.Index',
         ]
-        self.factor: list[MarketDataMonitor] = []
+        self.factor: list[FactorMonitor] = []
 
-        self.factor_pool = factor_pool.FACTOR_POOL
-        self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
+        self.factor_pool = FACTOR_POOL
+        self.factor_cache = FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
-    def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
+    def init_factor(self, **kwargs) -> list[FactorMonitor]:
         """
         Initializes multiple factors for validation.
 
@@ -632,17 +600,15 @@ class FactorBatchValidation(FactorValidation):
         return self.factor
 
     def init_cache(self, market_date: datetime.date):
-        self.factor_pool.load(market_date=market_date)
+        self.factor_pool.load(market_date=market_date, factor_dir=self.cache_dir)
         factor_existed = self.factor_pool.factor_names(market_date=market_date)
 
         for factor in self.factor:
-            factor_prefix = factor.name.removeprefix('Monitor.')
+            factor_names = factor.factor_names(subscription=list(self.subscription))
 
-            for _ in factor_existed:
-                if factor_prefix in _:
-                    factor.enabled = False
-                    LOGGER.info(f'Factor {factor.name} found in the factor cache, and will be disabled.')
-                    break
+            if all([_ in factor_existed for _ in factor_names]):
+                factor.enabled = False
+                LOGGER.info(f'Factor {factor.name} found in the factor cache, and will be disabled.')
 
     def update_cache(self, market_date: datetime):
         if self.override_cache:
@@ -657,14 +623,16 @@ class FactorBatchValidation(FactorValidation):
 
             LOGGER.info('Cache updated!')
 
-        self.factor_pool.dump()
+        self.factor_pool.dump(factor_dir=self.cache_dir)
 
     def bod(self, market_date: datetime.date, **kwargs) -> None:
 
+        super().bod(market_date=market_date, **kwargs)
+
+        self.init_factor()
+
         if not self.override_cache:
             self.init_cache(market_date=market_date)
-
-        super().bod(market_date=market_date, **kwargs)
 
         # no replay task is needed, remove all tasks
         if not self.override_cache:
@@ -683,7 +651,7 @@ class FactorBatchValidation(FactorValidation):
         super()._collect_factor(timestamp=timestamp, last_update=last_update, entry_log=entry_log)
 
         # collect cached monitors
-        if not self.override_cache:
+        if (not self.override_cache) and timestamp >= last_update + self.sampling_interval:
             factors = collect_factor(monitors=self.factor_cache)
             entry_log.update(factors)
 
@@ -707,10 +675,10 @@ class FactorBatchValidation(FactorValidation):
         candlestick_trace = go.Candlestick(
             name='Synthetic',
             x=factors['market_time'],
-            open=factors['Synthetic.open_price'],
-            high=factors['Synthetic.high_price'],
-            low=factors['Synthetic.low_price'],
-            close=factors['Synthetic.close_price'],
+            open=factors[f'{self.synthetic.index_name}.open_price'],
+            high=factors[f'{self.synthetic.index_name}.high_price'],
+            low=factors[f'{self.synthetic.index_name}.low_price'],
+            close=factors[f'{self.synthetic.index_name}.close_price'],
             showlegend=True,
         )
         fig.add_trace(candlestick_trace, row=1, col=1)
@@ -771,7 +739,7 @@ class FactorBatchValidation(FactorValidation):
             minor_griddash="dot",
             showgrid=True,
             spikethickness=-2,
-            rangebreaks=[dict(bounds=[0, 9.5], pattern="hour"), dict(bounds=[11.5, 13], pattern="hour"), dict(bounds=[15, 24], pattern="hour")],
+            rangebreaks=RANGE_BREAK,
             rangeslider_visible=False
         )
 
@@ -818,7 +786,6 @@ class FactorBatchValidation(FactorValidation):
 
         MDS.clear()
         self.factor.clear()
-        self.init_factor()
 
         self.synthetic.clear()
         self.factor_value.clear()
@@ -833,36 +800,10 @@ class FactorBatchValidation(FactorValidation):
         Args:
             factors (pd.DataFrame): DataFrame containing factors.
         """
-        factors['market_time'] = [datetime.datetime.fromtimestamp(_) for _ in factors.index]
+        factors['market_time'] = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in factors.index]
         factors['bias'] = 1.
 
-        session_dummies(timestamp=factors.index, inplace=factors)
-
-        # default features
-        features = {'Dummies.IsOpening', 'Dummies.IsClosing'}
-        features.update(self.features)
-        feature_original = factors[list(features)]
-        x_matrix = factors.loc[:, list(features)]
-
-        for i in range(1, self.poly_degree):
-            additional_feature = poly_kernel(feature_original, degree=i + 1)
-
-            for _ in additional_feature:
-                x_matrix[_] = additional_feature[_]
-
-        invalid_factor: pd.DataFrame = x_matrix.loc[:, x_matrix.nunique() == 1]
-        if not invalid_factor.empty:
-            LOGGER.error(f'Invalid factor {invalid_factor.columns}, add epsilon to avoid multicolinearity')
-            for name in invalid_factor.columns:
-                x_matrix[name] = 1 + np.random.normal(scale=0.1, size=len(x_matrix))
-
-        x_matrix['bias'] = 1.
-
-        for _ in x_matrix.columns:
-            self.coefficients[_] = 0.
-
-        x = x_matrix.to_numpy()
-
+        x = define_inputs(factor_value=factors, input_vars=self.features, poly_degree=self.poly_degree).to_numpy()
         return x
 
     def _define_prediction(self, factors: pd.DataFrame):
@@ -939,21 +880,21 @@ class InterTemporalValidation(FactorBatchValidation):
         # if isinstance(self.model, RidgeRegression):
         #     self.model.optimal_alpha(x=x_train, y=y_train)
 
-        self.cv.validate_out_sample(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
+        self.cv.validate(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
         self.cv.x_axis = x_axis
 
 
 class HybridValidation(InterTemporalValidation):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.model = RandomForest()
-        # self.model = XGBoost()
-        self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
-        self.poly_degree = kwargs.get('poly_degree', 1)
+        # self.model = RandomForest()
+        self.model = XGBoost()
+        self.cv.model = self.model
+        self.poly_degree = kwargs.get('poly_degree', 2)
 
-    def _define_prediction(self, factors: pd.DataFrame):
-        y = FactorValidation._define_prediction(self, factors=factors)
-        return y
+    # def _define_prediction(self, factors: pd.DataFrame):
+    #     y = FactorValidation._define_prediction(self, factors=factors)
+    #     return y
 
 
 class FactorValidatorExperiment(InterTemporalValidation):
@@ -1003,7 +944,7 @@ class FactorValidatorExperiment(InterTemporalValidation):
 
         self.validation_id = kwargs.get('validation_id', f'{validation_id}-val')
 
-    def init_factor(self, **kwargs) -> list[MarketDataMonitor]:
+    def init_factor(self, **kwargs) -> list[FactorMonitor]:
         """
         Initializes multiple factors for validation.
 
@@ -1071,7 +1012,7 @@ class FactorValidatorExperiment(InterTemporalValidation):
             # )
         ]
 
-        self.factor_cache = factor_pool.FactorPoolDummyMonitor(factor_pool=self.factor_pool)
+        self.factor_cache = FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
         for _ in self.factor:
             MDS.add_monitor(_)
@@ -1082,19 +1023,6 @@ class FactorValidatorExperiment(InterTemporalValidation):
             MDS.add_monitor(self.factor_cache)
 
         return self.factor
-
-    def init_cache(self, market_date: datetime.date):
-        self.factor_pool.load(market_date=market_date, factor_dir=self.cache_dir)
-        factor_existed = self.factor_pool.factor_names(market_date=market_date)
-
-        for factor in self.factor:
-            factor_prefix = factor.name.removeprefix('Monitor.')
-
-            for _ in factor_existed:
-                if factor_prefix in _:
-                    factor.enabled = False
-                    LOGGER.info(f'Factor {factor.name} found in the factor cache, and will be disabled.')
-                    break
 
     def update_cache(self, market_date: datetime):
         self.factor_pool.batch_update(factors=self.factor_value)
@@ -1108,8 +1036,8 @@ def main():
 
     # validator = FactorValidation()
     # validator = FactorBatchValidation()
-    # validator = InterTemporalValidation()
-    validator = HybridValidation()
+    validator = InterTemporalValidation()
+    # validator = HybridValidation()
     # validator = FactorValidatorExperiment(override_cache=True)
     validator.run()
     safe_exit()
