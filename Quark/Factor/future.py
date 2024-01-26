@@ -11,15 +11,16 @@ import datetime
 import numpy as np
 import pandas as pd
 
-from . import LOGGER, TIME_ZONE
 from .decoder import RecursiveDecoder
+from ..Base import GlobalStatics
 
-LOGGER = LOGGER.getChild('future')
+TIME_ZONE = GlobalStatics.TIME_ZONE
+__all__ = ['fix_prediction_target', 'wavelet_prediction_target']
 
 
 def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 'SyntheticIndex.Price', inplace: bool = True, session_filter=None) -> pd.DataFrame:
     """
-    Given a factor dataframe (StrategyMetric.info), return the prediction target, with fixed prediction length.
+    Given a factor dataframe (StrategyMetrics.info), return the prediction target, with fixed prediction length.
 
     This function does not take the market (session) breaks into account, as intended.
     And may return a series with Nan values.
