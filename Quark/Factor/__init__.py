@@ -125,7 +125,7 @@ def collect_factor(monitors: dict[str, FactorMonitor] | list[FactorMonitor] | Fa
     elif isinstance(monitors, FactorMonitor):
         monitors = [monitors]
 
-    for monitor in monitors:  # type: MarketDataMonitor
+    for monitor in monitors:
         if monitor.is_ready and monitor.enabled:
             factor_value = monitor.value
             name = monitor.name.removeprefix('Monitor.')
@@ -145,11 +145,13 @@ def collect_factor(monitors: dict[str, FactorMonitor] | list[FactorMonitor] | Fa
 
 
 __all__ = [
-    'LOGGER', 'TIME_ZONE', 'DEBUG_MODE', 'register_monitor', 'IndexWeight', 'Synthetic', 'EMA', 'register_monitor', 'collect_factor',
+    'FactorMonitor', 'LOGGER', 'DEBUG_MODE', 'register_monitor', 'IndexWeight', 'Synthetic', 'EMA', 'register_monitor', 'collect_factor',
     # from .Correlation module
-    'CoherenceMonitor', 'CoherenceEMAMonitor', 'TradeCoherenceMonitor', 'EntropyMonitor', 'EntropyEMAMonitor',
+    'CoherenceMonitor', 'CoherenceAdaptiveMonitor', 'CoherenceEMAMonitor', 'TradeCoherenceMonitor', 'EntropyMonitor', 'EntropyAdaptiveMonitor', 'EntropyEMAMonitor',
     # from Decoder module
     'DecoderMonitor', 'IndexDecoderMonitor', 'VolatilityMonitor',
+    # from Distribution module
+    'SkewnessMonitor', 'SkewnessIndexMonitor', 'SkewnessAdaptiveMonitor', 'SkewnessIndexAdaptiveMonitor', 'GiniMonitor', 'GiniIndexMonitor', 'GiniAdaptiveMonitor', 'GiniIndexAdaptiveMonitor',
     # from LowPass module
     'TradeClusteringMonitor', 'TradeClusteringAdaptiveMonitor', 'TradeClusteringIndexAdaptiveMonitor', 'DivergenceMonitor', 'DivergenceAdaptiveMonitor', 'DivergenceIndexAdaptiveMonitor',
     # from Misc module
