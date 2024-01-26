@@ -328,6 +328,9 @@ class TradeCoherenceMonitor(CoherenceMonitor):
             return np.nan
 
         for ticker in valid_ticker:
+            if self.weights is not None and ticker not in self.weights:
+                continue
+
             price_vector = np.array(list(historical_price[ticker].values())[-vector_length:])
             volume_vector = np.array(list(volume[ticker].values())[-vector_length:])
             volume_net_vector = np.array(list(volume_net[ticker].values())[-vector_length:])
