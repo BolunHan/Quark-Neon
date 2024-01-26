@@ -14,7 +14,11 @@ LOGGER = LOGGER.getChild('DecisionCore')
 class DecisionCore(object, metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
-    def signal(self, position: PositionManagementService, factor: dict[str, float], timestamp: float) -> int:
+    def predict(self, factor_value: dict[str, float], timestamp: float) -> dict[str, float]:
+        ...
+
+    @abc.abstractmethod
+    def signal(self, position: PositionManagementService, prediction: dict[str, float], timestamp: float) -> int:
         ...
 
     @abc.abstractmethod
@@ -84,7 +88,10 @@ class DecisionCore(object, metaclass=abc.ABCMeta):
 
 class DummyDecisionCore(DecisionCore):
 
-    def signal(self, position: PositionManagementService, factor: dict[str, float], timestamp: float) -> int:
+    def predict(self, factor_value: dict[str, float], timestamp: float) -> dict[str, float]:
+        return {}
+
+    def signal(self, position: PositionManagementService, prediction: dict[str, float], timestamp: float) -> int:
         return 0
 
     def trade_volume(self, position: PositionManagementService, cash: float, margin: float, timestamp: float, signal: int) -> float:
@@ -111,4 +118,6 @@ class DummyDecisionCore(DecisionCore):
         return True
 
 
-__all__ = ['DecisionCore', 'DummyDecisionCore', 'LOGGER']
+from .decision_core import MajorityDecisionCore
+
+__all__ = ['DecisionCore', 'DummyDecisionCore', 'MajorityDecisionCore']
