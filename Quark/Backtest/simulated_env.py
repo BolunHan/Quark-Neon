@@ -1,16 +1,17 @@
 import datetime
-import functools
 import pathlib
+import pickle
 import traceback
 
 import baostock as bs
+import exchange_calendars
 import numpy as np
 import pandas as pd
-import exchange_calendars
+
+from ..API.external import ExternalCache, CACHE
 from ..Base import GlobalStatics
 
 BAO_STOCK = None
-DATA_CACHE = {}
 
 _DAILY_FIELDS = "date,code,open,high,low,close,preclose,volume,amount"
 _DAILY_MAPPING = {_DAILY_FIELDS.split(',')[_]: _ for _ in range(len(_DAILY_FIELDS.split(',')))}
@@ -45,33 +46,18 @@ class Login(object):
         return wrapper
 
 
-class Cache(object):
+class SimCache(ExternalCache):
     def __init__(self, topic: str, overwrite=False):
-        self.topic = topic
+        super().__init__(topic=topic)
         self.overwrite = overwrite
 
-    def __call__(self, function: callable):
-        if self.topic == 'Daily':
-            return functools.partial(self._daily_wrapper, f=function)
-        else:
-            return function
-
-    def _daily_wrapper(self, f, **kwargs):
-        ticker = kwargs['ticker']
-        market_date = kwargs['market_date']
-        key = f'{ticker}.{market_date:%Y-%m-%d}'
-
-        if self.topic in DATA_CACHE:
-            cache = DATA_CACHE[self.topic]
-        else:
-            cache = DATA_CACHE[self.topic] = {}
-
-        if key not in cache or self.overwrite:
+    def cache_wrapper(self, f, cache_key: str, **kwargs):
+        if cache_key not in self.cache or self.overwrite:
             _ = f(**kwargs)
-            cache[key] = _
+            self.cache[cache_key] = _
             return _
 
-        return cache[key]
+        return self.cache[cache_key]
 
 
 def trade_calendar(start_date: datetime.date, end_date: datetime.date, market='SSE') -> list[datetime.date]:
@@ -80,49 +66,25 @@ def trade_calendar(start_date: datetime.date, end_date: datetime.date, market='S
     return sorted([_.date() for _ in sessions])
 
 
-def query_index_weights(index_name: str, market_date: datetime.date):
-    df = pd.read_csv(pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f"index_weights.{index_name.split('.')[0]}.csv"))
-    weights = {}
+def query(ticker: str, market_date: datetime.date, topic: str) -> float | dict[str, float]:
+    if topic in _DAILY_MAPPING:
+        daily = _query_daily(ticker=ticker, market_date=market_date)
 
-    for _, row in df.iterrows():
-        weights[row['ticker']] = float(row['weight'])
-
-    return weights
-
-
-def query_volatility_daily(ticker: str, market_date: datetime.date, window: int = 20) -> float:
-    max_trade_day_before = int(np.ceil(window / 5) * 7 + 7)
-    start_date = market_date - datetime.timedelta(days=max_trade_day_before)
-    end_date = market_date
-
-    calendar = trade_calendar(start_date=start_date, end_date=end_date)[-window:]
-
-    pct_change_list = []
-
-    for _ in calendar:
-        pre_close = query_daily(ticker=ticker, market_date=_, key='preclose')
-        close = query_daily(ticker=ticker, market_date=_, key='close')
-        pct_change = close / pre_close - 1
-        pct_change_list.append(pct_change)
-
-    volatility = float(np.std(pct_change_list))
-    return volatility
+        if daily is None:
+            return np.nan
+        else:
+            return float(daily[_DAILY_MAPPING[topic]])
+    elif topic == 'index_weights':
+        return _query_index_weights(index_name=ticker, market_date=market_date)
+    elif topic == 'volatility':
+        return _query_volatility_daily(ticker=ticker, market_date=market_date, window=20)
 
 
-def query_daily(ticker: str, market_date: datetime.date, key: str = 'close') -> float:
-    daily = _query_daily(ticker=ticker, market_date=market_date)
-
-    if daily is None:
-        return np.nan
-    else:
-        return float(daily[_DAILY_MAPPING[key]])
-
-
-@Cache(topic='Daily')
+@SimCache(topic='Daily')
 @Login(login_type='bs')
 def _query_daily(**kwargs) -> list[str] | None:
-    ticker: str = kwargs.pop('ticker')
-    market_date: datetime.date = kwargs.pop('market_date')
+    ticker: str = kwargs.get('ticker')
+    market_date: datetime.date = kwargs.get('market_date')
 
     symbol, market = ticker.split('.')
     rs = bs.query_history_k_data_plus(
@@ -144,11 +106,50 @@ def _query_daily(**kwargs) -> list[str] | None:
         return data_list[0]
 
 
+@SimCache(topic='IndexWeights')
+def _query_index_weights(**kwargs):
+    index_name: str = kwargs.get('index_name')
+    market_date: datetime.date = kwargs.get('market_date')
+
+    df = pd.read_csv(pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', f"index_weights.{index_name.split('.')[0]}.csv"))
+    weights = {}
+
+    for _, row in df.iterrows():
+        weights[row['ticker']] = float(row['weight'])
+
+    return weights
+
+
+@SimCache(topic='Volatility')
+def _query_volatility_daily(**kwargs) -> float:
+    ticker: str = kwargs.get('ticker')
+    market_date: datetime.date = kwargs.get('market_date')
+    window: int = kwargs.get('window', 20)
+
+    max_trade_day_before = int(np.ceil(window / 5) * 7 + 7)
+    start_date = market_date - datetime.timedelta(days=max_trade_day_before)
+    end_date = market_date
+
+    calendar = trade_calendar(start_date=start_date, end_date=end_date)[-window:]
+
+    pct_change_list = []
+
+    for _ in calendar:
+        pre_close = query(ticker=ticker, market_date=_, topic='preclose')
+        close = query(ticker=ticker, market_date=_, topic='close')
+        pct_change = close / pre_close - 1
+        pct_change_list.append(pct_change)
+
+    volatility = float(np.std(pct_change_list))
+    return volatility
+
+
+@Login(login_type='bs')
 def preload_daily_cache(ticker: str, start_date: datetime.date, end_date: datetime.date):
-    if 'Daily' in DATA_CACHE:
-        cache = DATA_CACHE['Daily']
+    if 'Daily' in CACHE:
+        cache = CACHE['Daily']
     else:
-        cache = DATA_CACHE['Daily'] = {}
+        cache = CACHE['Daily'] = {}
 
     symbol, market = ticker.split('.')
     rs = bs.query_history_k_data_plus(
@@ -164,3 +165,19 @@ def preload_daily_cache(ticker: str, start_date: datetime.date, end_date: dateti
         _ = rs.get_row_data()
         key = f'{ticker}.{_[0]}'
         cache[key] = _
+
+
+def dump_cache(market_date: datetime.date = None, cache_file: str | pathlib.Path = None, cache_dir: str | pathlib.Path = None):
+    if cache_dir is None:
+        cache_dir = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res')
+
+    if cache_file is None and market_date is None:
+        cache_path = pathlib.Path(cache_dir, f'data_cache.pkl')
+    elif cache_file is None:
+        cache_path = pathlib.Path(cache_dir, f'data_cache.{market_date:%Y%m%d}.pkl')
+    else:
+        # cache_path = pathlib.Path(cache_dir, pathlib.Path(cache_file).name)
+        cache_path = cache_file
+
+    with open(cache_path, 'wb') as f:
+        pickle.dump(CACHE, f)
