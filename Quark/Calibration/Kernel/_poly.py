@@ -36,7 +36,7 @@ def poly_features(
     Returns:
     dict[str, np.ndarray | int | float]: Dictionary of generated polynomial features.
     """
-    expression = data.keys()
+    expression = list(data.keys())
 
     for _ in expression:
         if ' * ' in _:
