@@ -88,6 +88,7 @@ class _GlobalStatics(object):
         self.SHARE = 'SHARE'
         self.TOPIC = _TopicSet
         self.TIME_ZONE = None  # set to pytz.timezone('Asia/Shanghai') to enable timezone awareness
+        self.RANGE_BREAK = []
         self.DEBUG_MODE = 0
 
         if 'QUARK_CWD' in os.environ:
