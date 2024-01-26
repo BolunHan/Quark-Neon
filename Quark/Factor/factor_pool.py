@@ -8,10 +8,9 @@ import pathlib
 import re
 from typing import Iterable
 
-from AlgoEngine.Engine import MarketDataMonitor, MDS
 from PyQuantKit import MarketData
 
-from . import LOGGER
+from . import LOGGER, FactorMonitor
 from ..Base import GlobalStatics, CONFIG
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
@@ -19,20 +18,6 @@ LOGGER = LOGGER.getChild('FactorPool')
 
 
 class FactorPool(object):
-    FACTOR_MAPPING = {
-        'Entropy.Price': 'Monitor.Entropy.Price',
-        'Entropy.Price.EMA': 'Monitor.Entropy.Price.EMA',
-        'Coherence.Volume': 'Monitor.Coherence.Volume',
-        'Coherence.Price.EMA.up': 'Monitor.Coherence.Price.EMA',
-        'Coherence.Price.EMA.down': 'Monitor.Coherence.Price.EMA',
-        'Coherence.Price.EMA.ratio': 'Monitor.Coherence.Price.EMA',
-        'TA.MACD.Index': 'Monitor.TA.MACD',
-        'MACD.Index.Trigger.Synthetic': 'Monitor.MACD.Trigger',
-        'TradeFlow.EMA.Index': 'Monitor.TradeFlow.EMA',
-        'Aggressiveness.Net': 'Monitor.Aggressiveness',
-        'Aggressiveness.EMA.Index': 'Monitor.Aggressiveness.EMA',
-        'Volatility.Daily.Index': 'Monitor.Volatility.Daily'
-    }
 
     def __init__(self, **kwargs):
         self.factor_dir = kwargs.get('factor_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'Factors'))
@@ -44,7 +29,7 @@ class FactorPool(object):
         """
         update a single value of factor pool.
         """
-        market_time = datetime.datetime.fromtimestamp(timestamp, tz=GlobalStatics.TIME_ZONE)
+        market_time = datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE)
         market_date = market_time.date()
 
         storage = self.storage.get(market_date, {})
@@ -68,7 +53,7 @@ class FactorPool(object):
             timestamp = (timestamp // self.log_interval) * self.log_interval
 
             if market_date is None:
-                market_time = datetime.datetime.fromtimestamp(timestamp, tz=GlobalStatics.TIME_ZONE)
+                market_time = datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE)
                 market_date = market_time.date()
 
                 if market_date not in self.storage:
@@ -218,18 +203,8 @@ class FactorPool(object):
         column_names = set(sorted(column_names))
         return column_names
 
-    def monitor_names(self, market_date: datetime.date) -> set[str]:
-        factor_name = self.factor_names(market_date=market_date)
-        monitor_name = set()
 
-        for _ in factor_name:
-            if _ in self.FACTOR_MAPPING:
-                monitor_name.add(self.FACTOR_MAPPING[_])
-
-        return monitor_name
-
-
-class FactorPoolDummyMonitor(MarketDataMonitor):
+class FactorPoolDummyMonitor(FactorMonitor):
     """
     query factor value from local storage, by given timestamp
 
@@ -237,7 +212,7 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
     """
 
     def __init__(self, factor_pool: FactorPool = None):
-        super().__init__(name='Monitor.FactorPool.Dummy', mds=MDS)
+        super().__init__(name='Monitor.FactorPool.Dummy')
 
         self.factor_pool = FACTOR_POOL if factor_pool is None else factor_pool
         self._is_ready = True
@@ -259,6 +234,11 @@ class FactorPoolDummyMonitor(MarketDataMonitor):
 
         if self.factor_pool is not None:
             self.factor_pool.clear()
+
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        market_date = datetime.datetime.fromtimestamp(self.timestamp, tz=TIME_ZONE).date()
+        # factor_storage = self.factor_pool.storage.get(market_date)
+        return list(self.factor_pool.factor_names(market_date=market_date))
 
     @property
     def value(self) -> dict[str, float]:
