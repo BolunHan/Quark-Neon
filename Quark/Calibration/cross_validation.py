@@ -6,9 +6,12 @@ import numpy as np
 import pandas as pd
 
 from . import Regression, LOGGER
-from .kelly import kelly_bootstrap
 from .Boosting import Boosting
 from .Linear import Bootstrap
+from .kelly import kelly_bootstrap
+from ..Base import GlobalStatics
+
+RANGE_BREAK = GlobalStatics.RANGE_BREAK
 
 
 class Cache(object):
@@ -585,7 +588,7 @@ class CrossValidation(object):
 
         return y_pred, prediction_interval, resampled_deviation
 
-    def validate(self, x: np.ndarray, y: np.ndarray):
+    def cross_validate(self, x: np.ndarray, y: np.ndarray):
         """
         Perform cross-validation and store the results in the metrics attribute.
 
@@ -633,8 +636,9 @@ class CrossValidation(object):
         self.prediction_interval = fold_metrics['prediction_interval']
         self.resampled_deviation = fold_metrics['resampled_deviation']
 
-    def validate_out_sample(self, x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray):
-        self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
+    def validate(self, x_train: np.ndarray, y_train: np.ndarray, x_val: np.ndarray, y_val: np.ndarray, skip_fitting: bool = False):
+        if not skip_fitting:
+            self.model.fit(x=x_train, y=y_train, **self.fit_kwargs)
 
         # Predict on the validation data
         y_pred, prediction_interval, resampled_deviation = self._predict(x_val)
@@ -752,6 +756,10 @@ class CrossValidation(object):
                 zeroline=False,  # Hide zero line for y3 axis
                 showticklabels=False  # Hide tick labels for y3 axis
             )
+        )
+
+        fig.update_xaxes(
+            rangebreaks=RANGE_BREAK,
         )
 
         return fig

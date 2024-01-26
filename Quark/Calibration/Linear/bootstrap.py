@@ -445,7 +445,7 @@ class RidgeRegression(LinearRegression):
         for i in range(steps + 1):
             alpha = start_alpha + i * (stop_alpha - start_alpha) / steps
             self.alpha = alpha
-            cv.validate(x=x, y=y)
+            cv.cross_validate(x=x, y=y)
 
             metrics = Metrics(
                 model=self,
