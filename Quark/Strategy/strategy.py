@@ -2,14 +2,13 @@ import datetime
 import enum
 from types import SimpleNamespace
 
-from AlgoEngine.Engine import MarketDataMonitor
-from PyQuantKit import MarketData, TransactionSide, TradeInstruction, OrderState
+from PyQuantKit import MarketData, TransactionSide, TradeInstruction, TradeReport, OrderState
 
 from . import STRATEGY_ENGINE
-from .metric import StrategyMetric
+from .metric import StrategyMetrics
 from ..Base import CONFIG
 from ..DecisionCore import DummyDecisionCore
-from ..Factor import IndexWeight
+from ..Factor import IndexWeight, FactorMonitor, collect_factor
 
 
 class StrategyStatus(enum.Enum):
@@ -26,21 +25,23 @@ class Strategy(object):
             index_ticker: str = "000016.SH",
             index_weights: dict[str, float] = None,
             strategy_engine=None,
-            metric: StrategyMetric = None,
+            metric: StrategyMetrics = None,
             **kwargs
     ):
         self.index_ticker = index_ticker
         self.index_weights = IndexWeight(index_name=self.index_ticker, **index_weights)
         self.engine = strategy_engine if strategy_engine is not None else STRATEGY_ENGINE
         self.position_tracker = self.engine.position_tracker
-        self.strategy_metric = metric if metric is not None else StrategyMetric(sample_interval=1)
+        self.strategy_metric = metric if metric is not None else StrategyMetrics(sampling_interval=10)
         self.mds = self.engine.mds
-        self.monitors: dict[str, MarketDataMonitor] = {}
+        self.monitors: dict[str, FactorMonitor] = {}
+        self.synthetic = None
         self.mode = kwargs.pop('mode', 'production')
 
         self.status = StrategyStatus.idle
         self.subscription = self.engine.subscription
         self.eod_status = {'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.}
+
         # Using dummy core as default, no trading action will be triggered. To override this, a proper BoD function is needed.
         # This behavior is intentional, so that accidents might be avoided if strategy is not properly initialized.
         # Signals still can be collected with a dummy core, which is useful in backtest mode.
@@ -57,15 +58,16 @@ class Strategy(object):
         return ticker
 
     def register(self, **kwargs):
-        from ..Factor import register_monitor
-        self.engine.multi_threading = False
-        self.monitors.update(register_monitor(index_name=self.index_ticker, index_weights=self.index_weights, factors=kwargs.get('factors')))
+        self.engine.multi_threading = kwargs.get('multi_threading', False)
+        self.monitors.update(kwargs.get('factors', {}))
 
         # if 'Monitor.Decoder.Index' in self.monitors:
         #     self.monitors['Monitor.Decoder.Index'].register_callback(self.strategy_metric.log_wavelet)
 
         self.engine.add_handler_safe(on_market_data=self._on_market_data)
         self.engine.add_handler_safe(on_order=self._on_order)
+        self.engine.add_handler_safe(on_report=self._on_trade)
+        self.engine.register()
         self.status = StrategyStatus.working
         return self.monitors
 
@@ -112,17 +114,10 @@ class Strategy(object):
 
     def _on_market_data(self, market_data: MarketData, **kwargs):
         market_time = market_data.market_time
+        ticker = market_data.ticker
         timestamp = market_data.timestamp
 
-        if self.mode == 'sampling':
-            if self._last_update_ts + self.profile.sampling_interval > timestamp:
-                return
-            self._last_update_ts = (timestamp // self.profile.sampling_interval) * self.profile.sampling_interval
-
-        # market_price = market_data.market_price
-        # ticker = market_data.ticker
-
-        # working condition 0: in working status
+        # working condition 1: in working status
         if self.status == StrategyStatus.idle or self.status == StrategyStatus.closed or self.status == StrategyStatus.error:
             return
         elif self.status == StrategyStatus.closing:
@@ -142,15 +137,23 @@ class Strategy(object):
             return
 
         # Optional signal condition 3: only subscribed ticker
-        # if ticker not in self.index_weights:
-        #     return
+        if ticker not in self.index_weights:
+            return
 
-        # all conditions passed, checking signal
-        monitor_value = self.strategy_metric.collect_factors(monitors=self.monitors, timestamp=timestamp)
-        signal = self.decision_core.signal(position=self.position_tracker, factor=monitor_value, timestamp=timestamp)
-        self.strategy_metric.collect_signal(signal=signal, timestamp=timestamp)
+        # all conditions passed, checking prediction and signal
+        synthetic_price = self.synthetic.index_price
+        self.strategy_metric.collect_synthetic_price(synthetic_price=synthetic_price, timestamp=timestamp)
+        # sampling override: in production mode or in sampling mode after a giving sampling_interval
+        if self.mode == 'sampling' and self._last_update_ts + self.profile.sampling_interval > timestamp:
+            return
+        factor_value = collect_factor(monitors=self.monitors)
+        self.strategy_metric.collect_factors(factor_value=factor_value, timestamp=timestamp)
+        prediction = self.decision_core.predict(factor_value=factor_value, timestamp=timestamp)
+        self.strategy_metric.on_prediction(prediction=prediction, timestamp=timestamp)
+        signal = 0 if factor_value is None else self.decision_core.signal(position=self.position_tracker, prediction=prediction, timestamp=timestamp)
+        self.strategy_metric.on_signal(signal=signal, timestamp=timestamp)
 
-        # long action
+        # trade condition 0: signal long action
         if signal > 0:
             self.engine.open_pos(
                 ticker=self.get_underlying(ticker=self.index_ticker, side=1),
@@ -163,7 +166,7 @@ class Strategy(object):
                 ),
                 side=TransactionSide.Buy_to_Long
             )
-        # short action
+        # trade condition 0: signal short action
         elif signal < 0:
             self.engine.open_pos(
                 ticker=self.get_underlying(ticker=self.index_ticker, side=1),
@@ -177,13 +180,22 @@ class Strategy(object):
                 side=TransactionSide.Sell_to_Short
             )
 
+        self._last_update_ts = (timestamp // self.profile.sampling_interval) * self.profile.sampling_interval
+
+
     def _on_order(self, order: TradeInstruction, **kwargs):
         if order.order_state == OrderState.Rejected:
             self.status = StrategyStatus.error
 
+        self.strategy_metric.on_order(order=order)
+
+    def _on_trade(self, report: TradeReport, **kwargs):
+        self.strategy_metric.on_trade(report=report)
+
     def clear(self):
         self.engine.remove_handler_safe(on_market_data=self._on_market_data)
         self.engine.remove_handler_safe(on_order=self._on_order)
+        self.engine.remove_handler_safe(on_report=self._on_trade)
 
         self.position_tracker.clear()
         self.strategy_metric.clear()
