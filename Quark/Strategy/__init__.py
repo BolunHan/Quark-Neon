@@ -12,7 +12,7 @@ __all__ = [
     # Basic
     'LOGGER', 'STRATEGY_ENGINE', 'MDS',
     # names from .metric
-    'StrategyMetric',
+    'StrategyMetrics',
     # names from .strategy
     'StrategyStatus', 'Strategy',
 ]
