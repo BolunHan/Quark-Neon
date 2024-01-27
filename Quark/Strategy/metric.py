@@ -106,9 +106,9 @@ class StrategyMetrics(object):
         from plotly.subplots import make_subplots
 
         prediction_value = pd.DataFrame(self.prediction_value)
-        prediction_targets = ['SyntheticIndex'] + [pred_var for pred_var in prediction_value.index if not (pred_var.endswith('.lower_bound') or pred_var.endswith('.upper_bound') or pred_var.endswith('.kelly'))]
+        prediction_targets = [pred_var for pred_var in prediction_value.index if not (pred_var.endswith('.lower_bound') or pred_var.endswith('.upper_bound') or pred_var.endswith('.kelly'))]
         n = len(prediction_targets)
-        titles = [f'StrategyMetrics: Pred.{pred_var}' for pred_var in prediction_targets]
+        titles = ['SyntheticIndex'] + [f'StrategyMetrics: Pred.{pred_var}' for pred_var in prediction_targets]
         fig = make_subplots(
             rows=n + 1,
             cols=1,
