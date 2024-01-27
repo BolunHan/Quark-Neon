@@ -1,4 +1,5 @@
 import abc
+import json
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,10 @@ class DataLore(object, metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def calibrate(self, factor_value: pd.DataFrame | list[pd.DataFrame], **kwargs):
+        ...
+
+    @abc.abstractmethod
+    def validate(self, factor_value: pd.DataFrame, **kwargs):
         ...
 
     @abc.abstractmethod
@@ -32,7 +37,14 @@ class DataLore(object, metaclass=abc.ABCMeta):
 
     @classmethod
     def from_json(cls, json_str: str | bytes | dict):
-        type_str = json_str['type']
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        type_str = json_dict['type']
 
         if type_str == 'LinearDataLore':
             from .data_lore import LinearDataLore

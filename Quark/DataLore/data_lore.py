@@ -1,7 +1,5 @@
 import datetime
 import json
-import os
-import pathlib
 import time
 
 import numpy as np
@@ -11,14 +9,13 @@ from . import LOGGER, DataLore
 from .utils import define_inputs, define_prediction
 from ..Base import GlobalStatics
 from ..Calibration import Regression
-from ..Calibration.Linear.bootstrap import LinearRegression
+from ..Calibration.Kernel import SigmoidTransformer, BinaryTransformer
+from ..Calibration.Linear.bootstrap import RidgeRegression, RidgeLogRegression, RidgeLogisticRegression
 from ..Calibration.cross_validation import CrossValidation
-from ..Factor.decoder import RecursiveDecoder
 from ..Calibration.kelly import kelly_bootstrap
+from ..Factor.decoder import RecursiveDecoder
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
-RANGE_BREAK = GlobalStatics.RANGE_BREAK
-
 __all__ = ['LinearDataLore']
 
 
@@ -33,6 +30,7 @@ class LinearDataLore(DataLore):
         self.ticker = ticker
         self.alpha = alpha
         self.trade_cost = trade_cost
+        self.decode_level = kwargs.get('decode_level', 3)
         self.poly_degree = kwargs.get('poly_degree', 2)
         self.pred_length = kwargs.get('pred_length', 15 * 60)
         self.bootstrap_samples = kwargs.get('bootstrap_samples', 100)
@@ -61,12 +59,47 @@ class LinearDataLore(DataLore):
                          'state']
 
         self.model: dict[str, Regression] = {}
+        self.decoder = RecursiveDecoder(level=self.decode_level)
+        self.cv = {}
 
-    def _init_model(self, pred_var: str):
-        model = LinearRegression(
-            bootstrap_samples=self.bootstrap_samples,
-            bootstrap_block_size=self.bootstrap_samples
-        )
+    def _init_model(self, pred_var: str, y: np.ndarray = None):
+        if pred_var in ['up_actual', 'up_smoothed']:
+            if y is None:
+                upper_bound = 0.02
+            else:
+                upper_bound = 2 * np.nanmean(y)
+
+            model = RidgeLogRegression(
+                alpha=0.2,
+                transformer=SigmoidTransformer(lower_bound=0., upper_bound=upper_bound),
+                bootstrap_samples=self.bootstrap_samples,
+                bootstrap_block_size=self.bootstrap_samples
+            )
+        elif pred_var in ['down_actual', 'down_smoothed']:
+            if y is None:
+                lower_bound = -0.02
+            else:
+                lower_bound = 2 * np.nanmean(y)
+
+            model = RidgeLogRegression(
+                alpha=0.2,
+                transformer=SigmoidTransformer(lower_bound=lower_bound, upper_bound=0.),
+                bootstrap_samples=self.bootstrap_samples,
+                bootstrap_block_size=self.bootstrap_samples
+            )
+        elif pred_var in ['state']:
+            model = RidgeLogisticRegression(
+                alpha=0.2,
+                transformer=BinaryTransformer(center=0, scale=1.),
+                bootstrap_samples=self.bootstrap_samples,
+                bootstrap_block_size=self.bootstrap_samples
+            )
+        else:
+            model = RidgeRegression(
+                alpha=0.2,
+                bootstrap_samples=self.bootstrap_samples,
+                bootstrap_block_size=self.bootstrap_samples
+            )
 
         self.model[pred_var] = model
         return model
@@ -119,10 +152,10 @@ class LinearDataLore(DataLore):
         self.pred_var.clear()
         self.pred_var.extend(json_dict['pred_var'])
 
-        self.model.update({key: LinearRegression.from_json(value) for key, value in json_dict['model'].items()})
+        self.model.update({key: Regression.from_json(value) for key, value in json_dict['model'].items()})
         return self
 
-    def calibrate(self, factor_value: list[pd.DataFrame] = None, *args, **kwargs):
+    def calibrate(self, factor_value: pd.DataFrame | list[pd.DataFrame], *args, **kwargs):
         report = {'start_ts': time.time()}
 
         if isinstance(factor_value, pd.DataFrame):
@@ -133,13 +166,10 @@ class LinearDataLore(DataLore):
         # define x, y inputs
         for i, factors in enumerate(factor_value):
             _x = define_inputs(factor_value=factors, input_vars=self.inputs_var, poly_degree=self.poly_degree)
-            _y = pd.DataFrame({pred_var: define_prediction(factor_value=factors, pred_var=pred_var, decoder=RecursiveDecoder(level=3)) for pred_var in self.pred_var})
+            _y = pd.DataFrame({pred_var: define_prediction(factor_value=factors, pred_var=pred_var, decoder=self.decoder, key=f'{self.ticker}.market_price') for pred_var in self.pred_var})
 
             x_train.append(_x)
             y_train.append(_y)
-
-            x_val = _x
-            y_val = _y
 
         x = pd.concat(x_train)
         y = pd.concat(y_train)
@@ -154,34 +184,76 @@ class LinearDataLore(DataLore):
             if pred_var in self.model:
                 model = self.model[pred_var]
             else:
-                model = self.model[pred_var] = self._init_model(pred_var=pred_var)
+                model = self.model[pred_var] = self._init_model(pred_var=pred_var, y=y[pred_var].to_numpy())
 
             LOGGER.info(f'fitting prediction target {pred_var}...')
             model.fit(x=x.to_numpy(), y=y[pred_var].to_numpy())
             coefficient[pred_var] = {name: value for name, value in zip(x.columns, model.coefficient)}
-            # report.update({f'coefficient.{pred_var}': pd.Series(coefficient[pred_var])})
 
         report.update(coefficient='\n' + pd.DataFrame(coefficient).to_string())
 
-        # validation
+        return report
+
+    def validate(self, factor_value: pd.DataFrame, **kwargs):
+        import plotly.graph_objects as go
+
+        x_val = define_inputs(factor_value=factor_value, input_vars=self.inputs_var, poly_degree=self.poly_degree)
+        y_val = pd.DataFrame({pred_var: define_prediction(factor_value=factor_value, pred_var=pred_var, decoder=self.decoder) for pred_var in self.pred_var})
+        x_axis = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in x_val.index]
+
+        candlestick_trace = go.Candlestick(
+            name=self.ticker,
+            x=x_axis,
+            open=factor_value[f'{self.ticker}.open_price'],
+            high=factor_value[f'{self.ticker}.high_price'],
+            low=factor_value[f'{self.ticker}.low_price'],
+            close=factor_value[f'{self.ticker}.close_price'],
+            yaxis='y3'
+        )
+
         for pred_var in self.pred_var:
             valid_mask = np.all(np.isfinite(x_val), axis=1) & np.all(np.isfinite(y_val), axis=1)
 
+            # setup cv
             cv = CrossValidation(model=self.model[pred_var])
+            cv.x_axis = np.array(x_axis)[valid_mask]
             cv.validate(
-                x_train=x.to_numpy(),
-                y_train=y[pred_var].to_numpy(),
+                x_train=x_val.to_numpy(),  # have no effect
+                y_train=y_val.to_numpy(),  # have no effect
                 x_val=x_val.to_numpy()[valid_mask],
                 y_val=y_val[pred_var].to_numpy()[valid_mask],
                 skip_fitting=True
             )
 
-            fig = cv.plot(x_axis=[datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in x_val.index[valid_mask]])
-            dump_dir = kwargs.get('dump_dir', '')
-            os.makedirs(dump_dir, exist_ok=True)
-            fig.write_html(pathlib.Path(dump_dir, f'{pred_var}.in_sample.html'))
+            # update figure
+            fig = cv.plot()
+            fig.add_trace(candlestick_trace)
 
-        return report
+            for level in range(self.decoder.level + 1):
+                local_extreme = self.decoder.local_extremes(ticker=f'{self.ticker}.market_price', level=level)
+
+                if not local_extreme:
+                    break
+
+                y, x, wave_flag = zip(*local_extreme)
+                x = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in x]
+
+                trace = go.Scatter(x=x, y=y, mode='lines', name=f'decode level {level}', yaxis='y3')
+                fig.add_trace(trace)
+
+            fig.update_layout(
+                yaxis3=dict(
+                    title=self.ticker,
+                    anchor="x",
+                    overlaying='y',
+                    side='right',
+                    showgrid=False
+                )
+            )
+
+            self.cv[pred_var] = cv
+
+        return self.cv
 
     def clear(self):
         self.model.clear()
