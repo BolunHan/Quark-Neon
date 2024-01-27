@@ -535,6 +535,7 @@ class CrossValidation(object):
         self.resampled_deviation = None
 
         self._metrics = None
+        self._fig = None
 
     @classmethod
     def _select_data(cls, x: np.ndarray, y: np.ndarray, indices: np.ndarray, fold: int, n_folds: int, shuffle: bool = False):
@@ -659,6 +660,9 @@ class CrossValidation(object):
         Returns:
             plotly.graph_objects.Figure: Plotly figure object.
         """
+        if self._fig is not None:
+            return self._fig
+
         import plotly.graph_objects as go
 
         fig = go.Figure()
@@ -762,6 +766,7 @@ class CrossValidation(object):
             rangebreaks=RANGE_BREAK,
         )
 
+        self._fig = fig
         return fig
 
     def clear(self):
