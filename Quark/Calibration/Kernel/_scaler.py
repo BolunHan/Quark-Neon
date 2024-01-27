@@ -2,6 +2,8 @@ import json
 
 import numpy as np
 
+__all__ = ['Scaler']
+
 
 class Scaler(object):
     def __init__(self, sample_range: list[float] = None):
@@ -27,7 +29,7 @@ class Scaler(object):
             is_dummy = np.all((feature_data == 0) | (feature_data == 1) | (feature_data == -1))
 
             if is_dummy:
-                feature_mean = 0.5
+                feature_mean = 0.
                 feature_variance = 1
             else:
                 lower_bound = np.quantile(feature_data, lower_percentile)
@@ -57,7 +59,7 @@ class Scaler(object):
 
         if len(x.shape) == 1:
             single_obs = True
-            x = x.reshape(-1, 1)
+            x = x.reshape(1, -1)
 
         num_features = x.shape[1]
 
@@ -66,21 +68,19 @@ class Scaler(object):
 
         for i in range(num_features):
             feature_data = x[:, i]
-            is_dummy = np.all((feature_data == 0) | (feature_data == 1) | (feature_data == -1))
 
-            if is_dummy:
-                transformed_columns.append(feature_data)
-            elif reverse:
+            if reverse:
                 transformed_column = feature_data * np.sqrt(self.variance[i]) + self.mean[i]
                 transformed_columns.append(transformed_column)
             else:
                 transformed_column = (feature_data - self.mean[i]) / np.sqrt(self.variance[i])
                 transformed_columns.append(transformed_column)
 
-        if single_obs:
-            return transformed_columns[0]
-
         transformed_x = np.column_stack(transformed_columns)
+
+        if single_obs:
+            return transformed_x[0]
+
         return transformed_x
 
     def reverse_transform(self, x):
