@@ -338,19 +338,36 @@ class BackTest(object):
         self.strategy.decision_core.calibrate(
             factor_value=self.strategy.strategy_metric.factor_value,
             market_date=market_date,
-            trace_back=5,
-            dump_dir=pathlib.Path(self.dump_dir, f'{market_date:%Y-%m-%d}')
+            trace_back=5
+        )
+
+        self.strategy.decision_core.validation(
+            factor_value=self.strategy.strategy_metric.factor_value
         )
 
     def dump_result(self, market_date: datetime.date):
         dump_dir = pathlib.Path(self.dump_dir, f'{market_date:%Y-%m-%d}')
         os.makedirs(dump_dir, exist_ok=True)
 
+        # dump decision core
         self.strategy.decision_core.dump(self.dump_dir.joinpath(f'decision_core.{market_date}.json'))
+
+        # dump factor values
         self.strategy.strategy_metric.dump(dump_dir.joinpath(f'metrics.{market_date}.csv'))
+
+        # dump trade summaries
         self.strategy.strategy_metric.trade_info.to_csv(dump_dir.joinpath(f'trade.summary.{market_date}.csv'))
-        # self.strategy.strategy_metric.plot_prediction().to_html(dump_dir.joinpath(f'metrics.prediction.{market_date}.html'))
-        # self.strategy.strategy_metric.plot_trades().to_html(dump_dir.joinpath(f'metrics.trades.{market_date}.html'))
+
+        # dump backtest prediction
+        self.strategy.strategy_metric.plot_prediction().write_html(dump_dir.joinpath(f'metrics.prediction.{market_date}.html'))
+
+        # dump backtest trades
+        self.strategy.strategy_metric.plot_trades().write_html(dump_dir.joinpath(f'metrics.trades.{market_date}.html'))
+
+        # dump in-sample validations
+        for pred_var, cv in self.strategy.decision_core.data_lore.cv.items():
+            fig = cv.plot()
+            fig.write_html(dump_dir.joinpath(f'{pred_var}.in_sample.html'))
 
     def reset(self):
         self.factor.clear()
