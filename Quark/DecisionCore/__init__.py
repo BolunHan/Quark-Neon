@@ -30,6 +30,10 @@ class DecisionCore(object, metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
+    def validation(self, *args, **kwargs):
+        ...
+
+    @abc.abstractmethod
     def clear(self):
         ...
 
@@ -64,6 +68,9 @@ class DecisionCore(object, metaclass=abc.ABCMeta):
             raise FileNotFoundError(f'{file_path} does not exist!')
 
         if file_pattern is not None:
+            if not os.path.isdir(file_dir):
+                raise FileNotFoundError(f'{file_dir} does not exist!')
+
             for file_name in sorted(os.listdir(file_dir), reverse=True):
                 if re.match(file_pattern, file_name):
                     if file_dir is None:
@@ -101,6 +108,9 @@ class DummyDecisionCore(DecisionCore):
         """
         calibrate decision core and gives a calibration report, in dict (like json)
         """
+        pass
+
+    def validation(self, *args, **kwargs):
         pass
 
     def clear(self):
