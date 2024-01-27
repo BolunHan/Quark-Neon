@@ -18,7 +18,7 @@ TIME_ZONE = GlobalStatics.TIME_ZONE
 __all__ = ['fix_prediction_target', 'wavelet_prediction_target']
 
 
-def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 'SyntheticIndex.Price', inplace: bool = True, session_filter=None) -> pd.DataFrame:
+def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 'SyntheticIndex.market_price', inplace: bool = True, session_filter=None) -> pd.DataFrame:
     """
     Given a factor dataframe (StrategyMetrics.info), return the prediction target, with fixed prediction length.
 
@@ -60,12 +60,13 @@ def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 
         return pd.DataFrame({'pct_change': pd.Series(target).astype(float)})
 
 
-def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.Price', inplace: bool = True, session_filter=None, decoder: RecursiveDecoder = None, decode_level=4, enable_smooth: bool = True, smooth_alpha=0.008, smooth_look_back=5 * 60) -> pd.DataFrame:
+def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.market_price', inplace: bool = True, session_filter=None, decoder: RecursiveDecoder = None, decode_level=4, enable_smooth: bool = True, smooth_alpha=0.008, smooth_look_back=5 * 60) -> pd.DataFrame:
     if not inplace:
         factors = pd.DataFrame({key: factors[key]})
 
     if decoder is None:
         decoder = RecursiveDecoder(level=decode_level)
+    decoder.clear()
 
     # step 1: update decoder
     for _ in factors.iterrows():  # type: tuple[float, dict]
@@ -110,6 +111,7 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
         # Step 3: Merge the result back into the original DataFrame
         factors['local_max'].update(info_selected['local_max'])
         factors['local_min'].update(info_selected['local_min'])
+        factors['state'].update(info_selected['state'])
 
     factors['up_actual'] = factors['local_max'] / factors[key] - 1
     factors['down_actual'] = factors['local_min'] / factors[key] - 1

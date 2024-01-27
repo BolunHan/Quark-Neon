@@ -89,11 +89,11 @@ class FactorValidation(object):
 
         # Params for validation
         self.decoder = RecursiveDecoder(level=3)
-        self.pred_target = 'SyntheticIndex.market_price'
+        self.pred_target = f'{self.index_name}.market_price'
         self.features = ['MACD.Index.Trigger.Synthetic']
 
         self.factor: FactorMonitor | None = None
-        self.synthetic = SyntheticIndexMonitor(index_name='SyntheticIndex', weights=self.index_weights)
+        self.synthetic = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights)
         self.subscription = set()
         self.replay: ProgressiveReplay | None = None
         self.factor_value: dict[float, dict[str, float]] = {}
@@ -427,13 +427,12 @@ class FactorValidation(object):
             market_price (float): Market price.
             entry_log (dict): Dictionary to store collected data.
         """
-        synthetic_price = self.synthetic.index_price
 
         if entry_log is not None and (key := f'{ticker}.market_price') not in entry_log:
             entry_log[key] = market_price
 
-        if entry_log is not None and (key := f'{self.synthetic.index_name}.market_price') not in entry_log:
-            entry_log[key] = synthetic_price
+        if entry_log is not None and f'{self.synthetic.index_name}.market_price' not in entry_log:
+            entry_log.update(collect_factor(self.synthetic))
 
     def run(self):
         """
@@ -706,7 +705,6 @@ class FactorBatchValidation(FactorValidation):
             fig.update_layout(
                 {
                     f'yaxis{i + 2}': dict(
-
                         title=feature,
                         showgrid=True,
                         zeroline=True,

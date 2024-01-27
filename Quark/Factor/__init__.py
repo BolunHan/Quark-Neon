@@ -14,6 +14,7 @@ DEBUG_MODE = GlobalStatics.DEBUG_MODE
 
 class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
     def __init__(self, name: str, monitor_id: str = None):
+        assert name.startswith('Monitor')
         super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
 
     @abc.abstractmethod
@@ -133,11 +134,15 @@ def collect_factor(monitors: dict[str, FactorMonitor] | list[FactorMonitor] | Fa
             if isinstance(factor_value, (int, float)):
                 factors[name] = factor_value
             elif isinstance(factor_value, dict):
+                # FactorPoolDummyMonitor having hard coded name
                 if monitor.name == 'Monitor.FactorPool.Dummy':
                     factors.update(factor_value)
+                # synthetic index monitor should have duplicated logs
+                elif isinstance(monitor, SyntheticIndexMonitor):
+                    factors.update({f'{name}.{key}': value for key, value in factor_value.items()})
+                    factors.update({f'{monitor.index_name}.{key}': value for key, value in factor_value.items()})
                 else:
-                    for key in factor_value:
-                        factors[f'{name}.{key}'] = factor_value[key]
+                    factors.update({f'{name}.{key}': value for key, value in factor_value.items()})
             else:
                 raise NotImplementedError(f'Invalid return type, expect float | dict[str, float], got {type(factor_value)}.')
 
