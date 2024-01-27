@@ -5,10 +5,9 @@ import uuid
 import numpy as np
 import pandas as pd
 from PyQuantKit import TradeInstruction, TradeReport
-
+from . import LOGGER
 from ..Base import GlobalStatics
 from ..Calibration.dummies import is_market_session
-from ..Factor import collect_factor, FactorMonitor
 from ..Factor.decoder import Wavelet
 
 TIME_ZONE = GlobalStatics.TIME_ZONE
@@ -90,7 +89,9 @@ class StrategyMetrics(object):
         )
 
     def clear(self):
+        self.active_entry.clear()
         self.factor_value.clear()
+        self.prediction_value.clear()
         self.assets_value.clear()
 
         self.signal_trade_metrics.clear()
@@ -102,115 +103,133 @@ class StrategyMetrics(object):
 
     def plot_prediction(self):
         import plotly.graph_objects as go
-        fig = go.Figure()
+        from plotly.subplots import make_subplots
 
-        # trace 1: candle stick for assets price
+        prediction_value = pd.DataFrame(self.prediction_value)
+        prediction_targets = ['SyntheticIndex'] + [pred_var for pred_var in prediction_value.index if not (pred_var.endswith('.lower_bound') or pred_var.endswith('.upper_bound') or pred_var.endswith('.kelly'))]
+        n = len(prediction_targets)
+        titles = [f'StrategyMetrics: Pred.{pred_var}' for pred_var in prediction_targets]
+        fig = make_subplots(
+            rows=n + 1,
+            cols=1,
+            shared_xaxes=True,
+            subplot_titles=titles,
+            row_heights=[2] + [1] * n
+        )
+
+        # top trace: synthetic candle sticks
         fig.add_trace(
-            go.Candlestick(
+            trace=go.Candlestick(
                 name='SyntheticIndex',
                 x=[datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in self.assets_value],
                 open=[_['open'] for _ in self.assets_value.values()],
                 high=[_['high'] for _ in self.assets_value.values()],
                 low=[_['low'] for _ in self.assets_value.values()],
                 close=[_['close'] for _ in self.assets_value.values()],
-                yaxis='y1'
-            )
+                yaxis=f'y'
+            ),
+            row=1,
+            col=1
+        )
+        fig.update_layout(
+            {f'yaxis': dict(
+                title="Synthetic",
+                anchor="x",
+                side='left',
+                showgrid=False,
+            )}
         )
 
         # trace 2: scatter plot for prediction values
-        prediction_value = pd.DataFrame(self.prediction_value)
-        for _, prediction in prediction_value.iterrows():
-            x = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in prediction.index]
-            y = prediction.tolist()
-            # noinspection PyTypeChecker
-            pred_var: str = prediction.name
+        for i, pred_var in enumerate(prediction_targets):
+            prediction = prediction_value.T[pred_var]
+            x = np.array([datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in prediction.index])
+            y = prediction.to_numpy()
 
-            if not (pred_var.endswith('.lower_bound') or pred_var.endswith('.upper_bound') or pred_var.endswith('.kelly')):
+            # trace 2: add prediction value
+            fig.add_trace(
+                trace=go.Scatter(
+                    name=pred_var,
+                    x=x,
+                    y=y,
+                    mode='lines',
+                    yaxis=f'y{i + 2}'
+                ),
+                row=2 + i,
+                col=1
+            )
+            fig.update_layout(
+                {f'yaxis{i + 2}': dict(
+                    title=pred_var,
+                    anchor="x",
+                    side='right',
+                    showspikes=True,
+                    showgrid=True,
+                    zeroline=True,
+                    showticklabels=True,
+                    spikethickness=-2,
+                    tickformat='.2%'
+                )}
+            )
+
+            # trace 2: add prediction interval
+            upper_bound = f'{pred_var}.upper_bound'
+            lower_bound = f'{pred_var}.lower_bound'
+            if upper_bound in prediction_value.index and lower_bound in prediction_value.index:
+                y_upper = prediction_value.T[upper_bound].to_numpy()
+                y_lower = prediction_value.T[lower_bound].to_numpy()
+                valid_mask = np.isfinite(y_upper) & np.isfinite(y_lower)
+
+                fig.add_trace(
+                    go.Scatter(
+                        name=upper_bound,
+                        x=x[valid_mask],
+                        y=y_upper[valid_mask],
+                        mode='lines',
+                        line=dict(color='red', width=1, dash='dot'),
+                        yaxis=f'y{i + 2}'
+                    ),
+                    row=2 + i,
+                    col=1
+                )
+
                 fig.add_trace(
                     go.Scatter(
                         name=pred_var,
-                        x=x,
-                        y=y,
+                        x=x[valid_mask],
+                        y=y_lower[valid_mask],
+                        line=dict(color='red', width=1, dash='dot'),
                         mode='lines',
-                        yaxis='y2'
-                    )
+                        fillcolor='rgba(255,0,0,0.2)',
+                        fill='tonexty',
+                        yaxis=f'y{i + 2}'
+                    ),
+                    row=2 + i,
+                    col=1
                 )
 
-                if (upper_bound := f'{pred_var}.upper_bound') in prediction_value.index:
-                    y = prediction_value.T[upper_bound].tolist()
-                    fig.add_trace(
-                        go.Scatter(
-                            name=upper_bound,
-                            x=x,
-                            y=y,
-                            mode='lines',
-                            line=dict(color='red', dash='dash'),
-                            yaxis='y2'
-                        )
-                    )
-
-                if (lower_bound := f'{pred_var}.lower_bound') in prediction_value.index:
-                    y = prediction_value.T[lower_bound].tolist()
-                    fig.add_trace(
-                        go.Scatter(
-                            name=pred_var,
-                            x=x,
-                            y=y,
-                            line=dict(color='red', dash='dash'),
-                            mode='lines',
-                            fillcolor='rgba(255,0,0,0.3)',
-                            fill='tonexty',
-                            yaxis='y2'
-                        )
-                    )
-
-                if (kelly := f'{pred_var}.kelly') in prediction_value.index:
-                    y = prediction_value.T[kelly].tolist()
-                    fig.add_trace(
-                        go.Bar(
-                            name=kelly,
-                            x=x,
-                            y=y,
-                            opacity=0.3,
-                            marker=dict(color='green'),
-                            yaxis='y3'
-                        )
-                    )
-
-        fig.update_layout(
-            title="StrategyMetrics: Prediction",
-            hovermode="x unified",
-            template='simple_white',
-            yaxis=dict(
-                title="Synthetic",
-                anchor="x",
-                overlaying='y',
-                side='right',
-                showgrid=False
-            ),
-            yaxis2=dict(
-                showspikes=True
-            ),
-            yaxis3=dict(
-                anchor="free",
-                overlaying='y',
-                showgrid=False,  # Hide grid for y3 axis
-                showline=False,  # Hide line for y3 axis
-                zeroline=False,  # Hide zero line for y3 axis
-                showticklabels=False  # Hide tick labels for y3 axis
+            fig.update_layout(
+                title="StrategyMetrics: Prediction Values",
+                height=600 + 300 * n,
+                hovermode="x unified",
+                template='simple_white',
+                showlegend=False
             )
-        )
 
-        fig.update_xaxes(
-            tickformat='%H:%M:%S',
-            gridcolor='black',
-            griddash='dash',
-            minor_griddash="dot",
-            showgrid=True,
-            spikethickness=-2,
-            rangebreaks=RANGE_BREAK,
-            rangeslider_visible=False
-        )
+            fig.update_traces(
+                xaxis=f'x1'
+            )
+
+            fig.update_xaxes(
+                tickformat='%H:%M:%S',
+                gridcolor='black',
+                griddash='dash',
+                minor_griddash="dot",
+                showgrid=True,
+                spikethickness=-2,
+                rangebreaks=RANGE_BREAK,
+                rangeslider_visible=False
+            )
 
         return fig
 
@@ -218,13 +237,14 @@ class StrategyMetrics(object):
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        titles = ['Signal', 'Target', 'Actual']
+        titles = ['Signal Trades', 'Target Trades', 'Actual Trades']
         trade_metrics = [self.signal_trade_metrics, self.target_trade_metrics, self.actual_trade_metrics]
+        n = len(trade_metrics)
         # Create subplot
         fig = make_subplots(
-            rows=3,
+            rows=n,
             cols=1,
-            shared_xaxes=False,
+            shared_xaxes=True,
             subplot_titles=titles,
         )
 
@@ -240,26 +260,33 @@ class StrategyMetrics(object):
             )
             fig.add_trace(trace, row=1 + i, col=1)
 
-            for trade_dict in trade_metrics.trades.values():
+            trade_logs = list(trade_metrics.trades.values())
+            if len(trade_logs) > 100:
+                LOGGER.warning(f'Too many trade logs for {metric_name}, only showing first 100 entries.')
+
+            for trade_dict in trade_logs[:100]:
+                action = trade_dict['volume']
+                x = datetime.datetime.fromtimestamp(trade_dict['timestamp'], tz=TIME_ZONE)
+                y = trade_dict['price']
                 fig.add_annotation(
-                    x=datetime.datetime.fromtimestamp(trade_dict['timestamp'], tz=TIME_ZONE),  # x-coordinate
-                    y=trade_dict['price'],  # y-coordinate (relative to y-axis 1)
+                    x=x,  # x-coordinate
+                    y=y,  # y-coordinate (relative to y-axis 1)
                     xref='x',
                     yref=f'y{i + 1}',
-                    text='Sell' if trade_dict['volume'] < 0 else 'Buy',
+                    text='Sell' if action < 0 else 'Buy',
                     showarrow=True,
                     arrowhead=3,  # red arrow shape
                     # ax=20 if action < 0 else -20,  # arrow x-direction offset
-                    # ay=-40,  # arrow y-direction offset
-                    bgcolor='red' if trade_dict['volume'] < 0 else 'green',
-                    opacity=0.8
+                    ay=40 if action < 0 else -40,  # arrow y-direction offset
+                    bgcolor='red' if action < 0 else 'green',
+                    opacity=0.7
                 )
 
         fig.update_layout(
             title=dict(text="StrategyMetrics: Trade Signal"),
-            height=600 * 3,
+            height=600 * n,
             template='simple_white',
-            # legend_tracegroupgap=330,
+            showlegend=False,
             hovermode='x unified',
             legend_traceorder="normal"
         )
