@@ -43,7 +43,6 @@ class StrategyMetrics(object):
         self.timestamp = timestamp
 
     def collect_factors(self, factor_value: dict[str, float], timestamp: float) -> dict[str, float] | None:
-        self.assets_price = factor_value.get(f'SyntheticIndex.market_price')
         timestamp_index = (timestamp // self.sampling_interval) * self.sampling_interval
 
         if not is_market_session(timestamp=timestamp):
