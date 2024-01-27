@@ -3,9 +3,9 @@ import json
 import numpy as np
 
 from . import LOGGER, Bootstrap
-from ..Kernel import Scaler
+from ..Kernel import Scaler, Transformer, LogTransformer, BinaryTransformer
 
-__all__ = ['LinearRegression', 'RidgeRegression', 'LassoRegression']
+__all__ = ['LinearRegression', 'RidgeRegression', 'RidgeLogRegression', 'RidgeLogisticRegression', 'LassoRegression']
 
 
 class LinearRegression(Bootstrap):
@@ -124,6 +124,10 @@ class LinearRegression(Bootstrap):
             coefficient, _ = self._fit(x=x_sampled, y=y_sampled)
             self.bootstrap_coefficients.append(coefficient)
 
+    def _predict(self, x: np.ndarray, coefficient: np.ndarray):
+        y = np.dot(x, coefficient)
+        return y
+
     def predict(self, x: list | np.ndarray, alpha=0.05):
         """
         Make predictions with prediction intervals.
@@ -138,14 +142,14 @@ class LinearRegression(Bootstrap):
         x = np.array(x)
 
         # Compute mean predictions and intervals for all input sets
-        y_pred = np.dot(x, self.coefficient)
+        y_pred = self._predict(x=x, coefficient=self.coefficient)
 
         if not self.bootstrap_coefficients:
             return y_pred, None, None, np.nan
 
         bootstrap_deviation = []
         for bootstrap_coefficient in self.bootstrap_coefficients:
-            y_bootstrap = np.dot(x, bootstrap_coefficient)
+            y_bootstrap = self._predict(x=x, coefficient=bootstrap_coefficient)
             deviation = y_bootstrap - y_pred
             bootstrap_deviation.append(deviation)
 
@@ -283,6 +287,7 @@ class LinearRegression(Bootstrap):
             dict or str: Serialized model.
         """
         json_dict = dict(
+            type=self.__class__.__name__,
             coefficient=self.coefficient.tolist() if self.coefficient is not None else None,
             bootstrap_samples=self.bootstrap_samples,
             bootstrap_block_size=self.bootstrap_block_size,
@@ -396,6 +401,7 @@ class RidgeRegression(LinearRegression):
 
     def to_json(self, fmt='dict') -> dict | str:
         json_dict = super().to_json(fmt='dict')
+        json_dict['alpha'] = self.alpha
         json_dict['scaler'] = self.scaler.to_json(fmt='dict')
 
         if fmt == 'dict':
@@ -416,7 +422,7 @@ class RidgeRegression(LinearRegression):
             bootstrap_samples=json_dict['bootstrap_samples'],
             bootstrap_block_size=json_dict['bootstrap_block_size'],
             alpha=json_dict['alpha'],
-            scaler=json_dict['scaler']
+            scaler=Scaler.from_json(json_dict['scaler'])
         )
 
         self.coefficient = np.array(json_dict['coefficient'])
@@ -491,6 +497,105 @@ class RidgeRegression(LinearRegression):
             )
 
         return best_result
+
+
+class RidgeLogRegression(RidgeRegression):
+    def __init__(self, transformer: Transformer = None, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0, scaler: Scaler = None):
+        super().__init__(
+            bootstrap_samples=bootstrap_samples,
+            bootstrap_block_size=bootstrap_block_size,
+            alpha=alpha,
+            scaler=scaler
+        )
+
+        self.transformer = LogTransformer() if transformer is None else transformer
+
+    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
+        mask = self.transformer.mask(y)
+        _x = x[mask]
+        _y = y[mask]
+        _y = self.transformer.transform(_y)
+
+        super().fit(x=_x, y=_y, use_bootstrap=use_bootstrap, method=method)
+
+    def predict(self, x: list | np.ndarray, alpha=0.05):
+        x = np.array(x)
+        y_pred, _, bootstrap_deviation, _ = super().predict(x=x, alpha=alpha)
+
+        deviation = bootstrap_deviation + y_pred.reshape(-1, 1)
+        y_pred = self.transformer.inverse_transform(y_pred)
+        deviation = self.transformer.inverse_transform(deviation)
+        bootstrap_deviation = deviation - y_pred.reshape(-1, 1)
+
+        # For single input, X might be a 1D array
+        if len(x.shape) == 1:
+            lower_bound = np.quantile(bootstrap_deviation, alpha / 2)
+            upper_bound = np.quantile(bootstrap_deviation, 1 - alpha / 2)
+            variance = np.var(bootstrap_deviation)
+        else:
+            lower_bound = np.quantile(bootstrap_deviation, alpha / 2, axis=1)
+            upper_bound = np.quantile(bootstrap_deviation, 1 - alpha / 2, axis=1)
+            variance = np.var(bootstrap_deviation, axis=1, ddof=1)
+
+        interval = np.array([lower_bound, upper_bound]).T
+
+        return y_pred, interval, bootstrap_deviation, variance
+
+    def to_json(self, fmt='dict') -> dict | str:
+        json_dict = super().to_json(fmt='dict')
+        json_dict['transformer'] = self.transformer.to_json(fmt='dict')
+
+        if fmt == 'dict':
+            return json_dict
+        else:
+            return json.dumps(json_dict)
+
+    @classmethod
+    def from_json(cls, json_str: str | bytes | dict):
+        if isinstance(json_str, (str, bytes)):
+            json_dict = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            json_dict = json_str
+        else:
+            raise TypeError(f'{cls.__name__} can not load from json {json_str}')
+
+        self = cls(
+            transformer=Transformer.from_json(json_dict['transformer']),
+            bootstrap_samples=json_dict['bootstrap_samples'],
+            bootstrap_block_size=json_dict['bootstrap_block_size'],
+            alpha=json_dict['alpha'],
+            scaler=Scaler.from_json(json_dict['scaler'])
+        )
+
+        self.coefficient = np.array(json_dict['coefficient'])
+        self.bootstrap_coefficients.extend([np.array(_) for _ in json_dict['bootstrap_coefficients']])
+
+        return self
+
+
+class RidgeLogisticRegression(RidgeLogRegression):
+    def __init__(self, transformer: Transformer = None, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0, scaler: Scaler = None):
+        super().__init__(
+            transformer=BinaryTransformer() if transformer is None else transformer,
+            bootstrap_samples=bootstrap_samples,
+            bootstrap_block_size=bootstrap_block_size,
+            alpha=alpha,
+            scaler=scaler
+        )
+
+    def _predict(self, x: np.ndarray, coefficient: np.ndarray):
+        t = np.dot(x, coefficient)
+        prob = 1 / (1 + np.exp(-t))
+        return prob
+
+    def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        from sklearn.linear_model import LogisticRegression
+
+        model = LogisticRegression(fit_intercept=False, class_weight='balanced', solver='liblinear')
+        model.fit(x, y)
+        coefficient = model.coef_[0]
+
+        return coefficient, np.array([model.score(x, y)])
 
 
 class LassoRegression(RidgeRegression):
