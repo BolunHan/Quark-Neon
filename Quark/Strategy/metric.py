@@ -65,15 +65,17 @@ class StrategyMetrics(object):
         self.prediction_value[timestamp] = prediction
 
     def on_signal(self, signal: int, timestamp: float):
-        self.signal_trade_metrics.add_trades(
-            volume=signal,
-            price=self.assets_price,
-            timestamp=timestamp
-        )
+        if signal:
+            self.signal_trade_metrics.add_trades(
+                side=np.sign(signal),
+                price=self.assets_price,
+                timestamp=timestamp
+            )
 
     def on_order(self, order: TradeInstruction):
         self.target_trade_metrics.add_trades(
-            volume=order.volume * order.side.sign,
+            side=order.side.sign,
+            volume=order.volume,
             price=self.assets_price,
             timestamp=self.timestamp,
             trade_id=order.order_id
@@ -81,7 +83,8 @@ class StrategyMetrics(object):
 
     def on_trade(self, report: TradeReport):
         self.actual_trade_metrics.add_trades(
-            volume=report.volume * report.side.sign,
+            side=report.side.sign,
+            volume=report.volume,
             price=report.price,
             timestamp=report.timestamp,
             trade_id=report.trade_id
@@ -116,17 +119,12 @@ class StrategyMetrics(object):
             row_heights=[2] + [1] * n
         )
 
+        candle_sticks = self.candle_sticks
+        candle_sticks['name'] = 'SyntheticIndex'
+        candle_sticks['yaxis'] = 'y'
         # top trace: synthetic candle sticks
         fig.add_trace(
-            trace=go.Candlestick(
-                name='SyntheticIndex',
-                x=[datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in self.assets_value],
-                open=[_['open'] for _ in self.assets_value.values()],
-                high=[_['high'] for _ in self.assets_value.values()],
-                low=[_['low'] for _ in self.assets_value.values()],
-                close=[_['close'] for _ in self.assets_value.values()],
-                yaxis=f'y'
-            ),
+            trace=candle_sticks,
             row=1,
             col=1
         )
@@ -136,6 +134,8 @@ class StrategyMetrics(object):
                 anchor="x",
                 side='left',
                 showgrid=False,
+                showspikes=True,
+                spikethickness=-2
             )}
         )
 
@@ -163,10 +163,10 @@ class StrategyMetrics(object):
                     anchor="x",
                     side='right',
                     showspikes=True,
+                    spikethickness=-2,
                     showgrid=True,
                     zeroline=True,
                     showticklabels=True,
-                    spikethickness=-2,
                     tickformat='.2%'
                 )}
             )
@@ -207,32 +207,32 @@ class StrategyMetrics(object):
                     col=1
                 )
 
-            fig.update_layout(
-                title="StrategyMetrics: Prediction Values",
-                height=600 + 300 * n,
-                hovermode="x unified",
-                template='simple_white',
-                showlegend=False
-            )
+        fig.update_layout(
+            title="StrategyMetrics: Prediction Values",
+            height=600 + 300 * n,
+            hovermode="x unified",
+            template='simple_white',
+            showlegend=False
+        )
 
-            fig.update_traces(
-                xaxis=f'x1'
-            )
+        fig.update_traces(
+            xaxis=f'x1'
+        )
 
-            fig.update_xaxes(
-                tickformat='%H:%M:%S',
-                gridcolor='black',
-                griddash='dash',
-                minor_griddash="dot",
-                showgrid=True,
-                spikethickness=-2,
-                rangebreaks=RANGE_BREAK,
-                rangeslider_visible=False
-            )
+        fig.update_xaxes(
+            tickformat='%H:%M:%S',
+            gridcolor='black',
+            griddash='dash',
+            minor_griddash="dot",
+            showgrid=True,
+            spikethickness=-2,
+            rangebreaks=RANGE_BREAK,
+            rangeslider_visible=False
+        )
 
         return fig
 
-    def plot_trades(self):
+    def plot_trades(self, max_logs: int = 1500):
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
@@ -248,37 +248,49 @@ class StrategyMetrics(object):
         )
 
         for i, (trade_metrics, metric_name) in enumerate(zip(trade_metrics, titles)):
-            trace = go.Candlestick(
-                name=metric_name,
-                x=[datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in self.assets_value],
-                open=[_['open'] for _ in self.assets_value.values()],
-                high=[_['high'] for _ in self.assets_value.values()],
-                low=[_['low'] for _ in self.assets_value.values()],
-                close=[_['close'] for _ in self.assets_value.values()],
-                yaxis=f'y{i + 1}'
-            )
+            trace = self.candle_sticks
+            trace['name'] = metric_name
+            trace['yaxis'] = f'y{i + 1}'
             fig.add_trace(trace, row=1 + i, col=1)
-
+            fig.update_layout(
+                {f'yaxis{i + 1}': dict(
+                    anchor="x",
+                    side='left',
+                    showgrid=False,
+                    showspikes=True,
+                    spikethickness=-2
+                )}
+            )
             trade_logs = list(trade_metrics.trades.values())
-            if len(trade_logs) > 100:
-                LOGGER.warning(f'Too many trade logs for {metric_name}, only showing first 100 entries.')
+            if len(trade_logs) > max_logs:
+                LOGGER.warning(f'Too many trade logs for {metric_name}, only showing first {max_logs} out of {len(trade_logs)} entries.')
 
-            for trade_dict in trade_logs[:100]:
-                action = trade_dict['volume']
+            for trade_dict in trade_logs[:max_logs]:
+                action = trade_dict['side']
                 x = datetime.datetime.fromtimestamp(trade_dict['timestamp'], tz=TIME_ZONE)
                 y = trade_dict['price']
+
+                if action > 0:
+                    annotation_text = 'Buy'
+                    ax, ay, bg_color = 20, -40, 'green'
+                elif action < 0:
+                    annotation_text = 'Sell'
+                    ax, ay, bg_color = -20, 40, 'red'
+                else:
+                    continue
+
                 fig.add_annotation(
                     x=x,  # x-coordinate
                     y=y,  # y-coordinate (relative to y-axis 1)
                     xref='x',
                     yref=f'y{i + 1}',
-                    text='Sell' if action < 0 else 'Buy',
+                    text=annotation_text,
                     showarrow=True,
                     arrowhead=3,  # red arrow shape
-                    # ax=20 if action < 0 else -20,  # arrow x-direction offset
-                    ay=40 if action < 0 else -40,  # arrow y-direction offset
-                    bgcolor='red' if action < 0 else 'green',
-                    opacity=0.7
+                    ax=ax,  # arrow x-direction offset
+                    ay=ay,  # arrow y-direction offset
+                    bgcolor=bg_color,
+                    opacity=0.5
                 )
 
         fig.update_layout(
@@ -319,13 +331,27 @@ class StrategyMetrics(object):
         return info
 
     @property
-    def trade_info(self) -> pd.DataFrame:
+    def trade_summary(self) -> pd.DataFrame:
         trade_info = dict(
-            signal=self.signal_trade_metrics.info,
-            target=self.target_trade_metrics.info,
-            actual=self.actual_trade_metrics.info,
+            signal=self.signal_trade_metrics.summary,
+            target=self.target_trade_metrics.summary,
+            actual=self.actual_trade_metrics.summary,
         )
         return pd.DataFrame(trade_info)
+
+    @property
+    def candle_sticks(self):
+        import plotly.graph_objects as go
+
+        trace = go.Candlestick(
+            x=[datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in self.assets_value],
+            open=[_['open'] for _ in self.assets_value.values()],
+            high=[_['high'] for _ in self.assets_value.values()],
+            low=[_['low'] for _ in self.assets_value.values()],
+            close=[_['close'] for _ in self.assets_value.values()]
+        )
+
+        return trace
 
 
 class TradeMetrics(object):
@@ -334,63 +360,95 @@ class TradeMetrics(object):
         self.trade_batch = []
 
         self.exposure = 0.
-        self.cash_flow = 0.
-        self.pnl = 0.
+        self.total_pnl = 0.
+        self.total_cash_flow = 0.
 
-        self.current_trade_batch = {}
-        self.current_price = None
+        self._current_pnl = 0.
+        self._current_cash_flow = 0.
+        self._current_trade_batch = {'cash_flow': 0., 'pnl': 0., 'turnover': 0., 'trades': []}
+        self._market_price = None
 
-    def add_trades(self, volume: float, price: float, timestamp: float, trade_id: int | str = None):
-        if not volume:
-            return
+    def update(self, market_price: float):
+        self._market_price = market_price
+        self.total_pnl = self.exposure * market_price + self.total_cash_flow
+        self._current_pnl = self.exposure * market_price + self._current_cash_flow
+        self._current_trade_batch['pnl'] = self.exposure * market_price + self._current_trade_batch['cash_flow']
 
-        self.exposure += volume
-        self.cash_flow -= volume * price
-        self.pnl = self.exposure * price + self.cash_flow
-        self.current_price = price
+    def add_trades(self, side: int, price: float, timestamp: float, volume: float = None, trade_id: int | str = None):
+        assert side in {1, -1}, f"trade side must in {1, -1}, got {side}."
+        assert volume is None or volume >= 0, "volume must be positive."
+
+        if volume is None:
+            if self.exposure * side < 0:
+                volume = abs(self.exposure)
+            elif self.exposure * side > 0:
+                volume = 0.
+            else:
+                volume = 1.
 
         if trade_id is None:
             trade_id = uuid.uuid4().int
         elif trade_id in self.trades:
             return
 
-        self.trades[trade_id] = dict(
-            timestamp=timestamp,
+        # split the trades
+        if (target_exposure := self.exposure + volume * side) * self.exposure < 0:
+            self.add_trades(side=side, volume=abs(self.exposure), price=price, timestamp=timestamp, trade_id=f'{trade_id}.0')
+            volume = volume - abs(self.exposure)
+            trade_id = f'{trade_id}.1'
+
+        self.exposure += volume * side
+        self.total_cash_flow -= volume * side * price
+        self.total_pnl = self.exposure * price + self.total_cash_flow
+        self._current_cash_flow -= volume * side * price
+        self._current_pnl = self.exposure * price + self._current_cash_flow
+        self._market_price = price
+
+        self.trades[trade_id] = trade_log = dict(
+            side=side,
             volume=volume,
+            timestamp=timestamp,
             price=price,
             exposure=self.exposure,
-            cash_flow=self.cash_flow,
-            pnl=self.pnl
+            cash_flow=self._current_cash_flow,
+            pnl=self._current_pnl
         )
 
-        if 'init_side' not in self.current_trade_batch:
-            self.current_trade_batch['init_side'] = 1 if volume > 0 else -1
+        if 'init_side' not in self._current_trade_batch:
+            self._current_trade_batch['init_side'] = side
 
-        self.current_trade_batch['cash_flow'] = self.current_trade_batch.get('cash_flow', 0.) - volume * price
-        self.current_trade_batch['pnl'] = self.current_trade_batch.get('pnl', 0.) + self.exposure * price + self.current_trade_batch['cash_flow']
-        self.current_trade_batch['turnover'] = self.current_trade_batch.get('turnover', 0.) + abs(volume) * price
+        self._current_trade_batch['cash_flow'] -= volume * side * price
+        self._current_trade_batch['pnl'] = self.exposure * price + self._current_trade_batch['cash_flow']
+        self._current_trade_batch['turnover'] += abs(volume) * price
+        self._current_trade_batch['trades'].append(trade_log)
 
         if not self.exposure:
-            self.trade_batch.append(self.current_trade_batch)
-            self.current_trade_batch = {}
+            self.trade_batch.append(self._current_trade_batch)
+            self._current_trade_batch = {'cash_flow': 0., 'pnl': 0., 'turnover': 0., 'trades': []}
+            self._current_pnl = self._current_cash_flow = 0.
 
     def add_trades_batch(self, trade_logs: pd.DataFrame):
         for timestamp, row in trade_logs.iterrows():  # type: float, dict
+            side = row['side']
             price = row['current_price']
             volume = row['signal']
-            self.add_trades(volume=volume, price=price, timestamp=timestamp)
+            self.add_trades(side=side, volume=volume, price=price, timestamp=timestamp)
 
     def clear(self):
         self.trades.clear()
         self.trade_batch.clear()
+
         self.exposure = 0.
-        self.cash_flow = 0.
-        self.pnl = 0.
-        self.current_trade_batch.clear()
-        self.current_price = None
+        self.total_pnl = 0.
+        self.total_cash_flow = 0.
+
+        self._current_pnl = 0.
+        self._current_cash_flow = 0.
+        self._current_trade_batch = {'cash_flow': 0., 'pnl': 0., 'turnover': 0., 'trades': []}
+        self._market_price = None
 
     @property
-    def info(self):
+    def summary(self):
         info_dict = dict(
             total_gain=0.,
             total_loss=0.,
@@ -413,16 +471,37 @@ class TradeMetrics(object):
                 info_dict['turnover'] += trade_batch['turnover']
 
         info_dict['win_rate'] = info_dict['win_count'] / info_dict['trade_count'] if info_dict['trade_count'] else 0.
-        info_dict['average_gain'] = info_dict['total_gain'] / info_dict['win_count'] / self.current_price if info_dict['win_count'] else 0.
-        info_dict['average_loss'] = info_dict['total_loss'] / info_dict['lose_count'] / self.current_price if info_dict['lose_count'] else 0.
+        info_dict['average_gain'] = info_dict['total_gain'] / info_dict['win_count'] / self._market_price if info_dict['win_count'] else 0.
+        info_dict['average_loss'] = info_dict['total_loss'] / info_dict['lose_count'] / self._market_price if info_dict['lose_count'] else 0.
         info_dict['gain_loss_ratio'] = -info_dict['average_gain'] / info_dict['average_loss'] if info_dict['average_loss'] else 1.
-        info_dict['long_avg_pnl'] = np.average([_['pnl'] for _ in long_trades]) / self.current_price if (long_trades := [_ for _ in self.trade_batch if _['init_side'] == 1]) else np.nan
-        info_dict['short_avg_pnl'] = np.average([_['pnl'] for _ in short_trades]) / self.current_price if (short_trades := [_ for _ in self.trade_batch if _['init_side'] == -1]) else np.nan
+        info_dict['long_avg_pnl'] = np.average([_['pnl'] for _ in long_trades]) / self._market_price if (long_trades := [_ for _ in self.trade_batch if _['init_side'] == 1]) else np.nan
+        info_dict['short_avg_pnl'] = np.average([_['pnl'] for _ in short_trades]) / self._market_price if (short_trades := [_ for _ in self.trade_batch if _['init_side'] == -1]) else np.nan
 
         return info_dict
 
+    @property
+    def info(self):
+        trade_info = []
+        trade_index = []
+        for batch_id, trade_batch in enumerate(self.trade_batch):
+            for trade_id, trade_dict in enumerate(trade_batch['trades']):
+                trade_info.append(
+                    dict(
+                        market_time=datetime.datetime.fromtimestamp(trade_dict['timestamp'], tz=TIME_ZONE),
+                        side=trade_dict['side'],
+                        volume=trade_dict['volume'],
+                        price=trade_dict['price'],
+                        exposure=trade_dict['exposure'],
+                        pnl=trade_dict['pnl']
+                    )
+                )
+                trade_index.append((f'batch.{batch_id}', f'trade.{trade_id}'))
+
+        df = pd.DataFrame(trade_info, index=trade_index)
+        return df
+
     def to_string(self) -> str:
-        metric_info = self.info
+        metric_info = self.summary
 
         fmt_dict = {
             'total_gain': f'{metric_info["total_gain"]:,.3f}',
@@ -439,7 +518,13 @@ class TradeMetrics(object):
             'gain_loss_ratio': f'{metric_info["gain_loss_ratio"]:,.3%}'
         }
 
-        return 'Trade Metrics Report:\n' + pd.Series(fmt_dict).to_string()
+        info_str = (f'Trade Metrics Report:'
+                    f'\n'
+                    f'{pd.Series(fmt_dict).to_string()}'
+                    f'\n'
+                    f'{self.info.to_string()}')
+
+        return info_str
 
 
 __all__ = ['StrategyMetrics']
