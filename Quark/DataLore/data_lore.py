@@ -200,16 +200,21 @@ class LinearDataLore(DataLore):
         x_val = define_inputs(factor_value=factor_value, input_vars=self.inputs_var, poly_degree=self.poly_degree)
         y_val = pd.DataFrame({pred_var: define_prediction(factor_value=factor_value, pred_var=pred_var, decoder=self.decoder) for pred_var in self.pred_var})
         x_axis = [datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in x_val.index]
+        candle_sticks = kwargs.get('candle_sticks')
 
-        candlestick_trace = go.Candlestick(
-            name=self.ticker,
-            x=x_axis,
-            open=factor_value[f'{self.ticker}.open_price'],
-            high=factor_value[f'{self.ticker}.high_price'],
-            low=factor_value[f'{self.ticker}.low_price'],
-            close=factor_value[f'{self.ticker}.close_price'],
-            yaxis='y3'
-        )
+        if candle_sticks is None:
+            candle_sticks = go.Candlestick(
+                name=self.ticker,
+                x=x_axis,
+                open=factor_value[f'{self.ticker}.open_price'],
+                high=factor_value[f'{self.ticker}.high_price'],
+                low=factor_value[f'{self.ticker}.low_price'],
+                close=factor_value[f'{self.ticker}.close_price'],
+                yaxis='y3'
+            )
+        else:
+            candle_sticks['name'] = self.ticker
+            candle_sticks['yaxis'] = 'y3'
 
         for pred_var in self.pred_var:
             valid_mask = np.all(np.isfinite(x_val), axis=1) & np.all(np.isfinite(y_val), axis=1)
@@ -227,7 +232,7 @@ class LinearDataLore(DataLore):
 
             # update figure
             fig = cv.plot()
-            fig.add_trace(candlestick_trace)
+            fig.add_trace(candle_sticks)
 
             for level in range(self.decoder.level + 1):
                 local_extreme = self.decoder.local_extremes(ticker=f'{self.ticker}.market_price', level=level)
