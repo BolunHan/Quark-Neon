@@ -5,15 +5,12 @@ import os
 import pathlib
 import pickle
 import random
-import sys
 import time
 import traceback
 
 import pandas as pd
 from AlgoEngine.Engine import ProgressiveReplay, SimMatch
 from PyQuantKit import MarketData, TickData
-
-sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 
 from . import LOGGER
 from . import simulated_env
