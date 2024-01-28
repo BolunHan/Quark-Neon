@@ -53,6 +53,7 @@ class Strategy(object):
         )
 
         self._last_update_ts = 0.
+        self.trading_disabled = False
 
     def get_underlying(self, ticker: str, side: int):
         return ticker
@@ -137,7 +138,7 @@ class Strategy(object):
             return
 
         # Optional signal condition 3: only subscribed ticker
-        if ticker not in self.index_weights:
+        if not (ticker == self.index_ticker or ticker in self.index_weights):
             return
 
         # all conditions passed, checking prediction and signal
@@ -153,8 +154,10 @@ class Strategy(object):
         signal = 0 if factor_value is None else self.decision_core.signal(position=self.position_tracker, prediction=prediction, timestamp=timestamp)
         self.strategy_metric.on_signal(signal=signal, timestamp=timestamp)
 
+        if not signal or self.trading_disabled:
+            pass
         # trade condition 0: signal long action
-        if signal > 0:
+        elif signal > 0:
             self.engine.open_pos(
                 ticker=self.get_underlying(ticker=self.index_ticker, side=1),
                 volume=self.decision_core.trade_volume(
@@ -182,7 +185,6 @@ class Strategy(object):
 
         self._last_update_ts = (timestamp // self.profile.sampling_interval) * self.profile.sampling_interval
 
-
     def _on_order(self, order: TradeInstruction, **kwargs):
         if order.order_state == OrderState.Rejected:
             self.status = StrategyStatus.error
@@ -206,6 +208,8 @@ class Strategy(object):
         self.subscription = self.engine.subscription
         self.eod_status.update({'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.})
         self.decision_core.clear()
+
+        self.engine.unregister()
 
         self._last_update_ts = 0.
 
