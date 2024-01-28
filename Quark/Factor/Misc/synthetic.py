@@ -46,6 +46,7 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
 
         self._active_bar_data: BarData | None = None
         self._last_bar_data: BarData | None = None
+        self._index_price = None
 
         self._is_ready = True
         self._value = {}
@@ -61,12 +62,13 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         timestamp = market_data.timestamp
         market_price = market_data.market_price
 
-        self.update_synthetic(ticker=ticker, market_price=market_price)
-
-        if ticker not in self.weights:
+        if ticker in self.weights:
+            self.update_synthetic(ticker=ticker, market_price=market_price)
+            self._index_price = index_price = self.synthetic_index
+        elif ticker == self.index_name:
+            self._index_price = index_price = market_price
+        else:
             return
-
-        index_price = self.synthetic_index
 
         if self._active_bar_data is None or timestamp >= self._active_bar_data.timestamp:
             self._last_bar_data = self._active_bar_data
@@ -159,12 +161,14 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
     @property
     def index_price(self) -> float:
         """
-        Retrieve the synthetic index price.
+        return cached index price, if not hit, generate new one.
+        Returns: (float) the synthetic index price
 
-        Returns:
-        float: Synthetic index price.
         """
-        return self.synthetic_index
+        if self._index_price is None:
+            return self.synthetic_index
+        else:
+            return self._index_price
 
     @property
     def active_bar(self) -> BarData | None:
