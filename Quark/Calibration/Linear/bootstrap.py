@@ -35,7 +35,7 @@ class LinearRegression(Bootstrap):
         model.plot(x=x, y=y, x_axis=index)
     """
 
-    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05):
+    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, bootstrap_decay_rate: float = 0.2):
         """
         Initialize the LinearRegression object.
 
@@ -48,6 +48,8 @@ class LinearRegression(Bootstrap):
         # parameters for bootstrap
         self.bootstrap_samples = bootstrap_samples
         self.bootstrap_block_size = bootstrap_block_size
+        self.bootstrap_decay_rate = bootstrap_decay_rate
+
         self.bootstrap_coefficients: list[np.ndarray] = []
 
     def _fit(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -67,6 +69,8 @@ class LinearRegression(Bootstrap):
         Returns:
             None
         """
+        self.memory_decay(decay_rate=self.bootstrap_decay_rate)
+
         coefficient, residuals = self._fit(x=x, y=y)
 
         if use_bootstrap:
@@ -80,6 +84,32 @@ class LinearRegression(Bootstrap):
         self.coefficient = coefficient
 
         return coefficient, residuals
+
+    def memory_decay(self, decay_rate: float) -> list[np.ndarray]:
+        """
+        lose memory by given percentage, return the popped coefficients
+        Args:
+            decay_rate: the proportion of memory lost, in (0, 1)
+
+        Returns:
+
+        """
+        assert 0 <= decay_rate <= 1, "decay_rate should be between 0 exclusive and 1 inclusive."
+        memory_lost = []
+
+        n_pop = int(np.ceil(len(self.bootstrap_coefficients) * decay_rate))
+
+        if not n_pop:
+            return memory_lost
+
+        step = len(self.bootstrap_coefficients) / n_pop
+        index = 0
+        while index < len(self.bootstrap_coefficients):
+            memory_lost.append(self.bootstrap_coefficients.pop(index))
+            index += step - 1
+            index = int(index)
+
+        return memory_lost
 
     def bootstrap_standard(self, x, y):
         """
@@ -291,6 +321,7 @@ class LinearRegression(Bootstrap):
             coefficient=self.coefficient.tolist() if self.coefficient is not None else None,
             bootstrap_samples=self.bootstrap_samples,
             bootstrap_block_size=self.bootstrap_block_size,
+            bootstrap_decay_rate=self.bootstrap_decay_rate,
             bootstrap_coefficients=[_.tolist() for _ in self.bootstrap_coefficients]
         )
 
@@ -319,7 +350,8 @@ class LinearRegression(Bootstrap):
 
         self = cls(
             bootstrap_samples=json_dict['bootstrap_samples'],
-            bootstrap_block_size=json_dict['bootstrap_block_size']
+            bootstrap_block_size=json_dict['bootstrap_block_size'],
+            bootstrap_decay_rate=json_dict['bootstrap_decay_rate']
         )
 
         self.coefficient = np.array(json_dict['coefficient'])
@@ -345,7 +377,7 @@ class RidgeRegression(LinearRegression):
         bootstrap_block(x, y): Generate bootstrap samples using the block bootstrap method.
     """
 
-    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0, scaler: Scaler = None):
+    def __init__(self, alpha: float = 1.0, scaler: Scaler = None, **kwargs):
         """
         Initialize the BootstrapRidgeRegression object.
 
@@ -354,9 +386,11 @@ class RidgeRegression(LinearRegression):
             bootstrap_block_size (float): Block size as a percentage of the dataset length for block bootstrap.
             alpha (float): Regularization strength.
         """
-        super().__init__(bootstrap_samples=bootstrap_samples, bootstrap_block_size=bootstrap_block_size)
+
         self.alpha = alpha
         self.scaler = Scaler() if scaler is None else scaler
+
+        super().__init__(**kwargs)
 
     def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
         if self.scaler is not None:
@@ -500,21 +534,18 @@ class RidgeRegression(LinearRegression):
 
 
 class RidgeLogRegression(RidgeRegression):
-    def __init__(self, transformer: Transformer = None, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0, scaler: Scaler = None):
-        super().__init__(
-            bootstrap_samples=bootstrap_samples,
-            bootstrap_block_size=bootstrap_block_size,
-            alpha=alpha,
-            scaler=scaler
-        )
-
-        self.transformer = LogTransformer() if transformer is None else transformer
+    def __init__(self, **kwargs):
+        self.transformer = kwargs.pop('transformer', LogTransformer())
+        super().__init__(*kwargs)
 
     def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
-        mask = self.transformer.mask(y)
-        _x = x[mask]
-        _y = y[mask]
-        _y = self.transformer.transform(_y)
+        if self.transformer is None:
+            LOGGER.warning(f'No transformer set for {self.__class__.__name__}. If this is intended, please use RidgeRegression instead.')
+            _x, _y = x, y
+        else:
+            mask = self.transformer.mask(y)
+            _x, _y = x[mask], y[mask]
+            _y = self.transformer.transform(_y)
 
         super().fit(x=_x, y=_y, use_bootstrap=use_bootstrap, method=method)
 
@@ -560,7 +591,7 @@ class RidgeLogRegression(RidgeRegression):
             raise TypeError(f'{cls.__name__} can not load from json {json_str}')
 
         self = cls(
-            transformer=Transformer.from_json(json_dict['transformer']),
+            transformer=Transformer.from_json(json_dict['transformer']) if json_dict['transformer'] is not None else None,
             bootstrap_samples=json_dict['bootstrap_samples'],
             bootstrap_block_size=json_dict['bootstrap_block_size'],
             alpha=json_dict['alpha'],
@@ -574,14 +605,9 @@ class RidgeLogRegression(RidgeRegression):
 
 
 class RidgeLogisticRegression(RidgeLogRegression):
-    def __init__(self, transformer: Transformer = None, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, alpha: float = 1.0, scaler: Scaler = None):
-        super().__init__(
-            transformer=BinaryTransformer() if transformer is None else transformer,
-            bootstrap_samples=bootstrap_samples,
-            bootstrap_block_size=bootstrap_block_size,
-            alpha=alpha,
-            scaler=scaler
-        )
+    def __init__(self, **kwargs):
+        kwargs['transformer'] = kwargs.get('transformer', BinaryTransformer())
+        super().__init__(**kwargs)
 
     def _predict(self, x: np.ndarray, coefficient: np.ndarray):
         t = np.dot(x, coefficient)
