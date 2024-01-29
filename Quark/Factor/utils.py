@@ -569,7 +569,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
             ticker = market_data.ticker
             acc_volume = market_data.total_traded_notional if use_notional else market_data.total_traded_volume
 
-            if acc_volume:
+            if acc_volume is not None and np.isfinite(acc_volume) and acc_volume:
                 self._accumulated_volume[ticker] = acc_volume
         elif isinstance(market_data, BarData):
             ticker = market_data.ticker
@@ -733,7 +733,13 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
                 baseline_est = np.mean([obs_vol[ts] for ts in obs_vol if ts != obs_ts])
 
         if baseline_ready:
-            volume_baseline[ticker] = baseline_est
+            if np.isfinite(baseline_est) and baseline_est > 0:
+                volume_baseline[ticker] = baseline_est
+            else:
+                LOGGER.error(f'{ticker} Invalid estimated baseline {baseline_est}, observation window extended.')
+                obs_vol_acc.clear()
+                self._volume_baseline['obs_vol_acc_start'].pop(ticker)
+                self._volume_baseline['sampling_interval'].pop(ticker)
 
         if baseline_est is not None:
             volume_sampling_interval[ticker] = baseline_est
