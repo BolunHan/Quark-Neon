@@ -10,12 +10,13 @@ import traceback
 
 import pandas as pd
 from AlgoEngine.Engine import ProgressiveReplay, SimMatch
-from PyQuantKit import MarketData, TickData
+from PyQuantKit import MarketData, TickData, TradeData, TransactionData
 
 from . import LOGGER
 from . import simulated_env
 from ..API import historical, external
-from ..Base import GlobalStatics
+from ..Base import GlobalStatics, safe_exit
+from ..Calibration.dummies import is_market_session
 from ..DataLore.data_lore import LinearDataLore
 from ..DecisionCore import DummyDecisionCore, MajorityDecisionCore as Core
 from ..Factor import *
@@ -164,24 +165,45 @@ class BackTest(object):
         if market_data.ticker == self.index_name:
             pass
         # avoid over-sampling to preserve resources
-        elif self.fake_market_data and int(self.fake_market_data[-1].timestamp // sampling_interval) == int(timestamp // sampling_interval):
-            pass
+        elif self.fake_market_data and int((last_fake_data := self.fake_market_data[-1]).timestamp // sampling_interval) == int(timestamp // sampling_interval):
+            if isinstance(market_data, (TradeData, TransactionData)):
+                last_fake_data.total_traded_volume += market_data.volume
+                last_fake_data.total_traded_notional += market_data.notional
+                last_fake_data.total_trade_count += 1
         # simulate the index data for match making and cache
         else:
             index_price = self.synthetic.index_price
+
+            if self.fake_market_data:
+                last_fake_data = self.fake_market_data[-1]
+                total_traded_volume = last_fake_data.total_traded_volume
+                total_traded_notional = last_fake_data.total_traded_notional
+                total_trade_count = last_fake_data.total_trade_count
+            else:
+                total_traded_volume = 0.
+                total_traded_notional = 0.
+                total_trade_count = 0
+
+            if isinstance(market_data, (TradeData, TransactionData)):
+                total_traded_volume += market_data.volume
+                total_traded_notional += market_data.notional
+                total_trade_count += 1
 
             # simulate 2 index tick data
             fake_data = TickData(
                 ticker=self.index_name,
                 timestamp=timestamp,
-                last_price=index_price
+                last_price=index_price,
+                total_traded_volume=total_traded_volume,
+                total_traded_notional=total_traded_notional,
+                total_trade_count=total_trade_count
             )
 
             MDS.on_market_data(market_data=fake_data)
-
             self.engine.mds.on_market_data(market_data=fake_data)
             self.engine.position_tracker.on_market_data(market_data=fake_data)
             self.engine.__call__(market_data=fake_data)
+
             sim_match.__call__(market_data=fake_data)
             self.fake_market_data.append(fake_data)
 
@@ -446,6 +468,9 @@ class BackTest(object):
         for market_data in replay:  # type: MarketData
             ticker = market_data.ticker
 
+            if not is_market_session(market_data.timestamp):
+                continue
+
             if not start_ts:
                 start_ts = time.time()
 
@@ -464,7 +489,8 @@ class BackTest(object):
 
             self._sim_match_synthetic(market_data=market_data)
 
-        LOGGER.info(f'All done! time_cost: {time.time() - start_ts:,.3}s')
+        LOGGER.info(f'All done! time_cost: {time.time() - start_ts:,}s')
+        safe_exit()
 
     def bod(self, market_date: datetime.date, replay: ProgressiveReplay, **kwargs) -> None:
         if market_date not in self.calendar:
@@ -531,7 +557,7 @@ def main():
     tester = BackTest(
         index_name='000016.SH',
         start_date=datetime.date(2023, 1, 1),
-        end_date=datetime.date(2023, 2, 1)
+        end_date=datetime.date(2023, 4, 1)
     )
 
     tester.run()
