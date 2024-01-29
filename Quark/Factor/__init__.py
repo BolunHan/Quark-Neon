@@ -3,9 +3,11 @@ from functools import partial
 from typing import Iterable
 
 from AlgoEngine.Engine import MarketDataMonitor, MDS
+from PyQuantKit import MarketData, TickData, TradeData, TransactionData, OrderBook
 
 from .. import LOGGER
 from ..Base import GlobalStatics
+from ..Calibration.dummies import is_market_session
 
 LOGGER = LOGGER.getChild('Factor')
 TIME_ZONE = GlobalStatics.TIME_ZONE
@@ -17,8 +19,37 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
         assert name.startswith('Monitor')
         super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
 
+    def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
+        # filter the out session data
+        if not (is_market_session(market_data.timestamp) or allow_out_session):
+            return
+
+        self.on_market_data(market_data=market_data, **kwargs)
+
+        if isinstance(market_data, TickData):
+            self.on_tick_data(tick_data=market_data, **kwargs)
+        elif isinstance(market_data, (TradeData, TransactionData)):
+            self.on_trade_data(trade_data=market_data, **kwargs)
+        elif isinstance(market_data, OrderBook):
+            self.on_order_book(order_book=market_data, **kwargs)
+        else:
+            raise NotImplementedError(f"Can not handle market data type {type(market_data)}")
+
+    def on_market_data(self, market_data: MarketData, **kwargs):
+        pass
+
+    def on_tick_data(self, tick_data: TickData, **kwargs) -> None:
+        pass
+
+    def on_trade_data(self, trade_data: TradeData | TransactionData, **kwargs) -> None:
+        pass
+
+    def on_order_book(self, order_book: OrderBook, **kwargs) -> None:
+        pass
+
     @abc.abstractmethod
-    def factor_names(self, subscription: list[str]) -> list[str]: ...
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        ...
 
     """
     This method returns a list of string, corresponding with the keys of the what .value returns.
