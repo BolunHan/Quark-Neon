@@ -5,6 +5,9 @@ import numpy as np
 from PyQuantKit import MarketData, TradeData, TransactionData, TickData, BarData
 
 from .. import LOGGER
+from ..Calibration.dummies import is_market_session
+
+__all__ = ['IndexWeight', 'EMA', 'MACD', 'Synthetic', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler']
 
 
 class IndexWeight(dict):
@@ -560,6 +563,9 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         - NotImplementedError: If market data type is not supported.
 
         """
+        if market_data is not None and (not is_market_session(market_data.timestamp)):
+            return
+
         if market_data is not None and isinstance(market_data, (TradeData, TransactionData)):
             ticker = market_data.ticker
             volume = market_data.notional if use_notional else market_data.volume
