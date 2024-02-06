@@ -7,7 +7,7 @@ import pandas as pd
 
 from . import Regression, LOGGER
 from .Boosting import Boosting
-from .Linear import Bootstrap
+from .Linear import LinearBootstrap, LinearRegression
 from .kelly import kelly_bootstrap
 from ..Base import GlobalStatics
 
@@ -173,7 +173,7 @@ class Metrics(object):
         return y_actual_selected, y_pred_selected
 
     @classmethod
-    def _compute_kelly(cls, model: Regression | Bootstrap | Boosting, x: np.ndarray, max_pos: float = 2., cost: float = 0.):
+    def _compute_kelly(cls, model: Regression | LinearBootstrap | Boosting, x: np.ndarray, max_pos: float = 2., cost: float = 0.):
         if model.ensemble == 'bagging':
             return cls._compute_kelly_bagging(model=model, x=x, max_pos=max_pos, cost=cost)
         elif model.ensemble == 'boosting':
@@ -575,7 +575,7 @@ class CrossValidation(object):
         return x_train, y_train, x_val, y_val, val_indices
 
     def _predict(self, x):
-        if isinstance(self.model, Bootstrap):
+        if isinstance(self.model, LinearBootstrap):
             y_pred, prediction_interval, resampled_deviation, *_ = self.model.predict(x=x)
         elif isinstance(self.model, Boosting):
             y_pred, prediction_interval, *_ = self.model.predict(x=x)
@@ -618,6 +618,10 @@ class CrossValidation(object):
 
             # Predict on the validation data
             y_pred, prediction_interval, resampled_deviation = self._predict(x_val)
+
+            # this type model will accumulate bootstrap instances on each fit.
+            if isinstance(self.model, LinearRegression):
+                resampled_deviation = resampled_deviation[:, -self.model.bootstrap_samples:]
 
             fold_metrics['x_val'].append(x_val)
             fold_metrics['y_val'].append(y_val)
@@ -753,8 +757,10 @@ class CrossValidation(object):
                 showspikes=True
             ),
             yaxis2=dict(
+                title="Kelly",
                 anchor="free",
                 overlaying='y',
+                autoshift=True,
                 showgrid=False,  # Hide grid for y3 axis
                 showline=False,  # Hide line for y3 axis
                 zeroline=False,  # Hide zero line for y3 axis
@@ -776,6 +782,7 @@ class CrossValidation(object):
         self.prediction_interval = None
 
         self._metrics = None
+        self._fig = None
 
     @property
     def metrics(self) -> Metrics | None:
