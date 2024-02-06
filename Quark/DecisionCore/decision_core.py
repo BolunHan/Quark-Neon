@@ -231,7 +231,7 @@ class MajorityDecisionCore(DecisionCore):
         elif exposure > 0 and (prob_up < 0.5):
             action = -1
         # logic 1.5: unwind short position when down probability is small
-        elif exposure < 0 and (expected_down < 0.5):
+        elif exposure < 0 and (prob_down < 0.5):
             action = 1
         # logic 1.6: fully unwind if market is about to close
         elif exposure and datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE).time() >= datetime.time(14, 55):
