@@ -1,9 +1,9 @@
 import abc
 
-from ..Linear import Bootstrap
+from .. import Regression
 
 
-class Bagging(Bootstrap, metaclass=abc.ABCMeta):
+class Bagging(Regression, metaclass=abc.ABCMeta):
 
     @property
     def ensemble(self) -> str:
