@@ -24,7 +24,6 @@ import numpy as np
 from PyQuantKit import MarketData, TradeData, TransactionData
 from scipy.stats import rankdata
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
 
 from .. import FactorMonitor, EMA, FixedIntervalSampler, AdaptiveVolumeIntervalSampler
 
@@ -382,8 +381,9 @@ class TradeCoherenceMonitor(CoherenceMonitor):
             regressor.fit(X=x, y=y, sample_weight=weights_selected)
             # regressor.fit(X=x, y=y)
             slope = regressor.coef_[0]
-            y_pred = regressor.predict(x)
-            r2 = r2_score(y_true=y, y_pred=y_pred, sample_weight=weights_selected)
+            # from sklearn.metrics import r2_score
+            # y_pred = regressor.predict(x)
+            # r2 = r2_score(y_true=y, y_pred=y_pred, sample_weight=weights_selected)
             values.append(slope)
 
         return np.nanmean(values)
