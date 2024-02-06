@@ -2,13 +2,13 @@ import json
 
 import numpy as np
 
-from . import LOGGER, Bootstrap
+from . import LOGGER, LinearBootstrap
 from ..Kernel import Scaler, Transformer, LogTransformer, BinaryTransformer
 
 __all__ = ['LinearRegression', 'RidgeRegression', 'RidgeLogRegression', 'RidgeLogisticRegression', 'LassoRegression']
 
 
-class LinearRegression(Bootstrap):
+class LinearRegression(LinearBootstrap):
     """
     LinearRegression class for performing linear regression with bootstrapping.
 
@@ -35,7 +35,7 @@ class LinearRegression(Bootstrap):
         model.plot(x=x, y=y, x_axis=index)
     """
 
-    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, bootstrap_decay_rate: float = 0.2):
+    def __init__(self, bootstrap_samples: int = 100, bootstrap_block_size: float = 0.05, exponential_decay: float = 0.2, fixed_decay: float = 0.2):
         """
         Initialize the LinearRegression object.
 
@@ -48,7 +48,9 @@ class LinearRegression(Bootstrap):
         # parameters for bootstrap
         self.bootstrap_samples = bootstrap_samples
         self.bootstrap_block_size = bootstrap_block_size
-        self.bootstrap_decay_rate = bootstrap_decay_rate
+        self.exponential_decay = exponential_decay
+        self.fixed_decay = fixed_decay
+        self.pred_target = 'mean'  # or 'median'
 
         self.bootstrap_coefficients: list[np.ndarray] = []
 
@@ -56,11 +58,12 @@ class LinearRegression(Bootstrap):
         coefficient, residuals, *_ = np.linalg.lstsq(x, y, rcond=None)
         return coefficient, residuals
 
-    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
+    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard', memory_decay: bool = True):
         """
         Fit the linear regression model to the data.
 
         Args:
+            memory_decay:
             x (list or numpy.ndarray): Input features.
             y (list or numpy.ndarray): Output values.
             use_bootstrap (bool): Whether to perform bootstrap.
@@ -69,7 +72,8 @@ class LinearRegression(Bootstrap):
         Returns:
             None
         """
-        self.memory_decay(decay_rate=self.bootstrap_decay_rate)
+        if memory_decay:
+            self.memory_decay()
 
         coefficient, residuals = self._fit(x=x, y=y)
 
@@ -85,19 +89,36 @@ class LinearRegression(Bootstrap):
 
         return coefficient, residuals
 
-    def memory_decay(self, decay_rate: float) -> list[np.ndarray]:
+    def memory_decay(self, exponential_decay: float = None, fixed_decay: float = None) -> list[np.ndarray]:
         """
         lose memory by given percentage, return the popped coefficients
         Args:
-            decay_rate: the proportion of memory lost, in (0, 1)
-
+            exponential_decay: the proportion of memory lost, uniformed, in (0, 1)
+            fixed_decay: the proportion of memory lost, fifo, in (0, 1)
         Returns:
 
         """
-        assert 0 <= decay_rate <= 1, "decay_rate should be between 0 exclusive and 1 inclusive."
+
+        if exponential_decay is None:
+            exponential_decay = self.exponential_decay
+
+        if fixed_decay is None:
+            fixed_decay = self.fixed_decay
+
+        assert 0 <= exponential_decay <= 1, "decay_rate should be between 0 exclusive and 1 inclusive."
+        assert 0 <= fixed_decay <= 1, "decay_rate should be between 0 exclusive and 1 inclusive."
         memory_lost = []
 
-        n_pop = int(np.ceil(len(self.bootstrap_coefficients) * decay_rate))
+        # a shortcut
+        if self.exponential_decay == 0 and self.fixed_decay == 0:
+            return memory_lost
+        elif self.exponential_decay == 1 or self.fixed_decay == 1:
+            memory_lost = self.bootstrap_coefficients.copy()
+            self.bootstrap_coefficients.clear()
+            return memory_lost
+
+        # step 0: handle the exponential decay
+        n_pop = int(np.ceil(len(self.bootstrap_coefficients) * exponential_decay))
 
         if not n_pop:
             return memory_lost
@@ -108,6 +129,11 @@ class LinearRegression(Bootstrap):
             memory_lost.append(self.bootstrap_coefficients.pop(index))
             index += step - 1
             index = int(index)
+
+        # step 1: handle the fixed decay
+        n_pop = int(np.ceil(len(self.bootstrap_coefficients) * self.fixed_decay))
+        for _ in range(n_pop):
+            memory_lost.extend(self.bootstrap_coefficients.pop(0))
 
         return memory_lost
 
@@ -170,18 +196,35 @@ class LinearRegression(Bootstrap):
             Tuple(numpy.ndarray, numpy.ndarray, numpy.ndarray): Predicted values, prediction interval, and bootstrap residuals.
         """
         x = np.array(x)
+        bootstrap_results = []
+        bootstrap_deviation = []
 
         # Compute mean predictions and intervals for all input sets
-        y_pred = self._predict(x=x, coefficient=self.coefficient)
+        if self.pred_target == 'mean':
+            y_pred = self._predict(x=x, coefficient=self.coefficient)
 
-        if not self.bootstrap_coefficients:
-            return y_pred, None, None, np.nan
+            if not self.bootstrap_coefficients:
+                return y_pred, None, None, np.nan
 
-        bootstrap_deviation = []
-        for bootstrap_coefficient in self.bootstrap_coefficients:
-            y_bootstrap = self._predict(x=x, coefficient=bootstrap_coefficient)
-            deviation = y_bootstrap - y_pred
-            bootstrap_deviation.append(deviation)
+            for bootstrap_coefficient in self.bootstrap_coefficients:
+                y_bootstrap = self._predict(x=x, coefficient=bootstrap_coefficient)
+                deviation = y_bootstrap - y_pred
+                bootstrap_results.append(y_bootstrap)
+                bootstrap_deviation.append(deviation)
+        elif self.pred_target == 'median':
+            if not self.bootstrap_coefficients:
+                raise ValueError('No bootstrap coefficients found! Model must be fitted first!')
+
+            for bootstrap_coefficient in self.bootstrap_coefficients:
+                y_bootstrap = self._predict(x=x, coefficient=bootstrap_coefficient)
+                bootstrap_results.append(y_bootstrap)
+
+            y_pred = np.nanmedian(bootstrap_results)
+            for y_bootstrap in bootstrap_results:
+                deviation = y_bootstrap - y_pred
+                bootstrap_deviation.append(deviation)
+        else:
+            raise NotImplementedError(f'Invalid prediction target {self.pred_target}')
 
         bootstrap_deviation = np.array(bootstrap_deviation).T
 
@@ -321,7 +364,8 @@ class LinearRegression(Bootstrap):
             coefficient=self.coefficient.tolist() if self.coefficient is not None else None,
             bootstrap_samples=self.bootstrap_samples,
             bootstrap_block_size=self.bootstrap_block_size,
-            bootstrap_decay_rate=self.bootstrap_decay_rate,
+            exponential_decay=self.exponential_decay,
+            fixed_decay=self.fixed_decay,
             bootstrap_coefficients=[_.tolist() for _ in self.bootstrap_coefficients]
         )
 
@@ -351,7 +395,8 @@ class LinearRegression(Bootstrap):
         self = cls(
             bootstrap_samples=json_dict['bootstrap_samples'],
             bootstrap_block_size=json_dict['bootstrap_block_size'],
-            bootstrap_decay_rate=json_dict['bootstrap_decay_rate']
+            exponential_decay=json_dict['exponential_decay'],
+            fixed_decay=json_dict['fixed_decay']
         )
 
         self.coefficient = np.array(json_dict['coefficient'])
@@ -382,9 +427,8 @@ class RidgeRegression(LinearRegression):
         Initialize the BootstrapRidgeRegression object.
 
         Args:
-            bootstrap_samples (int): Number of bootstrap samples to generate.
-            bootstrap_block_size (float): Block size as a percentage of the dataset length for block bootstrap.
             alpha (float): Regularization strength.
+            scaler (Scaler): The scaler object.
         """
 
         self.alpha = alpha
@@ -392,7 +436,7 @@ class RidgeRegression(LinearRegression):
 
         super().__init__(**kwargs)
 
-    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
+    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard', memory_decay: bool = True):
         if self.scaler is not None:
             x = np.array(x)
             self.scaler.fit(x)
@@ -400,7 +444,7 @@ class RidgeRegression(LinearRegression):
         else:
             x_scaled = x
 
-        return super().fit(x=x_scaled, y=y, use_bootstrap=use_bootstrap, method=method)
+        return super().fit(x=x_scaled, y=y, use_bootstrap=use_bootstrap, method=method, memory_decay=memory_decay)
 
     def _fit2(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         n, m = x.shape
@@ -479,7 +523,7 @@ class RidgeRegression(LinearRegression):
         if not cv.strict_no_future:
             LOGGER.warning('The cross validation is not using strict_no_future mode. Future data leak is possible. Proceed with caution!')
 
-        if not cv.model is self:
+        if cv.model is not self:
             raise ValueError('The model of cv should be the is not this model!')
 
         for i in range(steps + 1):
@@ -538,7 +582,7 @@ class RidgeLogRegression(RidgeRegression):
         self.transformer = kwargs.pop('transformer', LogTransformer())
         super().__init__(*kwargs)
 
-    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard'):
+    def fit(self, x: list | np.ndarray, y: list | np.ndarray, use_bootstrap=True, method='standard', memory_decay: bool = True):
         if self.transformer is None:
             LOGGER.warning(f'No transformer set for {self.__class__.__name__}. If this is intended, please use RidgeRegression instead.')
             _x, _y = x, y
@@ -547,7 +591,7 @@ class RidgeLogRegression(RidgeRegression):
             _x, _y = x[mask], y[mask]
             _y = self.transformer.transform(_y)
 
-        super().fit(x=_x, y=_y, use_bootstrap=use_bootstrap, method=method)
+        super().fit(x=_x, y=_y, use_bootstrap=use_bootstrap, method=method, memory_decay=memory_decay)
 
     def predict(self, x: list | np.ndarray, alpha=0.05):
         x = np.array(x)

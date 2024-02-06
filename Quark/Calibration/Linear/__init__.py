@@ -7,7 +7,7 @@ from .. import LOGGER, Regression
 LOGGER = LOGGER.getChild('Linear')
 
 
-class Bootstrap(Regression, metaclass=abc.ABCMeta):
+class LinearBootstrap(Regression, metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def bootstrap_standard(self, x: np.ndarray, y: np.ndarray) -> None:
