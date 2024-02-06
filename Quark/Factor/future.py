@@ -60,7 +60,7 @@ def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 
         return pd.DataFrame({'pct_change': pd.Series(target).astype(float)})
 
 
-def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.market_price', inplace: bool = True, session_filter=None, decoder: RecursiveDecoder = None, decode_level=4, enable_smooth: bool = True, smooth_alpha=0.008, smooth_look_back=5 * 60) -> pd.DataFrame:
+def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.market_price', inplace: bool = True, session_filter=None, decoder: RecursiveDecoder = None, decode_level=4, enable_smooth: bool = True, smooth_alpha=0.008, smooth_look_back=15 * 60) -> pd.DataFrame:
     if not inplace:
         factors = pd.DataFrame({key: factors[key]})
 
@@ -91,10 +91,7 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
     factors['local_max'] = np.nan
     factors['local_min'] = np.nan
 
-    for i in range(len(local_extreme)):
-        _, start_ts, flag = local_extreme[i]
-        end_ts = local_extreme[i + 1][1] if i + 1 < len(local_extreme) else None
-
+    for (_, start_ts, flag), (_, end_ts, _) in zip(local_extreme, local_extreme[1:] + [(None, factors.index[-1], None)]):
         # Step 1: Reverse the selected DataFrame
         if start_ts is None:
             info_selected = factors.loc[:end_ts][::-1]
@@ -117,7 +114,7 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
     factors['down_actual'] = factors['local_min'] / factors[key] - 1
     factors['target_actual'] = np.where(factors['state'] == 1, factors['up_actual'],
                                         np.where(factors['state'] == -1, factors['down_actual'],
-                                                 (factors['up_actual'] + factors['down_actual']) / 2))
+                                                 (factors['up_actual'] + factors['down_actual'])))
 
     # step 3: smooth out the breaking points
     if not enable_smooth:
@@ -125,36 +122,38 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
 
     factors['up_smoothed'] = factors['up_actual']
     factors['down_smoothed'] = factors['down_actual']
+    factors['target_smoothed'] = factors['target_actual']
 
-    for i in range(len(local_extreme) - 1):
-        previous_extreme = local_extreme[i - 1] if i > 0 else None
-        break_point = local_extreme[i]
-        next_extreme = local_extreme[i + 1]
-        next_extreme_price = next_extreme[0]
-        break_ts = break_point[1]
-        break_type = break_point[2]
-        start_ts = max(previous_extreme[1], break_ts - smooth_look_back) if previous_extreme else break_ts - smooth_look_back
-        end_ts = break_ts
+    for previous_extreme, current_extreme, next_extreme in zip(local_extreme, local_extreme[1:], local_extreme[2:]):
+        _, previous_ts, _ = previous_extreme
+        break_price, break_ts, break_type = current_extreme
+        next_extreme_price, _, _ = next_extreme
 
-        smooth_range = factors.loc[start_ts:end_ts]
+        start_ts = max(break_ts - smooth_look_back, previous_ts)
+        smooth_range = factors.loc[start_ts:break_ts]
 
-        if break_type == 1:  # approaching to local maximum, use downward profit is discontinuous, using "up_actual" to smooth out
-            max_loss = (-smooth_range.up_actual[::-1]).cummin()[::-1]
-            potential = (next_extreme_price / smooth_range[key] - 1).clip(None, 0)
-            hold_prob = (-max_loss).apply(lambda _: 1 - _ / smooth_alpha if _ < smooth_alpha else 0)
-            smoothed = potential * hold_prob + smooth_range.down_actual * (1 - hold_prob)
-            factors['down_smoothed'].update(smoothed)
-        elif break_type == -1:
-            max_loss = smooth_range.down_actual[::-1].cummin()[::-1]
-            potential = (next_extreme_price / smooth_range[key] - 1).clip(0, None)
-            hold_prob = (-max_loss).apply(lambda _: 1 - _ / smooth_alpha if _ < smooth_alpha else 0)
-            smoothed = potential * hold_prob + smooth_range.up_actual * (1 - hold_prob)
-            factors['up_smoothed'].update(smoothed)
+        # approaching a local minimum break
+        if break_type == -1:
+            potential_loss = smooth_range.down_actual[::-1].cummin()[::-1]
+            potential_gain = (next_extreme_price / smooth_range[key] - 1).clip(0, None)
+            max_loss = min(potential_loss)
+            smooth_threshold = max(max_loss, -smooth_alpha)
+            hold_prob = potential_loss.apply(lambda _: 1 - _ / smooth_threshold if _ > smooth_threshold else 0)
+            up_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.up_actual
+            target_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.down_smoothed
+            factors['up_smoothed'].update(up_smoothed)
+            factors['target_smoothed'].update(target_smoothed)
+        elif break_type == 1:
+            potential_loss = (-smooth_range.up_actual[::-1]).cummin()[::-1]
+            potential_gain = (next_extreme_price / smooth_range[key] - 1).clip(None, 0)  # in this case, the potential gain is negative,
+            max_loss = min(potential_loss)
+            smooth_threshold = max(max_loss, -smooth_alpha)
+            hold_prob = potential_loss.apply(lambda _: 1 - _ / smooth_threshold if _ > smooth_threshold else 0)
+            down_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.down_actual
+            target_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.up_smoothed
+            factors['down_smoothed'].update(down_smoothed)
+            factors['target_smoothed'].update(target_smoothed)
         else:
             continue
-
-    factors['target_smoothed'] = np.where(factors['state'] == 1, factors['up_smoothed'],
-                                          np.where(factors['state'] == -1, factors['down_smoothed'],
-                                                   (factors['up_smoothed'] + factors['down_smoothed']) / 2))
 
     return factors
