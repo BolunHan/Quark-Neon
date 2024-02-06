@@ -1,4 +1,5 @@
 import abc
+import enum
 from collections import deque
 
 import numpy as np
@@ -371,6 +372,10 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
 
     """
 
+    class Mode(enum.Enum):
+        update = 'update'
+        accumulate = 'accumulate'
+
     def __init__(self, sampling_interval: float = 1., sample_size: int = 60):
         """
         Initialize the FixedIntervalSampler.
@@ -392,9 +397,12 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         if sample_size <= 2:
             LOGGER.warning(f"{self.__class__.__name__} should have a larger sample_size, by Shannon's Theorem, sample_size should be greater than 2")
 
-    def register_sampler(self, name: str, mode: str = 'update'):
+    def register_sampler(self, name: str, mode: str | Mode = 'update'):
         if name in self.sample_storage:
             raise ValueError(f'name {name} already registered in {self.__class__.__name__}!')
+
+        if isinstance(mode, self.Mode):
+            mode = mode.value
 
         if mode not in ['update', 'accumulate']:
             raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
@@ -493,10 +501,14 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         self.sample_storage.clear()
 
-    def loc_obs(self, name: str, ticker: str, index: int) -> float:
+    def loc_obs(self, name: str, ticker: str, index: int | slice = None) -> float | list[float]:
         sampler = self.get_sampler(name=name)
         observation = sampler.get(ticker, {})
-        return list(observation.values())[index]
+
+        if index is None:
+            return list(observation.values())
+        else:
+            return list(observation.values())[index]
 
     def active_obs(self, name: str) -> dict[str, float]:
         sampler = self.get_sampler(name=name)
