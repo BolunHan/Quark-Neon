@@ -499,7 +499,7 @@ class BackTest(object):
         LOGGER.info(f'Starting {market_date} bod process...')
         self.market_date = market_date
 
-        # Startup task 0: Update subscription
+        # Startup task 0: Update index weights
         self._update_index_weights(market_date=market_date)
 
         # Backtest specific Startup action 1: Unzip data
