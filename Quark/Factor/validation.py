@@ -35,7 +35,7 @@ from ..Profile import cn
 
 cn.profile_cn_override()
 LOGGER = LOGGER.getChild('validation')
-DUMMY_WEIGHT = False
+DUMMY_WEIGHT = True
 TIME_ZONE = GlobalStatics.TIME_ZONE
 RANGE_BREAK = GlobalStatics.RANGE_BREAK
 START_DATE = datetime.date(2023, 1, 1)
@@ -88,29 +88,31 @@ class FactorValidation(object):
 
         # Params for validation
         self.poly_degree = kwargs.get('poly_degree', 1)
-        self.pred_var = kwargs.get('pred_var', 'target_smoothed')
+        self.pred_var = kwargs.get('pred_var', ['target_smoothed', 'target_actual'])
         self.decoder = RecursiveDecoder(level=3)
         self.pred_target = f'{self.index_name}.market_price'
         self.features = [
             'TradeFlow.Adaptive.Index.Imbalance',
-            'TradeFlow.Adaptive.Index.Determinant',
+            'TradeFlow.Adaptive.Index.Entropy',
+            'TradeFlow.Adaptive.Index.Boosted',
+            'TradeFlow.Adaptive.Index.Slope',
         ]
 
         self.factor: FactorMonitor | None = None
         self.synthetic = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights, interval=self.sampling_interval)
         self.subscription = set()
         self.factor_value: dict[float, dict[str, float]] = {}
-        self.metrics = {}
 
-        self.model = RidgeRegression(alpha=1., exponential_decay=0.25, fixed_decay=0.5)  # for ridge regression (build linear baseline)
-        self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
+        self.model = {pred_var: RidgeRegression(alpha=1., exponential_decay=0.25, fixed_decay=0.5) for pred_var in self.pred_var}  # for ridge regression (build linear baseline)
+        self.cv = {pred_var: CrossValidation(model=self.model[pred_var], folds=10, shuffle=True, strict_no_future=True) for pred_var in self.pred_var}
+        self.metrics = {pred_var: {} for pred_var in self.pred_var}
         self.validation_id = kwargs.get('validation_id', self._get_validation_id())
 
     def _get_validation_id(self):
         validation_id = 1
 
         while True:
-            dump_dir = f'{self.__class__.__name__}.{self.model.__class__.__name__}.{validation_id}'
+            dump_dir = f'{self.__class__.__name__}.{validation_id}'
             if os.path.isdir(dump_dir):
                 validation_id += 1
             else:
@@ -125,14 +127,14 @@ class FactorValidation(object):
         synthetic = collect_factor(monitors=self.synthetic)
         entry_log.update(synthetic)
 
-    def _cross_validation(self, x, y, factors: pd.DataFrame):
+    def _cross_validation(self, x, y, factors: pd.DataFrame, cv: CrossValidation):
         valid_mask = np.all(np.isfinite(x), axis=1) & np.isfinite(y)
         x = x[valid_mask]
         y = y[valid_mask]
         x_axis = np.array([datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in factors.index])[valid_mask]
 
-        self.cv.cross_validate(x=x, y=y)
-        self.cv.x_axis = x_axis
+        cv.cross_validate(x=x, y=y)
+        cv.x_axis = x_axis
 
     def _candle_sticks(self, factor_value: pd.DataFrame):
         import plotly.graph_objects as go
@@ -148,9 +150,9 @@ class FactorValidation(object):
 
         return candlestick_trace
 
-    def _plot_cv(self, factors: pd.DataFrame, plot_wavelet: bool = True):
+    def _plot_cv(self, pred_var: str, factors: pd.DataFrame, plot_wavelet: bool = True):
         import plotly.graph_objects as go
-        fig = self.cv.plot()
+        fig = self.cv[pred_var].plot()
 
         candlestick_trace = self._candle_sticks(factor_value=factors)
         candlestick_trace['yaxis'] = 'y3'
@@ -271,15 +273,18 @@ class FactorValidation(object):
         # Step 1: Add define prediction target
         factor_value = pd.DataFrame(self.factor_value).T
 
-        x = define_inputs(factor_value=factor_value, input_vars=self.features, poly_degree=self.poly_degree).to_numpy()
-        y = define_prediction(factor_value=factor_value, pred_var=self.pred_var, decoder=self.decoder, key=self.pred_target)
-        y = (y - np.nanmedian(y)).to_numpy()
+        for pred_var in self.pred_var:
+            cv = self.cv[pred_var]
 
-        # Step 2: Regression analysis
-        self._cross_validation(x=x, y=y, factors=factor_value)
+            x = define_inputs(factor_value=factor_value, input_vars=self.features, poly_degree=self.poly_degree).to_numpy()
+            y = define_prediction(factor_value=factor_value, pred_var=pred_var, decoder=self.decoder, key=self.pred_target)
+            y = (y - np.nanmedian(y)).to_numpy()
+
+            # Step 2: Regression analysis
+            self._cross_validation(x=x, y=y, factors=factor_value, cv=cv)
 
     def dump_result(self, market_date: datetime.date):
-        dump_dir = f'{self.__class__.__name__}.{self.model.__class__.__name__}.{self.validation_id}'
+        dump_dir = f'{self.__class__.__name__}.{self.validation_id}'
         os.makedirs(dump_dir, exist_ok=True)
 
         factor_value = pd.DataFrame(self.factor_value).T
@@ -288,13 +293,18 @@ class FactorValidation(object):
         os.makedirs(entry_dir, exist_ok=True)
 
         factor_value.to_csv(pathlib.Path(entry_dir, f'{self.factor.name}.validation.csv'))
-        fig = self._plot_cv(factors=factor_value)
-        fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.validation.html'))
+        for pred_var in self.pred_var:
+            model = self.model[pred_var]
+            cv = self.cv[pred_var]
+            metrics = self.metrics[pred_var]
 
-        self.metrics[market_date] = self.cv.metrics.metrics
-        pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
+            fig = self._plot_cv(pred_var=pred_var, factors=factor_value)
+            fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.{pred_var}.validation.html'))
 
-        self.model.dump(pathlib.Path(dump_dir, f'{self.model.__class__.__name__}.json'))
+            model.dump(pathlib.Path(entry_dir, f'{model.__class__.__name__}.{pred_var}.json'))
+
+            metrics[market_date] = cv.metrics.metrics
+            pd.DataFrame(metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.{pred_var}.csv'))
 
     def reset(self):
         """
@@ -305,7 +315,8 @@ class FactorValidation(object):
 
         self.factor_value.clear()
         self.decoder.clear()
-        self.cv.clear()
+        for _ in self.cv.values():
+            _.clear()
 
     def run(self):
         """
@@ -624,7 +635,7 @@ class FactorBatchValidation(FactorValidation):
         self.factor_pool.dump(factor_dir=self.cache_dir)
 
     def dump_result(self, market_date: datetime.date):
-        dump_dir = f'{self.__class__.__name__}.{self.model.__class__.__name__}.{self.validation_id}'
+        dump_dir = f'{self.__class__.__name__}.{self.validation_id}'
         os.makedirs(dump_dir, exist_ok=True)
 
         factor_value = pd.DataFrame(self.factor_value).T
@@ -637,20 +648,25 @@ class FactorBatchValidation(FactorValidation):
         else:
             file_name = f'{"".join([f"[{factor.name}]" for factor in self.factor])}.validation'
 
-        if self.cv.x_val is not None:
-            fig = self._plot_cv(factors=factor_value)
-            fig.write_html(pathlib.Path(entry_dir, f'{file_name}.pred.html'))
-
-            self.model.dump(pathlib.Path(entry_dir, f'{file_name}.model.json'))
-            self.cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.metrics.html'))
-
-            self.metrics[market_date] = self.cv.metrics.metrics
-            pd.DataFrame(self.metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.csv'))
-
         factor_value.to_csv(pathlib.Path(entry_dir, f'{file_name}.factors.csv'))
 
         fig = self._plot_factors(factors=factor_value)
         fig.write_html(pathlib.Path(entry_dir, f'{file_name}.factor.html'))
+
+        for pred_var in self.pred_var:
+            model = self.model[pred_var]
+            cv = self.cv[pred_var]
+            metrics = self.metrics[pred_var]
+
+            if cv.x_val is not None:
+                fig = self._plot_cv(pred_var=pred_var, factors=factor_value)
+                fig.write_html(pathlib.Path(entry_dir, f'{file_name}.{pred_var}.pred.html'))
+
+                model.dump(pathlib.Path(entry_dir, f'{file_name}.{pred_var}.model.json'))
+                cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.{pred_var}.metrics.html'))
+
+                metrics[market_date] = cv.metrics.metrics
+                pd.DataFrame(metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.{pred_var}.csv'))
 
     def bod(self, market_date: datetime.date, replay: ProgressiveReplay, **kwargs) -> None:
 
@@ -676,7 +692,9 @@ class FactorBatchValidation(FactorValidation):
         self.factor_value.clear()
         self.factor_cache.clear()
         self.decoder.clear()
-        self.cv.clear()
+
+        for _ in self.cv.values():
+            _.clear()
 
 
 class InterTemporalValidation(FactorBatchValidation):
@@ -690,7 +708,7 @@ class InterTemporalValidation(FactorBatchValidation):
         self.training_days: int = kwargs.get('training_days', 5)
         self.factor_value_storage = deque(maxlen=self.training_days)
 
-    def _out_sample_validation(self, x_train, y_train, x_val, y_val, factors: pd.DataFrame):
+    def _out_sample_validation(self, x_train, y_train, x_val, y_val, factors: pd.DataFrame, cv: CrossValidation):
         x_axis = np.array([datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in factors.index])
 
         valid_mask = np.all(np.isfinite(x_train), axis=1) & np.isfinite(y_train)
@@ -705,36 +723,40 @@ class InterTemporalValidation(FactorBatchValidation):
         # if isinstance(self.model, RidgeRegression):
         #     self.model.optimal_alpha(x=x_train, y=y_train)
 
-        self.cv.validate(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
-        self.cv.x_axis = x_axis
+        cv.validate(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
+        cv.x_axis = x_axis
 
     def validation(self, market_date: datetime.date):
         self.factor_value_storage.append(self.factor_value.copy())
         LOGGER.info(f'{market_date} validation started with {len(self.factor_value_storage):,} days obs.')
 
-        # Step 1: define training set
-        x_list, y_list = [], []
-        for factor_value in self.factor_value_storage:
-            factor_value = pd.DataFrame(factor_value).T
-            self.decoder.clear()
-
-            _x = define_inputs(factor_value=factor_value, input_vars=self.features, poly_degree=self.poly_degree).to_numpy()
-            _y = define_prediction(factor_value=factor_value, pred_var=self.pred_var, decoder=self.decoder, key=self.pred_target)
-            _y = (_y - np.nanmedian(_y)).to_numpy()
-
-            x_list.append(_x)
-            y_list.append(_y)
-
-        if len(x_list) <= 1:
-            return
-
-        x_train = np.concatenate(x_list[:-1])
-        y_train = np.concatenate(y_list[:-1])
-        x_val, y_val = x_list[-1], y_list[-1]
-
-        # Step 2: define validation set
         factor_value = pd.DataFrame(self.factor_value).T
-        self._out_sample_validation(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, factors=factor_value)
+
+        for pred_var in self.pred_var:
+            cv = self.cv[pred_var]
+
+            # Step 1: define training set
+            x_list, y_list = [], []
+            for factor_value in self.factor_value_storage:
+                factor_value = pd.DataFrame(factor_value).T
+                self.decoder.clear()
+
+                _x = define_inputs(factor_value=factor_value, input_vars=self.features, poly_degree=self.poly_degree).to_numpy()
+                _y = define_prediction(factor_value=factor_value, pred_var=pred_var, decoder=self.decoder, key=self.pred_target)
+                _y = (_y - np.nanmedian(_y)).to_numpy()
+
+                x_list.append(_x)
+                y_list.append(_y)
+
+            if len(x_list) <= 1:
+                return
+
+            x_train = np.concatenate(x_list[:-1])
+            y_train = np.concatenate(y_list[:-1])
+            x_val, y_val = x_list[-1], y_list[-1]
+
+            # Step 2: define validation set
+            self._out_sample_validation(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, factors=factor_value, cv=cv)
 
 
 class FactorValidatorExperiment(InterTemporalValidation):
