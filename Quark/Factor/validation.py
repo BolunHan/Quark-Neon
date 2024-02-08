@@ -26,6 +26,7 @@ from .factor_pool import FACTOR_POOL, FactorPoolDummyMonitor
 from ..API import historical
 from ..Backtest import simulated_env
 from ..Base import safe_exit, GlobalStatics
+from ..Calibration.Kernel import SigmoidTransformer, BinaryTransformer
 from ..Calibration.Linear.bootstrap import *
 from ..Calibration.cross_validation import CrossValidation
 from ..Calibration.dummies import is_market_session
@@ -103,9 +104,16 @@ class FactorValidation(object):
         self.subscription = set()
         self.factor_value: dict[float, dict[str, float]] = {}
 
-        self.model = {pred_var: RidgeRegression(alpha=1., exponential_decay=0.25, fixed_decay=0.5) for pred_var in self.pred_var}  # for ridge regression (build linear baseline)
-        self.cv = {pred_var: CrossValidation(model=self.model[pred_var], folds=10, shuffle=True, strict_no_future=True) for pred_var in self.pred_var}
-        self.metrics = {pred_var: {} for pred_var in self.pred_var}
+        self.model = {
+            pred_var:
+                RidgeLogRegression(alpha=.2, transformer=SigmoidTransformer(lower_bound=0., upper_bound=0.02)) if pred_var in ['up_actual', 'up_smoothed'] else
+                RidgeLogRegression(alpha=.2, transformer=SigmoidTransformer(lower_bound=-0.02, upper_bound=0.)) if pred_var in ['down_actual', 'down_smoothed'] else
+                RidgeLogisticRegression(alpha=.2, transformer=BinaryTransformer(center=0, scale=1.)) if pred_var in ['state'] else
+                RidgeRegression(alpha=.2, exponential_decay=0.25, fixed_decay=0.5)
+            for pred_var in self.pred_var
+        }
+        self.cv = {pred_var: CrossValidation(model=model, folds=10, shuffle=True, strict_no_future=True) for pred_var, model in self.model.items()}
+        self.metrics = {pred_var: {} for pred_var in self.cv}
         self.validation_id = kwargs.get('validation_id', self._get_validation_id())
 
     def _get_validation_id(self):
@@ -150,9 +158,9 @@ class FactorValidation(object):
 
         return candlestick_trace
 
-    def _plot_cv(self, pred_var: str, factors: pd.DataFrame, plot_wavelet: bool = True):
+    def _plot_cv(self, cv: CrossValidation, factors: pd.DataFrame, plot_wavelet: bool = True):
         import plotly.graph_objects as go
-        fig = self.cv[pred_var].plot()
+        fig = cv.plot()
 
         candlestick_trace = self._candle_sticks(factor_value=factors)
         candlestick_trace['yaxis'] = 'y3'
@@ -270,18 +278,22 @@ class FactorValidation(object):
 
         LOGGER.info(f'{market_date} validation started with {len(self.factor_value):,} obs.')
 
-        # Step 1: Add define prediction target
         factor_value = pd.DataFrame(self.factor_value).T
 
         for pred_var in self.pred_var:
             cv = self.cv[pred_var]
+            metrics = self.metrics[pred_var]
 
+            # Step 1: define input and target
             x = define_inputs(factor_value=factor_value, input_vars=self.features, poly_degree=self.poly_degree).to_numpy()
             y = define_prediction(factor_value=factor_value, pred_var=pred_var, decoder=self.decoder, key=self.pred_target)
             y = (y - np.nanmedian(y)).to_numpy()
 
             # Step 2: Regression analysis
             self._cross_validation(x=x, y=y, factors=factor_value, cv=cv)
+
+            # Step 3: Log metrics
+            metrics[market_date] = cv.metrics.metrics
 
     def dump_result(self, market_date: datetime.date):
         dump_dir = f'{self.__class__.__name__}.{self.validation_id}'
@@ -298,12 +310,10 @@ class FactorValidation(object):
             cv = self.cv[pred_var]
             metrics = self.metrics[pred_var]
 
-            fig = self._plot_cv(pred_var=pred_var, factors=factor_value)
+            fig = self._plot_cv(cv=cv, factors=factor_value)
             fig.write_html(pathlib.Path(entry_dir, f'{self.factor.name}.{pred_var}.validation.html'))
 
             model.dump(pathlib.Path(entry_dir, f'{model.__class__.__name__}.{pred_var}.json'))
-
-            metrics[market_date] = cv.metrics.metrics
             pd.DataFrame(metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.{pred_var}.csv'))
 
     def reset(self):
@@ -338,6 +348,7 @@ class FactorValidation(object):
             tick_size=0.001,
         )
 
+        entry_log = {}
         for market_data in replay:  # type: MarketData
             if not is_market_session(market_data.timestamp):
                 continue
@@ -347,10 +358,13 @@ class FactorValidation(object):
             timestamp_index = int(market_data.timestamp // self.sampling_interval) * self.sampling_interval
 
             if timestamp_index not in self.factor_value:
-                entry_log = self.factor_value[timestamp_index] = {}
+                # update last log entry
                 self._collect_factor(entry_log=entry_log)
-            else:
-                entry_log = self.factor_value[timestamp_index]
+                # init new entry
+                entry_log = self.factor_value[timestamp_index] = {}
+            # optional: update log entry
+            # else:
+            #     entry_log = self.factor_value[timestamp_index]
 
             entry_log[f'{market_data.ticker}.market_price'] = market_data.market_price
 
@@ -659,13 +673,11 @@ class FactorBatchValidation(FactorValidation):
             metrics = self.metrics[pred_var]
 
             if cv.x_val is not None:
-                fig = self._plot_cv(pred_var=pred_var, factors=factor_value)
+                fig = self._plot_cv(cv=cv, factors=factor_value)
                 fig.write_html(pathlib.Path(entry_dir, f'{file_name}.{pred_var}.pred.html'))
 
                 model.dump(pathlib.Path(entry_dir, f'{file_name}.{pred_var}.model.json'))
                 cv.metrics.to_html(pathlib.Path(entry_dir, f'{file_name}.{pred_var}.metrics.html'))
-
-                metrics[market_date] = cv.metrics.metrics
                 pd.DataFrame(metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.{pred_var}.csv'))
 
     def bod(self, market_date: datetime.date, replay: ProgressiveReplay, **kwargs) -> None:
@@ -708,7 +720,8 @@ class InterTemporalValidation(FactorBatchValidation):
         self.training_days: int = kwargs.get('training_days', 5)
         self.factor_value_storage = deque(maxlen=self.training_days)
 
-    def _out_sample_validation(self, x_train, y_train, x_val, y_val, factors: pd.DataFrame, cv: CrossValidation):
+    @classmethod
+    def _out_sample_validation(cls, x_train, y_train, x_val, y_val, factors: pd.DataFrame, cv: CrossValidation):
         x_axis = np.array([datetime.datetime.fromtimestamp(_, tz=TIME_ZONE) for _ in factors.index])
 
         valid_mask = np.all(np.isfinite(x_train), axis=1) & np.isfinite(y_train)
@@ -726,6 +739,31 @@ class InterTemporalValidation(FactorBatchValidation):
         cv.validate(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
         cv.x_axis = x_axis
 
+    def _split_test_set(self, pred_var: str, features: list[str], factor_value_storage: list[dict[float, dict[str, float]]]):
+        x_list, y_list = [], []
+        for factor_value in factor_value_storage:
+            factor_value = pd.DataFrame(factor_value).T
+            self.decoder.clear()
+
+            _x = define_inputs(factor_value=factor_value, input_vars=features, poly_degree=self.poly_degree).to_numpy()
+            _y = define_prediction(factor_value=factor_value, pred_var=pred_var, decoder=self.decoder, key=self.pred_target)
+            _y = (_y - np.nanmedian(_y)).to_numpy()
+
+            x_list.append(_x)
+            y_list.append(_y)
+
+        if not x_list:
+            x_train = y_train = x_val = y_val = None
+        elif len(x_list) == 1:
+            x_train = y_train = None
+            x_val, y_val = x_list[-1], y_list[-1]
+        else:
+            x_train = np.concatenate(x_list[:-1])
+            y_train = np.concatenate(y_list[:-1])
+            x_val, y_val = x_list[-1], y_list[-1]
+
+        return x_train, y_train, x_val, y_val
+
     def validation(self, market_date: datetime.date):
         self.factor_value_storage.append(self.factor_value.copy())
         LOGGER.info(f'{market_date} validation started with {len(self.factor_value_storage):,} days obs.')
@@ -734,29 +772,30 @@ class InterTemporalValidation(FactorBatchValidation):
 
         for pred_var in self.pred_var:
             cv = self.cv[pred_var]
+            metrics = self.metrics[pred_var]
 
-            # Step 1: define training set
-            x_list, y_list = [], []
-            for factor_value in self.factor_value_storage:
-                factor_value = pd.DataFrame(factor_value).T
-                self.decoder.clear()
+            # Step 1: define input and target
+            x_train, y_train, x_val, y_val = self._split_test_set(
+                pred_var=pred_var,
+                features=self.features,
+                factor_value_storage=list(self.factor_value_storage)
+            )
 
-                _x = define_inputs(factor_value=factor_value, input_vars=self.features, poly_degree=self.poly_degree).to_numpy()
-                _y = define_prediction(factor_value=factor_value, pred_var=pred_var, decoder=self.decoder, key=self.pred_target)
-                _y = (_y - np.nanmedian(_y)).to_numpy()
-
-                x_list.append(_x)
-                y_list.append(_y)
-
-            if len(x_list) <= 1:
+            if x_train is None:
                 return
 
-            x_train = np.concatenate(x_list[:-1])
-            y_train = np.concatenate(y_list[:-1])
-            x_val, y_val = x_list[-1], y_list[-1]
+            # Step 2: Cross validation
+            self._out_sample_validation(
+                x_train=x_train,
+                y_train=y_train,
+                x_val=x_val,
+                y_val=y_val,
+                factors=factor_value,
+                cv=cv
+            )
 
-            # Step 2: define validation set
-            self._out_sample_validation(x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, factors=factor_value, cv=cv)
+            # Step 3: Log metrics
+            metrics[market_date] = cv.metrics.metrics
 
 
 class FactorValidatorExperiment(InterTemporalValidation):
@@ -766,9 +805,6 @@ class FactorValidatorExperiment(InterTemporalValidation):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.model = RidgeRegression(alpha=0.1)
-        # self.model = XGBoost()
-        self.cv = CrossValidation(model=self.model, folds=10, shuffle=True, strict_no_future=True)
         self.features: list[str] = [
             # 'Skewness.PricePct.Index.Adaptive.Index',
             # 'Skewness.PricePct.Index.Adaptive.Slope',
@@ -883,6 +919,262 @@ class FactorValidatorExperiment(InterTemporalValidation):
         self.factor_pool.dump(factor_dir=self.cache_dir)
 
 
+class FactorParamsOptimizer(InterTemporalValidation):
+    """
+    similar to .grid_cv of the sklearn
+    factor = operator(params)
+    monitor a list of the factor (same opterator with varied params),
+    calculate metrics using cross validation
+    select the best parameter and use in the next day
+    update the factor cache with the factor with (approx-) optimal params
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        # amend default cache dir
+        self.cache_dir = kwargs.get('cache_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'opt_factor_cache'))
+
+        # add two more kwargs
+        self.parent_factor = kwargs.get('parent_factor',
+                                        TradeFlowAdaptiveIndexMonitor(
+                                            sampling_interval=3 * 5,
+                                            sample_size=20,
+                                            baseline_window=100,
+                                            weights=self.index_weights,
+                                            aligned_interval=False
+                                        ))
+        self.features = kwargs.get('features',
+                                   [
+                                       'TradeFlow.Adaptive.Index.Imbalance',
+                                       'TradeFlow.Adaptive.Index.Entropy',
+                                       'TradeFlow.Adaptive.Index.Boosted',
+                                       'TradeFlow.Adaptive.Index.Slope',
+                                   ])
+
+        self.grid_factor: list[FactorMonitor] = []
+        self.grid_params: dict[str, dict[str, ...]] = {_['name']: _ for _ in self.parent_factor.params_list()}
+        self.grid_features: dict[str, list[str]] = {}
+        self.grid_model = {
+            f'{factor_name}.{pred_var}':
+                RidgeLogRegression(alpha=.2, transformer=SigmoidTransformer(lower_bound=0., upper_bound=0.02)) if pred_var in ['up_actual', 'up_smoothed'] else
+                RidgeLogRegression(alpha=.2, transformer=SigmoidTransformer(lower_bound=-0.02, upper_bound=0.)) if pred_var in ['down_actual', 'down_smoothed'] else
+                RidgeLogisticRegression(alpha=.2, transformer=BinaryTransformer(center=0, scale=1.)) if pred_var in ['state'] else
+                RidgeRegression(alpha=.2, exponential_decay=0.25, fixed_decay=0.5)
+            for pred_var in self.pred_var
+            for factor_name in self.grid_params
+        }
+        self.grid_cv = {key: CrossValidation(model=model, folds=10, shuffle=True, strict_no_future=True) for key, model in self.grid_model.items()}
+        self.grid_metrics = {key: {} for key in self.grid_cv}
+        self.grid_avg_metrics = {factor_name: {} for factor_name in self.grid_params}
+        self.grid_select_metrics = {pred_var: {} for pred_var in self.pred_var}
+        self.grid_optimal_params = None
+
+    def initialize_factor(self, **kwargs) -> list[FactorMonitor]:
+        # initialize factor based on selected optimal params
+        if self.grid_optimal_params is not None:
+            selected_factor = self.parent_factor.__class__(**self.grid_optimal_params[1])
+            selected_factor.name = self.parent_factor.name
+            self.factor.append(selected_factor)
+        # use parent factor as initial guess
+        else:
+            self.parent_factor.enabled = True
+            self.factor.append(self.parent_factor)
+
+        # initialize grid factors
+        for factor_name, param in self.grid_params.items():
+            factor = self.parent_factor.__class__(**param)
+            features = factor.factor_names(subscription=list(self.subscription))
+            self.factor.append(factor)
+            self.grid_features[factor_name] = features
+
+        for _ in self.factor:
+            MDS.add_monitor(_)
+
+        MDS.add_monitor(self.synthetic)
+
+        if not self.override_cache:
+            MDS.add_monitor(self.factor_cache)
+
+        return self.factor
+
+    def validation(self, market_date: datetime.date):
+        # remove grid factors from the self.factor
+        optimal_factor, *grid_factors = self.factor
+        self.factor.clear()
+        self.grid_factor.clear()
+
+        self.factor.append(optimal_factor)
+        self.grid_factor.extend(grid_factors)
+
+        # parent factor validation
+        super().validation(market_date=market_date)
+
+        # grid cv
+        self.grid_validation(market_date=market_date)
+
+        # select best score from cv
+        self.select_best_params(market_date=market_date)
+
+    def grid_validation(self, market_date: datetime.date):
+        factor_value = pd.DataFrame(self.factor_value).T
+        grid_metrics = {}
+
+        for factor_name in self.grid_features:
+            LOGGER.info(f'[Grid CV] Calculating score for {factor_name}...')
+            grid_metrics[factor_name] = {}
+            avg_metrics = self.grid_avg_metrics[factor_name]
+
+            for pred_var in self.pred_var:
+                key = f'{factor_name}.{pred_var}'
+                features = self.grid_features[factor_name]
+                cv = self.grid_cv[key]
+                metrics = self.grid_metrics[key]
+
+                x_train, y_train, x_val, y_val = self._split_test_set(
+                    pred_var=pred_var,
+                    features=features,
+                    factor_value_storage=list(self.factor_value_storage)
+                )
+
+                if x_train is None:
+                    continue
+
+                self._out_sample_validation(
+                    x_train=x_train,
+                    y_train=y_train,
+                    x_val=x_val,
+                    y_val=y_val,
+                    factors=factor_value,
+                    cv=cv
+                )
+
+                grid_metrics[factor_name][pred_var] = metrics[market_date] = cv.metrics.metrics
+
+            all_metrics = {}
+
+            if not grid_metrics:
+                continue
+
+            for _metrics in grid_metrics[factor_name].values():
+                for name, value in _metrics.items():
+                    if name in all_metrics:
+                        entry = all_metrics[name]
+                    else:
+                        entry = all_metrics[name] = []
+
+                    entry.append(value)
+
+            avg_metrics[market_date] = {key: np.nanmean(value) for key, value in all_metrics.items()}
+
+        return grid_metrics
+
+    def select_best_params(self, market_date: datetime.date):
+        grid_metrics = {}
+        grid_score = {}
+
+        if self.grid_optimal_params is None:
+            for pred_var in self.pred_var:
+                if market_date in self.metrics[pred_var]:
+                    self.grid_select_metrics[pred_var][market_date] = self.metrics[pred_var][market_date]
+            last_selected_factor = self.parent_factor.name
+        else:
+            last_selected_factor = self.grid_optimal_params[0]
+
+        for factor_name in self.grid_features:
+            grid_metrics[factor_name] = {}
+
+            for pred_var in self.pred_var:
+                key = f'{factor_name}.{pred_var}'
+                metrics = self.grid_metrics[key]
+
+                if market_date not in metrics:
+                    continue
+
+                grid_metrics[factor_name][pred_var] = metrics[market_date]
+
+                # before override the optimal params, must log the cv metrics result of the last selected factor
+                if factor_name == last_selected_factor:
+                    self.grid_select_metrics[pred_var][market_date] = metrics[market_date]
+
+            if not grid_metrics[factor_name]:
+                continue
+
+            score = self._grid_score(grid_metrics[factor_name])
+            grid_score[factor_name] = score
+
+        if not grid_score:
+            return None
+
+        best_factor, best_score = sorted(iter(grid_score.items()), key=lambda x: x[1], reverse=True)[0]
+        best_params = self.grid_params[best_factor]
+
+        selected_factor = (best_factor, best_params)
+        LOGGER.info(f'Grid CV complete! Best params for {market_date} is {best_factor}:\n{ {key: value for key, value in best_params.items() if key != "weights"} }')
+
+        self.grid_optimal_params = selected_factor
+        return selected_factor
+
+    @classmethod
+    def _grid_score(cls, grid_metrics: dict[str, dict[str, float]]):
+
+        scores = []
+        for metrics in grid_metrics.values():
+            auc_roc = metrics['auc_roc']
+            scores.append(auc_roc)
+
+        avg_score = np.nanmean(scores)
+        return avg_score
+
+    def dump_result(self, market_date: datetime.date):
+        super().dump_result(market_date=market_date)
+
+        dump_dir = f'{self.__class__.__name__}.{self.validation_id}'
+        entry_dir = pathlib.Path(dump_dir, f'{market_date:%Y-%m-%d}')
+        grid_metrics_dir = pathlib.Path(dump_dir, 'GridCV')
+
+        os.makedirs(grid_metrics_dir, exist_ok=True)
+
+        factor_value = pd.DataFrame(self.factor_value).T
+
+        for key in self.grid_model:
+            # since the key = f'{factor_name}.{pred_var}', pred_var contains no dot in naming
+            *factor_name, pred_var = key.split('.')
+            factor_name = '.'.join(factor_name)
+            grid_entry_dir = entry_dir.joinpath('GridCV', factor_name)
+
+            model = self.grid_model[key]
+            cv = self.grid_cv[key]
+            metrics = self.grid_metrics[key]
+            avg_metrics = self.grid_avg_metrics[factor_name]
+            select_metrics = self.grid_select_metrics[pred_var]
+
+            os.makedirs(grid_entry_dir, exist_ok=True)
+
+            if cv.x_val is not None:
+                fig = self._plot_cv(cv=cv, factors=factor_value)
+                fig.write_html(pathlib.Path(grid_entry_dir, f'GridCV.{key}.pred.html'))
+                model.dump(pathlib.Path(grid_entry_dir, f'GridCV.{key}.model.json'))
+                cv.metrics.to_html(pathlib.Path(grid_entry_dir, f'GridCV.{key}.metrics.html'))
+
+                pd.DataFrame({factor_name: value[market_date] for factor_name, value in self.grid_avg_metrics.items()}).T.to_csv(pathlib.Path(grid_entry_dir.parent, f'avg_metrics.csv'))
+
+                pd.DataFrame(metrics).T.to_csv(pathlib.Path(grid_metrics_dir, f'metrics.{key}.csv'))
+                pd.DataFrame(avg_metrics).T.to_csv(pathlib.Path(grid_metrics_dir, f'avg_metrics.{factor_name}.csv'))
+
+                pd.DataFrame(select_metrics).T.to_csv(pathlib.Path(dump_dir, f'select_metrics.{pred_var}.csv'))
+
+    def reset(self):
+        super().reset()
+
+        self.parent_factor.clear()
+        self.grid_factor.clear()
+        self.grid_features.clear()  # this will be rebuilt on factor initialization
+
+        for _ in self.grid_cv.values():
+            _.clear()
+
+
 def main():
     """
     Main function to run factor validation or batch validation.
@@ -898,17 +1190,22 @@ def main():
     #     end_date=datetime.date(2023, 2, 1)
     # )
 
-    validator = InterTemporalValidation(
-        start_date=datetime.date(2023, 1, 1),
-        end_date=datetime.date(2023, 4, 1),
-        training_days=5,
-    )
+    # validator = InterTemporalValidation(
+    #     start_date=datetime.date(2023, 1, 1),
+    #     end_date=datetime.date(2023, 4, 1),
+    #     training_days=5,
+    # )
 
     # validator = FactorValidatorExperiment(
     #     override_cache=True,
     #     start_date=datetime.date(2023, 1, 1),
     #     end_date=datetime.date(2023, 2, 1)
     # )
+
+    validator = FactorParamsOptimizer(
+        start_date=datetime.date(2023, 1, 1),
+        end_date=datetime.date(2023, 2, 1)
+    )
 
     validator.run()
     safe_exit()
