@@ -49,12 +49,113 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def factor_names(self, subscription: list[str]) -> list[str]:
+        """
+        This method returns a list of string, corresponding with the keys of the what .value returns.
+        This method is design to facilitate facter caching functions.
+        """
         ...
 
-    """
-    This method returns a list of string, corresponding with the keys of the what .value returns.
-    This method is design to facilitate facter caching functions.
-    """
+    @classmethod
+    def _params_grid(cls, param_range: dict[str, list[...]], param_static: dict[str, ...] = None, auto_naming: bool = None) -> list[dict[str, ...]]:
+        """
+        convert param grid to list of params
+        Args:
+            param_range: parameter range, e.g. dict(sampling_interval=[5, 15, 60], sample_size=[10, 20, 30])
+            param_static: static parameter value, e.g. dict(weights=self.weights), this CAN OVERRIDE param_range
+
+        Returns: parameter list
+
+        """
+        param_grid: list[dict] = []
+
+        for name in param_range:
+            _param_range = param_range[name]
+            extended_param_grid = []
+
+            for value in _param_range:
+                if param_grid:
+                    for _ in param_grid:
+                        _ = _.copy()
+                        _[name] = value
+                        extended_param_grid.append(_)
+                else:
+                    extended_param_grid.append({name: value})
+
+            param_grid.clear()
+            param_grid.extend(extended_param_grid)
+
+        if param_static:
+            for _ in param_grid:
+                _.update(param_static)
+
+        if (auto_naming
+                or ('name' not in param_range
+                    and 'name' not in param_static
+                    and auto_naming is None)):
+            for i, param_dict in enumerate(param_grid):
+                param_dict['name'] = f'Monitor.Grid.{cls.__name__}.{i}'
+
+        return param_grid
+
+    def _param_range(self) -> dict[str, list[...]]:
+        # give some simple parameter range
+        params_range = {}
+        if isinstance(self, FixedIntervalSampler):
+            params_range.update(
+                sampling_interval=[5, 15, 60],
+                sample_size=[10, 20, 30]
+            )
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            params_range.update(
+                aligned_interval=[True, False]
+            )
+
+        if isinstance(self, EMA):
+            params_range.update(
+                alpha=[ALPHA_05, ALPHA_02, ALPHA_01, ALPHA_001, ALPHA_0001]
+            )
+
+        return params_range
+
+    def _param_static(self) -> dict[str, ...]:
+        param_static = {}
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            param_static.update(
+                baseline_window=self.baseline_window
+            )
+
+        if isinstance(self, Synthetic):
+            param_static.update(
+                weights=self.weights
+            )
+
+        if isinstance(self, EMA):
+            param_static.update(
+                discount_interval=self.discount_interval
+            )
+
+        return param_static
+
+    def params_list(self) -> list[dict[str, ...]]:
+        """
+        This method is designed to facilitate the grid cv process.
+        The method will return a list of params to initialize monitor.
+        e.g.
+        > params_list = self.params_grid()
+        > monitors = [SomeMonitor(**_) for _ in params_list]
+        > # cross validation process ...
+        Returns: a list of dict[str, ...]
+
+        """
+
+        params_list = self._params_grid(
+            param_range=self._param_range(),
+            param_static=self._param_static()
+        )
+
+        return params_list
 
 
 def add_monitor(monitor: FactorMonitor, **kwargs) -> dict[str, FactorMonitor]:
@@ -181,7 +282,7 @@ def collect_factor(monitors: dict[str, FactorMonitor] | list[FactorMonitor] | Fa
 
 
 __all__ = [
-    'FactorMonitor', 'LOGGER', 'DEBUG_MODE', 'register_monitor', 'IndexWeight', 'Synthetic', 'EMA', 'register_monitor', 'collect_factor',
+    'FactorMonitor', 'LOGGER', 'DEBUG_MODE', 'IndexWeight', 'Synthetic', 'EMA', 'collect_factor',
     # from .Correlation module
     'CoherenceMonitor', 'CoherenceAdaptiveMonitor', 'CoherenceEMAMonitor', 'TradeCoherenceMonitor', 'EntropyMonitor', 'EntropyAdaptiveMonitor', 'EntropyEMAMonitor',
     # from Decoder module
@@ -193,5 +294,5 @@ __all__ = [
     # from Misc module
     'SyntheticIndexMonitor',
     # from TradeFlow module
-    'AggressivenessMonitor', 'AggressivenessEMAMonitor', 'TradeFlowMonitor', 'TradeFlowEMAMonitor',
+    'AggressivenessMonitor', 'AggressivenessEMAMonitor', 'TradeFlowMonitor', 'TradeFlowAdaptiveMonitor', 'TradeFlowAdaptiveIndexMonitor'
 ]
