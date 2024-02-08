@@ -499,6 +499,10 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         Clears all stored data.
         """
+        for name in self.sample_storage:
+            self.sample_storage[name]['storage'].clear()
+
+        # using this code will require the sampler to be registered again.
         self.sample_storage.clear()
 
     def loc_obs(self, name: str, ticker: str, index: int | slice = None) -> float | list[float]:

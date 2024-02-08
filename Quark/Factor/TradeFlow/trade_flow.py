@@ -71,8 +71,13 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
         return slope_dict
 
     def clear(self):
-        self._historical_trade_imbalance.clear()
         FixedIntervalSampler.clear(self)
+
+        self._historical_trade_imbalance.clear()
+
+        self.register_sampler(name='price', mode='update')
+        self.register_sampler(name='trade_flow', mode='accumulate')
+        self.register_sampler(name='volume', mode='accumulate')
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
@@ -257,8 +262,9 @@ class TradeFlowAdaptiveMonitor(TradeFlowMonitor, AdaptiveVolumeIntervalSampler):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         AdaptiveVolumeIntervalSampler.clear(self)
+
+        super().clear()
 
     @property
     def is_ready(self) -> bool:
@@ -292,8 +298,9 @@ class TradeFlowAdaptiveIndexMonitor(TradeFlowAdaptiveMonitor, Synthetic):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [

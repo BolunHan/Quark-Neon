@@ -162,12 +162,32 @@ class CoherenceMonitor(FactorMonitor, FixedIntervalSampler):
     def clear(self):
         FixedIntervalSampler.clear(self)
 
+        self.register_sampler(name='price', mode='update')
+
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
             f'{self.name.removeprefix("Monitor.")}.up',
             f'{self.name.removeprefix("Monitor.")}.down',
             f'{self.name.removeprefix("Monitor.")}.ratio'
         ]
+
+    def _param_range(self) -> dict[str, list[...]]:
+        param_range = super()._param_range()
+
+        param_range.update(
+            center_mode=['absolute', 'median', 'mean', 'weighted']
+        )
+
+        return param_range
+
+    def _param_static(self) -> dict[str, ...]:
+        param_static = super()._param_static()
+
+        param_static.update(
+            weights=self.weights
+        )
+
+        return param_static
 
     @property
     def value(self) -> dict[str, float]:
@@ -213,8 +233,18 @@ class CoherenceAdaptiveMonitor(CoherenceMonitor, AdaptiveVolumeIntervalSampler):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         AdaptiveVolumeIntervalSampler.clear(self)
+
+        super().clear()
+
+    def _param_static(self) -> dict[str, ...]:
+        param_static = super()._param_static()
+
+        param_static.update(
+            aligned_interval=self.aligned_interval
+        )
+
+        return param_static
 
     @property
     def is_ready(self) -> bool:
@@ -253,8 +283,9 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
             self.last_update = (timestamp // self.sampling_interval) * self.sampling_interval
 
     def clear(self):
-        super().clear()
         EMA.clear(self)
+
+        super().clear()
 
         self.dispersion_ratio = self.register_ema(name='dispersion_ratio')
         self.last_update = 0.
@@ -306,6 +337,9 @@ class TradeCoherenceMonitor(CoherenceMonitor):
 
     def clear(self):
         super().clear()
+
+        self.register_sampler(name='volume', mode='accumulate')
+        self.register_sampler(name='volume_net', mode='accumulate')
 
     def trade_coherence(self, side: int, center_mode: str = 'median'):
         historical_price = self.get_sampler(name='price')

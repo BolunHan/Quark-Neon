@@ -54,12 +54,14 @@ class DivergenceMonitor(FactorMonitor, FixedIntervalSampler):
         self._macd_diff_ema[ticker] = macd.update_ema(value=macd_diff, memory=self._macd_diff_ema.get(ticker, 0.), window=macd.signal_window)
 
     def clear(self):
+        FixedIntervalSampler.clear(self)
+
         self._macd.clear()
         self._macd_last.clear()
         self._macd_diff.clear()
         self._macd_diff_ema.clear()
 
-        FixedIntervalSampler.clear(self)
+        self.register_sampler(name='price')
 
     def macd_value(self):
         macd_dict = {}
@@ -101,6 +103,15 @@ class DivergenceMonitor(FactorMonitor, FixedIntervalSampler):
             f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
         ]
 
+    def _param_static(self) -> dict[str, ...]:
+        params_static = super()._param_static()
+
+        params_static.update(
+            sample_size=self.sample_size
+        )
+
+        return params_static
+
     @property
     def value(self) -> dict[str, float]:
         result = {}
@@ -134,8 +145,9 @@ class DivergenceAdaptiveMonitor(DivergenceMonitor, AdaptiveVolumeIntervalSampler
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         AdaptiveVolumeIntervalSampler.clear(self)
+
+        super().clear()
 
     @property
     def is_ready(self) -> bool:
@@ -160,8 +172,9 @@ class DivergenceIndexAdaptiveMonitor(DivergenceAdaptiveMonitor, Synthetic):
         Synthetic.__init__(self=self, weights=weights)
 
     def clear(self):
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
@@ -235,6 +248,16 @@ class DivergenceAdaptiveTriggerMonitor(DivergenceAdaptiveMonitor):
         super().clear()
         self._macd_last_extreme.clear()
 
+    def _param_range(self) -> dict[str, list[...]]:
+        param_range = super()._param_range()
+
+        param_range.update(
+            confirmation_threshold=[0.0001, 0.0002, 0.0005],
+            observation_window=[5, 10, 15]
+        )
+
+        return param_range
+
     @property
     def value(self) -> dict[str, float]:
         monitor_value = {}
@@ -295,5 +318,6 @@ class DivergenceAdaptiveTriggerIndexMonitor(DivergenceAdaptiveTriggerMonitor, Sy
         ]
 
     def clear(self):
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()

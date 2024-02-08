@@ -28,8 +28,11 @@ class SkewnessMonitor(FactorMonitor, FixedIntervalSampler):
         self.log_obs(ticker=ticker, timestamp=timestamp, price=market_price)
 
     def clear(self) -> None:
-        self._historical_skewness.clear()
         FixedIntervalSampler.clear(self)
+
+        self._historical_skewness.clear()
+
+        self.register_sampler(name='price', mode='update')
 
     def on_entry_added(self, ticker: str, name: str, value):
         super().on_entry_added(ticker=ticker, name=name, value=value)
@@ -141,8 +144,9 @@ class SkewnessIndexMonitor(SkewnessMonitor, Synthetic):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
@@ -178,8 +182,9 @@ class SkewnessAdaptiveMonitor(SkewnessMonitor, AdaptiveVolumeIntervalSampler):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         AdaptiveVolumeIntervalSampler.clear(self)
+
+        super().clear()
 
     @property
     def is_ready(self) -> bool:
@@ -213,8 +218,9 @@ class SkewnessIndexAdaptiveMonitor(SkewnessAdaptiveMonitor, Synthetic):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [

@@ -1,7 +1,7 @@
 import numpy as np
 from PyQuantKit import MarketData
 
-from .. import FactorMonitor, EMA,  FixedIntervalSampler, AdaptiveVolumeIntervalSampler
+from .. import FactorMonitor, EMA, FixedIntervalSampler, AdaptiveVolumeIntervalSampler
 
 
 class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
@@ -57,6 +57,8 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
 
     def clear(self) -> None:
         FixedIntervalSampler.clear(self)
+
+        self.register_sampler(name='price', mode='update')
 
     @classmethod
     def covariance_matrix(cls, vectors: list[list[float]] | np.ndarray) -> np.ndarray:
@@ -119,6 +121,17 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
         return [
             f'{self.name.removeprefix("Monitor.")}'
         ]
+
+    def _param_static(self) -> dict[str, ...]:
+        param_static = super()._param_static()
+
+        param_static.update(
+            weights=self.weights,
+            pct_change=self.pct_change,
+            ignore_primary=self.ignore_primary
+        )
+
+        return param_static
 
     @property
     def value(self) -> float:
@@ -206,8 +219,9 @@ class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         AdaptiveVolumeIntervalSampler.clear(self)
+
+        super().clear()
 
     @property
     def is_ready(self) -> bool:
@@ -268,8 +282,9 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         """
         Clears historical price, price change, and EMA data.
         """
-        super().clear()
         EMA.clear(self)
+
+        super().clear()
 
         self.entropy_ema = self.register_ema(name='entropy')
         self.last_update = 0.

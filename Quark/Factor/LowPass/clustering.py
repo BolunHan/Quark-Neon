@@ -80,8 +80,14 @@ class TradeClusteringMonitor(FactorMonitor, FixedIntervalSampler):
         self._unit_root[ticker] = p_value
 
     def clear(self):
-        self._unit_root.clear()
         FixedIntervalSampler.clear(self)
+
+        self._unit_root.clear()
+
+        self.register_sampler(name='price')
+        self.register_sampler(name='volume', mode='accumulate')
+        self.register_sampler(name='volume_net', mode='accumulate')
+        self.register_sampler(name='trade_imbalance')
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
@@ -120,8 +126,9 @@ class TradeClusteringAdaptiveMonitor(TradeClusteringMonitor, AdaptiveVolumeInter
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         AdaptiveVolumeIntervalSampler.clear(self)
+
+        super().clear()
 
     @property
     def is_ready(self) -> bool:
@@ -166,8 +173,9 @@ class TradeClusteringIndexAdaptiveMonitor(TradeClusteringAdaptiveMonitor, Synthe
             self.log_obs(ticker='Synthetic', timestamp=trade_data.timestamp, trade_imbalance=self.synthetic_index)
 
     def clear(self):
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [

@@ -27,6 +27,8 @@ class GiniMonitor(FactorMonitor, FixedIntervalSampler):
     def clear(self) -> None:
         FixedIntervalSampler.clear(self)
 
+        self.register_sampler(name='price', mode='update')
+
     def gini_impurity(self, ticker: str = None, drop_last: bool = False) -> dict[str, float]:
         historical_price = self.get_sampler(name='price')
         gini_dict = {}
@@ -100,8 +102,9 @@ class GiniIndexMonitor(GiniMonitor, Synthetic):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()
 
     @property
     def value(self) -> float:
@@ -125,8 +128,9 @@ class GiniAdaptiveMonitor(GiniMonitor, AdaptiveVolumeIntervalSampler):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         AdaptiveVolumeIntervalSampler.clear(self)
+
+        super().clear()
 
     @property
     def is_ready(self) -> bool:
@@ -160,8 +164,9 @@ class GiniIndexAdaptiveMonitor(GiniAdaptiveMonitor, Synthetic):
         super().__call__(market_data=market_data, **kwargs)
 
     def clear(self) -> None:
-        super().clear()
         Synthetic.clear(self)
+
+        super().clear()
 
     @property
     def value(self) -> float:
