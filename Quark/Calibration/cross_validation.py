@@ -730,21 +730,36 @@ class CrossValidation(object):
             )
 
         # Plot Kelly decision
-        kelly_value = []
-        for outcome, deviations in zip(self.y_pred, self.resampled_deviation):
-            kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=self.trade_cost)
-            kelly_value.append(kelly_proportion)
+        if kwargs.get('with_kelly', True):
+            kelly_value = []
+            for outcome, deviations in zip(self.y_pred, self.resampled_deviation):
+                kelly_proportion = kelly_bootstrap(outcomes=np.array(deviations) + outcome, cost=self.trade_cost)
+                kelly_value.append(kelly_proportion)
 
-        fig.add_trace(
-            go.Bar(
-                x=x_axis,
-                y=np.array(kelly_value),
-                opacity=0.3,
-                name='kelly decision',
-                marker=dict(color='green'),
-                yaxis='y2'
+            fig.add_trace(
+                go.Bar(
+                    x=x_axis,
+                    y=np.array(kelly_value),
+                    opacity=0.3,
+                    name='kelly decision',
+                    marker=dict(color='green'),
+                    yaxis='y2'
+                )
             )
-        )
+
+            fig.update_layout(
+                yaxis2=dict(
+                    title="Kelly",
+                    anchor="free",
+                    overlaying='y1',
+                    tickmode='sync',
+                    autoshift=True,
+                    showgrid=False,  # Hide grid for y3 axis
+                    showline=False,  # Hide line for y3 axis
+                    zeroline=False,  # Hide zero line for y3 axis
+                    showticklabels=False  # Hide tick labels for y3 axis
+                )
+            )
 
         # Layout settings
         fig.update_layout(
@@ -754,17 +769,12 @@ class CrossValidation(object):
             hovermode="x unified",
             template='simple_white',
             yaxis=dict(
-                showspikes=True
-            ),
-            yaxis2=dict(
-                title="Kelly",
-                anchor="free",
-                overlaying='y',
-                autoshift=True,
-                showgrid=False,  # Hide grid for y3 axis
-                showline=False,  # Hide line for y3 axis
-                zeroline=False,  # Hide zero line for y3 axis
-                showticklabels=False  # Hide tick labels for y3 axis
+                range=[-np.ceil(np.quantile(np.abs(y_pred), 0.99) / 0.05) * 0.05, np.ceil(np.quantile(np.abs(y_pred), 0.99) / 0.05) * 0.05],
+                dtick=0.05,
+                zeroline=True,
+                # nticks=int(np.ceil(np.quantile(np.abs(y_pred), 0.95) // 0.05)) * 2 + 1,
+                showspikes=True,
+                spikesnap='cursor',
             )
         )
 
