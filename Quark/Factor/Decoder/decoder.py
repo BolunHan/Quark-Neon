@@ -77,6 +77,13 @@ class DecoderMonitor(FactorMonitor, OnlineDecoder):
             f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
         ]
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        raise NotImplementedError()
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict):
+        raise NotImplementedError()
+
     @property
     def value(self) -> dict[str, list[Wavelet]]:
         """

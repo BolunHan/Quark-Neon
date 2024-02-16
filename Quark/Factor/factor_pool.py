@@ -228,6 +228,13 @@ class FactorPoolDummyMonitor(FactorMonitor):
 
         self.timestamp = market_data.timestamp
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        raise NotImplementedError('Factor Cache monitor should not be serialized in any cases.')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict):
+        raise NotImplementedError('Factor Cache monitor should not be serialized in any cases.')
+
     def clear(self) -> None:
         self.cache_index = 0
         self.timestamp = 0.

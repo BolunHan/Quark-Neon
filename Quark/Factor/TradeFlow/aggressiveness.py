@@ -15,6 +15,10 @@ Note: This module assumes the availability of AlgoEngine, PyQuantKit, and other 
 Author: Bolun
 Date: 2023-12-27
 """
+from __future__ import annotations
+
+import json
+
 import numpy as np
 from PyQuantKit import MarketData, TradeData, TransactionData
 
@@ -73,15 +77,13 @@ class AggressivenessMonitor(FactorMonitor):
             return
 
         if side > 0:  # a buy init trade
-            if 'buy_order_id' not in trade_data.additional:
+            order_id: int = trade_data.buy_id
+            if order_id is None:
                 self._is_ready = False
-
-            order_id = trade_data.additional['buy_order_id']
         elif side < 0:
-            if 'sell_order_id' not in trade_data.additional:
+            order_id: int = trade_data.sell_id
+            if order_id is None:
                 self._is_ready = False
-
-            order_id = trade_data.additional['sell_order_id']
         else:
             return
 
@@ -116,6 +118,45 @@ class AggressivenessMonitor(FactorMonitor):
             self._aggressive_buy[ticker] = self._aggressive_buy.get(ticker, 0.) + volume
         else:
             self._aggressive_sell[ticker] = self._aggressive_sell.get(ticker, 0.) + volume
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            last_update=self._last_update,
+            trade_price=self._trade_price,
+            aggressive_buy=self._aggressive_buy,
+            aggressive_sell=self._aggressive_sell,
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> AggressivenessMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._last_update = json_dict['last_update']
+        self._trade_price = json_dict['trade_price']
+        self._aggressive_buy = json_dict['aggressive_buy']
+        self._aggressive_sell = json_dict['aggressive_sell']
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         """Clear the monitor data."""
@@ -233,6 +274,50 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         self.discount_all(timestamp=timestamp)
 
         return super().__call__(market_data=market_data, **kwargs)
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            normalized=self.normalized
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> AggressivenessEMAMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            discount_interval=json_dict['discount_interval'],
+            alpha=json_dict['alpha'],
+            weights=json_dict['weights'],
+            normalized=json_dict['normalized'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._last_update = json_dict['last_update']
+        self._trade_price = json_dict['trade_price']
+        self._aggressive_buy = json_dict['aggressive_buy']
+        self._aggressive_sell = json_dict['aggressive_sell']
+
+        self._aggressive_buy = self.ema['aggressive_buy']
+        self._aggressive_sell = self.ema['aggressive_sell']
+        self._trade_volume = self.ema['trade_volume']
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         """Clear the monitor data."""

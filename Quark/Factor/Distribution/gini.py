@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 from typing import Iterable
 
 import numpy as np
@@ -23,6 +26,39 @@ class GiniMonitor(FactorMonitor, FixedIntervalSampler):
 
         timestamp = market_data.timestamp
         self.log_obs(ticker=ticker, timestamp=timestamp, price=market_price)
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> GiniMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self) -> None:
         FixedIntervalSampler.clear(self)
@@ -101,6 +137,27 @@ class GiniIndexMonitor(GiniMonitor, Synthetic):
 
         super().__call__(market_data=market_data, **kwargs)
 
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> GiniIndexMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
     def clear(self) -> None:
         Synthetic.clear(self)
 
@@ -126,6 +183,28 @@ class GiniAdaptiveMonitor(GiniMonitor, AdaptiveVolumeIntervalSampler):
     def __call__(self, market_data: MarketData, **kwargs):
         self.accumulate_volume(market_data=market_data)
         super().__call__(market_data=market_data, **kwargs)
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> GiniAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self) -> None:
         AdaptiveVolumeIntervalSampler.clear(self)
@@ -162,6 +241,29 @@ class GiniIndexAdaptiveMonitor(GiniAdaptiveMonitor, Synthetic):
             return
 
         super().__call__(market_data=market_data, **kwargs)
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> GiniIndexAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self) -> None:
         Synthetic.clear(self)

@@ -1,3 +1,4 @@
+import json
 from collections import deque
 from typing import Iterable
 
@@ -18,7 +19,6 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
         self.register_sampler(name='volume', mode='accumulate')
 
         self._historical_trade_imbalance = {}
-        self._is_ready = True
 
     def on_trade_data(self, trade_data: TradeData | TransactionData, **kwargs):
         ticker = trade_data.ticker
@@ -69,6 +69,27 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
             slope_dict[ticker] = slope
 
         return slope_dict
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            historical_trade_imbalance=self._historical_trade_imbalance
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    def update_from_json(self, json_dict: dict):
+        super().update_from_json(json_dict=json_dict)
+
+        self._historical_trade_imbalance.clear()
+        self._historical_trade_imbalance.update(json_dict['historical_trade_imbalance'])
+
+        return self
 
     def clear(self):
         FixedIntervalSampler.clear(self)
@@ -228,16 +249,6 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
     def value(self) -> dict[str, float]:
         return self.trade_imbalance(boosted=True)
 
-    @property
-    def is_ready(self) -> bool:
-        """
-        Check if the monitor is ready.
-
-        Returns:
-        bool: True if the monitor is ready, False otherwise.
-        """
-        return self._is_ready
-
 
 class TradeFlowAdaptiveMonitor(TradeFlowMonitor, AdaptiveVolumeIntervalSampler):
 
@@ -272,7 +283,7 @@ class TradeFlowAdaptiveMonitor(TradeFlowMonitor, AdaptiveVolumeIntervalSampler):
             if ticker not in self._volume_baseline['sampling_interval']:
                 return False
 
-        return self._is_ready
+        return True
 
 
 class TradeFlowAdaptiveIndexMonitor(TradeFlowAdaptiveMonitor, Synthetic):

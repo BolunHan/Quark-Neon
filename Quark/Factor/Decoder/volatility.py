@@ -15,6 +15,9 @@ Note: This module assumes the availability of AlgoEngine, PyQuantKit, and other 
 Author: Bolun
 Date: 2023-12-27
 """
+from __future__ import annotations
+
+import json
 
 import numpy as np
 from PyQuantKit import MarketData
@@ -50,6 +53,40 @@ class VolatilityMonitor(FactorMonitor, Synthetic):
         - market_data (MarketData): Market data to update the monitor.
         """
         self.update_synthetic(ticker=market_data.ticker, market_price=market_data.market_price)
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            daily_volatility=self.daily_volatility,
+            index_volatility=self.index_volatility,
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> VolatilityMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         """

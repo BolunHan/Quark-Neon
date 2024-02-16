@@ -19,7 +19,9 @@ Note: This script assumes the availability of AlgoEngine, PyQuantKit, and other 
 Author: Bolun
 Date: 2024-01-25
 """
+from __future__ import annotations
 
+import json
 import numpy as np
 from PyQuantKit import MarketData, TradeData, TransactionData
 from scipy.stats import rankdata
@@ -64,8 +66,6 @@ class CoherenceMonitor(FactorMonitor, FixedIntervalSampler):
         self.center_mode = center_mode
 
         self.register_sampler(name='price', mode='update')
-
-        self._is_ready = True
 
     def __call__(self, market_data: MarketData, **kwargs):
 
@@ -159,6 +159,42 @@ class CoherenceMonitor(FactorMonitor, FixedIntervalSampler):
 
         return np.nanmean(values)
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            weights=dict(self.weights),
+            center_mode=self.center_mode
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> CoherenceMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            weights=json_dict['weights'],
+            center_mode=json_dict['center_mode'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
     def clear(self):
         FixedIntervalSampler.clear(self)
 
@@ -203,10 +239,6 @@ class CoherenceMonitor(FactorMonitor, FixedIntervalSampler):
 
         return {'up': up_dispersion, 'down': down_dispersion, 'ratio': ratio - 0.5}
 
-    @property
-    def is_ready(self) -> bool:
-        return self._is_ready
-
 
 class CoherenceAdaptiveMonitor(CoherenceMonitor, AdaptiveVolumeIntervalSampler):
 
@@ -232,6 +264,29 @@ class CoherenceAdaptiveMonitor(CoherenceMonitor, AdaptiveVolumeIntervalSampler):
         self.accumulate_volume(market_data=market_data)
         super().__call__(market_data=market_data, **kwargs)
 
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> CoherenceAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            weights=json_dict['weights'],
+            center_mode=json_dict['center_mode'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+        return self
+
     def clear(self) -> None:
         AdaptiveVolumeIntervalSampler.clear(self)
 
@@ -252,7 +307,7 @@ class CoherenceAdaptiveMonitor(CoherenceMonitor, AdaptiveVolumeIntervalSampler):
             if ticker not in self._volume_baseline['sampling_interval']:
                 return False
 
-        return self._is_ready
+        return True
 
 
 class CoherenceEMAMonitor(CoherenceMonitor, EMA):
@@ -267,7 +322,6 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
         EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
 
         self.dispersion_ratio = self.register_ema(name='dispersion_ratio')
-        self.last_update = 0.
 
     def __call__(self, market_data: MarketData, **kwargs):
         ticker = market_data.ticker
@@ -278,20 +332,12 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
 
         super().__call__(market_data=market_data, **kwargs)
 
-        if self.last_update + self.sampling_interval < timestamp:
-            _ = self.value
-            self.last_update = (timestamp // self.sampling_interval) * self.sampling_interval
+    def on_entry_added(self, ticker: str, name: str, value):
+        super().on_entry_added(ticker=ticker, name=name, value=value)
 
-    def clear(self):
-        EMA.clear(self)
+        if name != 'dispersion_ratio':
+            return
 
-        super().clear()
-
-        self.dispersion_ratio = self.register_ema(name='dispersion_ratio')
-        self.last_update = 0.
-
-    @property
-    def value(self) -> dict[str, float]:
         up_dispersion = self.dispersion(side=1)
         down_dispersion = self.dispersion(side=-1)
 
@@ -304,6 +350,40 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
 
         self.update_ema(ticker='dispersion_ratio', dispersion_ratio=dispersion_ratio - 0.5)
 
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> CoherenceEMAMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            discount_interval=json_dict['discount_interval'],
+            alpha=json_dict['alpha'],
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+        self.update_from_json(json_dict=json_dict)
+
+        self.dispersion_ratio = self.ema['dispersion_ratio']
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
+    def clear(self):
+        EMA.clear(self)
+
+        super().clear()
+
+        self.dispersion_ratio = self.register_ema(name='dispersion_ratio')
+
+    @property
+    def value(self) -> dict[str, float]:
+        up_dispersion = self.dispersion(side=1)
+        down_dispersion = self.dispersion(side=-1)
         return {'up': up_dispersion, 'down': down_dispersion, 'ratio': self.dispersion_ratio.get('dispersion_ratio', np.nan)}
 
 
@@ -334,6 +414,27 @@ class TradeCoherenceMonitor(CoherenceMonitor):
         timestamp = trade_data.timestamp
 
         self.log_obs(ticker=ticker, timestamp=timestamp, volume=volume, volume_net=volume * side)
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> TradeCoherenceMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         super().clear()

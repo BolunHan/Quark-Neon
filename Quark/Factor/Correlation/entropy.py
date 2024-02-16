@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import json
+
 import numpy as np
 from PyQuantKit import MarketData
 
@@ -133,6 +137,45 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
 
         return param_static
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            weights=dict(self.weights),
+            pct_change=self.pct_change,
+            ignore_primary=self.ignore_primary,
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> EntropyMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            weights=json_dict['weights'],
+            pct_change=json_dict['pct_change'],
+            ignore_primary=json_dict['ignore_primary'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
     @property
     def value(self) -> float:
         """
@@ -218,6 +261,30 @@ class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
         self.accumulate_volume(market_data=market_data)
         super().__call__(market_data=market_data, **kwargs)
 
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> EntropyAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            baseline_window=json_dict['baseline_window'],
+            weights=json_dict['weights'],
+            pct_change=json_dict['pct_change'],
+            ignore_primary=json_dict['ignore_primary'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
     def clear(self) -> None:
         AdaptiveVolumeIntervalSampler.clear(self)
 
@@ -257,7 +324,15 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
 
         self.entropy_ema = self.register_ema(name='entropy')
-        self.last_update = 0.
+
+    def on_entry_added(self, ticker: str, name: str, value):
+        super().on_entry_added(ticker=ticker, name=name, value=value)
+
+        if name != 'price':
+            return
+
+        entropy = super().value
+        self.update_ema(ticker='entropy', entropy=entropy)
 
     def __call__(self, market_data: MarketData, **kwargs):
         """
@@ -274,9 +349,31 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
 
         super().__call__(market_data=market_data, **kwargs)
 
-        if self.last_update + self.sampling_interval < timestamp:
-            _ = self.value
-            self.last_update = (timestamp // self.sampling_interval) * self.sampling_interval
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> EntropyEMAMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            discount_interval=json_dict['discount_interval'],
+            alpha=json_dict['alpha'],
+            weights=json_dict['weights'],
+            pct_change=json_dict['pct_change'],
+            ignore_primary=json_dict['ignore_primary'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self.entropy_ema = self.ema['entropy']
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         """
@@ -287,7 +384,6 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
         super().clear()
 
         self.entropy_ema = self.register_ema(name='entropy')
-        self.last_update = 0.
 
     @property
     def value(self) -> float:
@@ -298,5 +394,4 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
             float: EMA of entropy.
         """
         entropy = super().value
-        self.update_ema(ticker='entropy', entropy=entropy)
         return self.entropy_ema.get('entropy', np.nan)

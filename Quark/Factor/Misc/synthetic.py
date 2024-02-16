@@ -17,8 +17,10 @@ Note: This module assumes the availability of AlgoEngine, PyQuantKit, and other 
 Author: Bolun
 Date: 2023-12-27
 """
+from __future__ import annotations
 
 import datetime
+import json
 
 from PyQuantKit import MarketData, TradeData, TransactionData, BarData
 
@@ -49,7 +51,6 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         self._index_price = None
 
         self._is_ready = True
-        self._value = {}
 
     def __call__(self, market_data: MarketData, **kwargs):
         """
@@ -89,13 +90,55 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
             bar_data = self._active_bar_data
 
         if isinstance(market_data, (TradeData, TransactionData)):
-            bar_data.volume += market_data.volume
-            bar_data.notional += market_data.notional
-            bar_data.trade_count += 1
+            bar_data['volume'] += market_data.volume
+            bar_data['notional'] += market_data.notional
+            bar_data['trade_count'] += 1
 
-        bar_data.close_price = index_price
-        bar_data.high_price = max(bar_data.high_price, index_price)
-        bar_data.low_price = min(bar_data.low_price, index_price)
+        bar_data['close_price'] = index_price
+        bar_data['high_price'] = max(bar_data.high_price, index_price)
+        bar_data['low_price'] = min(bar_data.low_price, index_price)
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            index_name=self.index_name,
+            interval=self.interval,
+            active_bar_data=self._active_bar_data.to_json(fmt='dict') if self._active_bar_data is not None else None,
+            last_bar_data=self._last_bar_data.to_json(fmt='dict') if self._last_bar_data is not None else None,
+            index_price=self._index_price,
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> SyntheticIndexMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            index_name=json_dict['index_name'],
+            weights=json_dict['weights'],
+            interval=json_dict['interval'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._active_bar_data = BarData.from_json(json_dict['active_bar_data']) if json_dict['active_bar_data'] is not None else None
+        self._last_bar_data = BarData.from_json(json_dict['last_bar_data']) if json_dict['last_bar_data'] is not None else None
+        self._index_price = json_dict['index_price']
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         """
@@ -103,7 +146,6 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         """
         self._active_bar_data = None
         self._last_bar_data = None
-        self._value.clear()
 
     @property
     def is_ready(self) -> bool:

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 import warnings
 
 import numpy as np
@@ -79,6 +82,41 @@ class TradeClusteringMonitor(FactorMonitor, FixedIntervalSampler):
         self._unit_root[ticker] = EMA.calculate_ema(value=p_value, memory=self._unit_root.get(ticker), alpha=0.5)
         self._unit_root[ticker] = p_value
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            unit_root=self._unit_root,
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> TradeClusteringMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._unit_root = json_dict['unit_root']
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
     def clear(self):
         FixedIntervalSampler.clear(self)
 
@@ -124,6 +162,29 @@ class TradeClusteringAdaptiveMonitor(TradeClusteringMonitor, AdaptiveVolumeInter
     def __call__(self, market_data: MarketData, **kwargs):
         self.accumulate_volume(market_data=market_data)
         super().__call__(market_data=market_data, **kwargs)
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> TradeClusteringAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._unit_root = json_dict['unit_root']
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self) -> None:
         AdaptiveVolumeIntervalSampler.clear(self)
@@ -171,6 +232,29 @@ class TradeClusteringIndexAdaptiveMonitor(TradeClusteringAdaptiveMonitor, Synthe
             self.accumulate_volume(ticker='Synthetic', volume=trade_data.notional)
             self.update_synthetic(ticker=ticker, market_price=trade_imbalance)
             self.log_obs(ticker='Synthetic', timestamp=trade_data.timestamp, trade_imbalance=self.synthetic_index)
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> TradeClusteringIndexAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+        self.update_from_json(json_dict=json_dict)
+
+        self._unit_root = json_dict['unit_root']
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         Synthetic.clear(self)

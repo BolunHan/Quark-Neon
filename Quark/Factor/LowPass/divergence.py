@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 from collections import deque
 
 from PyQuantKit import MarketData, TradeData, TransactionData
@@ -52,6 +55,46 @@ class DivergenceMonitor(FactorMonitor, FixedIntervalSampler):
         self._macd_last[ticker] = macd_current
         self._macd_diff[ticker] = macd_diff
         self._macd_diff_ema[ticker] = macd.update_ema(value=macd_diff, memory=self._macd_diff_ema.get(ticker, 0.), window=macd.signal_window)
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            macd={ticker: macd.to_json(fmt='dict') for ticker, macd in self._macd.items()},
+            macd_last=self._macd_last,
+            macd_diff=self._macd_diff,
+            macd_diff_ema=self._macd_diff_ema,
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> DivergenceMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._macd = {ticker: MACD.from_json(macd_json) for ticker, macd_json in json_dict['macd'].items()}
+        self._macd_last = json_dict['macd_last']
+        self._macd_diff = json_dict['macd_diff']
+        self._macd_diff_ema = json_dict['macd_diff_ema']
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         FixedIntervalSampler.clear(self)
@@ -144,6 +187,31 @@ class DivergenceAdaptiveMonitor(DivergenceMonitor, AdaptiveVolumeIntervalSampler
         self.accumulate_volume(market_data=market_data)
         super().__call__(market_data=market_data, **kwargs)
 
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> DivergenceAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._macd = {ticker: MACD.from_json(macd_json) for ticker, macd_json in json_dict['macd'].items()}
+        self._macd_last = json_dict['macd_last']
+        self._macd_diff = json_dict['macd_diff']
+        self._macd_diff_ema = json_dict['macd_diff_ema']
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
     def clear(self) -> None:
         AdaptiveVolumeIntervalSampler.clear(self)
 
@@ -160,7 +228,7 @@ class DivergenceAdaptiveMonitor(DivergenceMonitor, AdaptiveVolumeIntervalSampler
 
 class DivergenceIndexAdaptiveMonitor(DivergenceAdaptiveMonitor, Synthetic):
 
-    def __init__(self, sampling_interval: float, baseline_window: int = 15, weights: dict[str, float] = None, aligned_interval: bool = True, name: str = 'Monitor.EMA.Divergence.Index.Adaptive', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, baseline_window: int = 15, aligned_interval: bool = True, weights: dict[str, float] = None, name: str = 'Monitor.EMA.Divergence.Index.Adaptive', monitor_id: str = None):
         super().__init__(
             sampling_interval=sampling_interval,
             baseline_window=baseline_window,
@@ -170,6 +238,32 @@ class DivergenceIndexAdaptiveMonitor(DivergenceAdaptiveMonitor, Synthetic):
         )
 
         Synthetic.__init__(self=self, weights=weights)
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> DivergenceIndexAdaptiveMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._macd = {ticker: MACD.from_json(macd_json) for ticker, macd_json in json_dict['macd'].items()}
+        self._macd_last = json_dict['macd_last']
+        self._macd_diff = json_dict['macd_diff']
+        self._macd_diff_ema = json_dict['macd_diff_ema']
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         Synthetic.clear(self)
@@ -203,7 +297,7 @@ class DivergenceAdaptiveTriggerMonitor(DivergenceAdaptiveMonitor):
         self.confirmation_threshold = confirmation_threshold
 
         self._macd_last_extreme: dict[str, dict[str, float]] = {}
-        self._macd_last: dict[str, deque[float]] = {}
+        self._macd_storage: dict[str, deque[float]] = {}
 
     def on_entry_added(self, ticker: str, name: str, value):
         super().on_entry_added(ticker=ticker, name=name, value=value)
@@ -216,11 +310,11 @@ class DivergenceAdaptiveTriggerMonitor(DivergenceAdaptiveMonitor):
 
         if ticker in self._macd:
             macd = self._macd[ticker]
-            macd_storage = self._macd_last[ticker]
+            macd_storage = self._macd_storage[ticker]
             macd_extreme = self._macd_last_extreme[ticker]
         else:
             macd = self._macd[ticker] = MACD()
-            macd_storage = self._macd_last[ticker] = deque(maxlen=self.observation_window)
+            macd_storage = self._macd_storage[ticker] = deque(maxlen=self.observation_window)
             macd_extreme = self._macd_last_extreme[ticker] = {}
 
         macd.update_macd(price=last_price)
@@ -244,6 +338,54 @@ class DivergenceAdaptiveTriggerMonitor(DivergenceAdaptiveMonitor):
         self._macd_diff[ticker] = macd_diff
         self._macd_diff_ema[ticker] = macd.update_ema(value=macd_diff, memory=self._macd_diff_ema.get(ticker, 0.), window=macd.signal_window)
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+        data_dict.update(
+            observation_window=self.observation_window,
+            confirmation_threshold=self.confirmation_threshold,
+            macd_last_extreme=self._macd_last_extreme,
+            macd_storage={ticker: list(dq) for ticker, dq in self._macd_storage.items()},
+            is_ready=self._is_ready
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> DivergenceAdaptiveTriggerMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            confirmation_threshold=json_dict['confirmation_threshold'],
+            observation_window=json_dict['observation_window'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._macd = {ticker: MACD.from_json(macd_json) for ticker, macd_json in json_dict['macd'].items()}
+        self._macd_last = json_dict['macd_last']
+        self._macd_diff = json_dict['macd_diff']
+        self._macd_diff_ema = json_dict['macd_diff_ema']
+
+        self._macd_last_extreme = json_dict['macd_last_extreme']
+        self._macd_storage = {ticker: deque(storage, maxlen=self.observation_window) for ticker, storage in json_dict['macd_storage'].items()}
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
+
     def clear(self):
         super().clear()
         self._macd_last_extreme.clear()
@@ -262,7 +404,7 @@ class DivergenceAdaptiveTriggerMonitor(DivergenceAdaptiveMonitor):
     def value(self) -> dict[str, float]:
         monitor_value = {}
 
-        for ticker, storage in self._macd_last.items():
+        for ticker, storage in self._macd_storage.items():
             last_extreme = self._macd_last_extreme[ticker]
 
             if storage:
@@ -291,7 +433,7 @@ class DivergenceAdaptiveTriggerMonitor(DivergenceAdaptiveMonitor):
 
 
 class DivergenceAdaptiveTriggerIndexMonitor(DivergenceAdaptiveTriggerMonitor, Synthetic):
-    def __init__(self, sampling_interval: float, confirmation_threshold: float = 0.0001, observation_window: int = 5, baseline_window: int = 15, weights: dict[str, float] = None, aligned_interval: bool = False, name: str = 'Monitor.EMA.Divergence.Trigger', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, confirmation_threshold: float = 0.0001, observation_window: int = 5, baseline_window: int = 15, aligned_interval: bool = False, weights: dict[str, float] = None, name: str = 'Monitor.EMA.Divergence.Trigger', monitor_id: str = None):
         super().__init__(
             sampling_interval=sampling_interval,
             confirmation_threshold=confirmation_threshold,
@@ -316,6 +458,38 @@ class DivergenceAdaptiveTriggerIndexMonitor(DivergenceAdaptiveTriggerMonitor, Sy
         ] + [
             f'{self.name.removeprefix("Monitor.")}.{ticker}' for ticker in subscription
         ]
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> DivergenceAdaptiveTriggerIndexMonitor:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            confirmation_threshold=json_dict['confirmation_threshold'],
+            observation_window=json_dict['observation_window'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval'],
+            weights=json_dict['weights'],
+            name=json_dict['name'],
+            monitor_id=json_dict['monitor_id']
+        )
+
+        self.update_from_json(json_dict=json_dict)
+
+        self._macd = {ticker: MACD.from_json(macd_json) for ticker, macd_json in json_dict['macd'].items()}
+        self._macd_last = json_dict['macd_last']
+        self._macd_diff = json_dict['macd_diff']
+        self._macd_diff_ema = json_dict['macd_diff_ema']
+
+        self._macd_last_extreme = json_dict['macd_last_extreme']
+        self._macd_storage = {ticker: deque(storage, maxlen=self.observation_window) for ticker, storage in json_dict['macd_storage'].items()}
+
+        self._is_ready = json_dict['is_ready']
+
+        return self
 
     def clear(self):
         Synthetic.clear(self)
