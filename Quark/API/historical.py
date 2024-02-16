@@ -91,11 +91,11 @@ def load_trade_data(market_date: datetime.date, ticker: str) -> list[TradeData]:
                 ticker=ticker,
                 trade_price=float(row['Price']),
                 trade_volume=float(row['Volume']),
-                trade_time=datetime.datetime.combine(market_date, datetime.time(*map(int, row['Time'].split(":"))), TIME_ZONE),
-                side=row['Type']
+                timestamp=datetime.datetime.combine(market_date, datetime.time(*map(int, row['Time'].split(":"))), TIME_ZONE).timestamp(),
+                side=row['Type'],
+                buy_id=int(row['BuyOrderID']),
+                sell_id=int(row['SaleOrderID'])
             )
-            trade_data.additional['sell_order_id'] = int(row['SaleOrderID'])
-            trade_data.additional['buy_order_id'] = int(row['BuyOrderID'])
             trade_data_list.append(trade_data)
 
             if DEBUG_MODE:
