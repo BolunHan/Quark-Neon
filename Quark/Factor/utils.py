@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 import abc
 import enum
+import json
+import pickle
 from collections import deque
 
 import numpy as np
@@ -7,8 +11,247 @@ from PyQuantKit import MarketData, TradeData, TransactionData, TickData, BarData
 
 from .. import LOGGER
 from ..Calibration.dummies import is_market_session
+from multiprocessing import shared_memory, Lock
 
 __all__ = ['IndexWeight', 'EMA', 'MACD', 'Synthetic', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler']
+
+
+class SharedMemoryCore(object):
+    def __init__(self, encoding='utf-8'):
+        self.encoding = encoding
+
+    def init_buffer(self, name: str, buffer_size: int) -> shared_memory.SharedMemory:
+        try:
+            shm = shared_memory.SharedMemory(name=name)
+
+            if shm.size != buffer_size:
+                shm.close()
+                shm.unlink()
+
+                shm = shared_memory.SharedMemory(name=name, create=True, size=buffer_size)
+        except FileNotFoundError as _:
+            shm = shared_memory.SharedMemory(name=name, create=True, size=buffer_size)
+
+        return shm
+
+    def get_buffer(self, name: str) -> shared_memory.SharedMemory | None:
+        try:
+            shm = shared_memory.SharedMemory(name=name)
+        except FileNotFoundError as _:
+            shm = None
+
+        return shm
+
+    def set_int(self, name: str, value: int, buffer_size: int = 32) -> shared_memory.SharedMemory:
+        shm = self.init_buffer(name=name, buffer_size=buffer_size)
+        shm.buf[:] = value.to_bytes(length=buffer_size)
+        shm.close()
+        return shm
+
+    def get_int(self, name: str, default: int = None) -> int | None:
+        shm = self.get_buffer(name=name)
+        value = default if shm is None else int.from_bytes(shm.buf)
+        shm.close()
+        return value
+
+    def set_vector(self, name: str, vector: list[float | int | bool] | np.ndarray) -> shared_memory.SharedMemory:
+        arr = np.array(vector)
+        shm = self.init_buffer(name=name, buffer_size=arr.nbytes)
+        shm.buf[:] = bytes(arr.data)
+        shm.close()
+        return shm
+
+    def get_vector(self, name: str, target: list = None) -> list[float]:
+        shm = self.get_buffer(name=name)
+        vector = [] if shm is None else np.ndarray(shape=(-1,), buffer=shm.buf).tolist()
+        shm.close()
+
+        if target is None:
+            return vector
+        else:
+            target.clear()
+            target.extend(vector)
+            return target
+
+    def set_str_vector(self, name: str, vector: list[str]) -> None:
+        vector_bytes = b'\x00'.join([_.encode(self.encoding) for _ in vector])
+        shm = self.init_buffer(name=name, buffer_size=len(vector_bytes))
+        shm.buf[:] = vector_bytes
+        shm.close()
+
+    def get_str_vector(self, name: str, target: list = None) -> list[float]:
+        shm = self.get_buffer(name=name)
+        vector = [] if shm is None else [_.decode(self.encoding) for _ in bytes(shm.buf).split(b'\x00')]
+        shm.close()
+
+        if target is None:
+            return vector
+        else:
+            target.clear()
+            target.extend(vector)
+            return target
+
+    def set_named_vector(self, name: str, obj: dict[str, float]) -> None:
+        """
+        sync the dict[str, float]
+        """
+        keys_name = f'{name}.keys'
+        values_name = f'{name}.values'
+
+        self.set_str_vector(name=keys_name, vector=list(obj.keys()))
+        self.set_vector(name=values_name, vector=list(obj.values()))
+
+    def get_name_vector(self, name: str, target: dict = None) -> dict[str, float]:
+        keys_name = f'{name}.keys'
+        values_name = f'{name}.values'
+
+        keys = self.get_str_vector(name=keys_name)
+        values = self.get_vector(name=values_name)
+        shm_dict = dict(zip(keys, values))
+
+        if target is None:
+            return shm_dict
+        else:
+            target.clear()
+            target.update(shm_dict)
+            return target
+
+    def sync(self, name: str, obj: ...) -> shared_memory.SharedMemory:
+        serialized = pickle.dumps(obj)
+        shm = self.init_buffer(name=name, buffer_size=len(serialized))
+        shm.buf[:] = serialized
+        shm.close()
+
+        return shm
+
+    def get(self, name: str, default=None) -> ...:
+        shm = self.get_buffer(name=name)
+        obj = default if shm is None else pickle.loads(bytes(shm.buf))
+        shm.close()
+
+        return obj
+
+
+class CachedMemoryCore(SharedMemoryCore):
+    def __init__(self, prefix: str, encoding='utf-8'):
+        super().__init__(encoding=encoding)
+
+        self.prefix = prefix
+
+        self.shm_size: dict[str, shared_memory.SharedMemory] = {}
+        self.shm_cache: dict[str, shared_memory.SharedMemory] = {}
+
+    def get_buffer(self, name: str = None, real_name: str = None) -> shared_memory.SharedMemory | None:
+
+        if real_name is None and name is None:
+            raise ValueError('Must assign a "name" or "real_name",')
+        elif real_name is None:
+            real_name = f'{self.prefix}.{name}'
+
+        # get the shm storing the size data
+        if real_name in self.shm_size:
+            shm_size = self.shm_size[real_name]
+        else:
+            shm_size = super().get_buffer(name=f'{real_name}.size')
+
+            # no size info found
+            # since the get_buffer should be called after init_buffer, thus the shm_size should be initialized before this function called.
+            # this should not happen. an error message is generated.
+            # no cache info stored
+            if shm_size is None:
+                LOGGER.error(f'Shared memory "{real_name}.size" not found! Expect a 8 bytes shared memory.')
+                return super().get_buffer(name=real_name)
+
+            self.shm_size[real_name] = shm_size
+
+        cache_size = int.from_bytes(shm_size.buf)
+        shm_size.close()
+
+        # cache not hit. This could happen in the child-processes.
+        if name not in self.shm_cache:
+            shm = super().get_buffer(name=real_name)
+
+            # for the similar reason above, the get_buffer should be called after init_buffer
+            # shm should never be None
+            if shm is None:
+                LOGGER.error(f'Shared memory "{real_name}" not found!, you should call init_buffer first')
+            else:
+                self.shm_cache[real_name] = shm
+
+            return shm
+        shm = self.shm_cache[real_name]
+
+        # the cache size is the requested size, cache validated.
+        if shm.size == cache_size:
+            return shm
+
+        # the cache size does not match the requested size, cache validation failed, this could be a result of lack of lock.
+        shm = super().get_buffer(name=real_name)
+        # the get-process should not update the size log, this is the tasks for the process altering shared memory.
+        # shm_size.buf[:] = shm.size.to_bytes(length=8)
+        return shm
+
+    def init_buffer(self, buffer_size: int, name: str = None, real_name: str = None) -> shared_memory.SharedMemory:
+        if real_name is None and name is None:
+            raise ValueError('Must assign a "name" or "real_name",')
+        elif real_name is None:
+            real_name = f'{self.prefix}.{name}'
+
+        # cache size log found in local
+        if real_name in self.shm_size:
+            shm_size = self.shm_size[real_name]
+            cache_size = int.from_bytes(shm_size.buf)
+
+            # since the cache size info exist, the shm must exist, in ether memory or local or both.
+            if real_name in self.shm_cache:
+                shm = self.shm_cache[real_name]
+            else:
+                shm = self.shm_cache[real_name] = shared_memory.SharedMemory(name=real_name)
+
+            # cache hit
+            if shm.size == buffer_size == cache_size:
+                shm_size.close()
+                return shm
+
+            # cache not hit, unlink the original shm and create a new one
+            shm.close()
+            shm.unlink()
+            shm_size.buf[:] = buffer_size.to_bytes(length=8)
+            shm_size.close()
+            shm = self.shm_cache[real_name] = shared_memory.SharedMemory(name=real_name, create=True, size=buffer_size)
+            return shm
+        # cache size info not found
+        elif (shm_size := super().get_buffer(name=f'{real_name}.size')) is None:
+            self.shm_size[real_name] = shm_size = shared_memory.SharedMemory(name=f'{real_name}.size', create=True, size=8)
+            shm_size.buf[:] = buffer_size.to_bytes(length=8)
+            shm_size.close()
+
+            # no cache size info but still have a cached obj, this should never happen
+            if real_name in self.shm_cache:
+                raise ValueError('Cache found but no cache size info found, potential collision on shared memory names, stop and exit is advised.')
+
+            shm = self.shm_cache[real_name] = shared_memory.SharedMemory(name=real_name, create=True, size=buffer_size)
+            return shm
+        # cache size found in memory: update local logs and re-run
+        else:
+            self.shm_size[real_name] = shm_size
+            # avoid issues in nested-inheritance
+            return CachedMemoryCore.init_buffer(self=self, real_name=real_name, buffer_size=buffer_size)
+
+
+class SyncMemoryCore(CachedMemoryCore):
+    def __init__(self, prefix: str, encoding='utf-8'):
+        super().__init__(prefix=prefix, encoding=encoding)
+        self.lock = Lock()
+
+    def get_buffer(self, name: str = None, real_name: str = None) -> shared_memory.SharedMemory | None:
+        with self.lock:
+            return super().get_buffer(name=name, real_name=real_name)
+
+    def init_buffer(self, buffer_size: int, name: str = None, real_name: str = None, ) -> shared_memory.SharedMemory:
+        with self.lock:
+            return super().init_buffer(name=name, real_name=real_name, buffer_size=buffer_size)
+
 
 
 class IndexWeight(dict):
@@ -42,6 +285,34 @@ class IndexWeight(dict):
     @property
     def components(self) -> list[str]:
         return list(self.keys())
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = dict(
+            index_name=self.index_name,
+            weights=dict(self),
+
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> IndexWeight:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            index_name=json_dict['index_name'],
+            **json_dict['weights']
+        )
+
+        return self
 
 
 class EMA(object):
@@ -209,6 +480,45 @@ class EMA(object):
         for _ in self._check_discontinuity(timestamp=timestamp, tolerance=1):
             self.discount_ema(ticker=_, timestamp=timestamp)
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = dict(
+            discount_interval=self.discount_interval,
+            alpha=self.alpha,
+            window=self.window,
+            last_discount_ts=self._last_discount_ts,
+            history=self._history,
+            current=self._current,
+            window_deque={entry_name: {ticker: list(dq) for ticker, dq in entry} for entry_name, entry in self._window.items()},
+            ema=self.ema,
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> EMA:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            discount_interval=json_dict['discount_interval'],
+            alpha=json_dict['alpha'],
+            window=json_dict['window']
+        )
+
+        self._last_discount_ts = json_dict['last_discount_ts']
+        self._history = json_dict['history']
+        self._current = json_dict['current']
+        self._window = {entry_name: {ticker: deque(data, maxlen=self.window) for ticker, data in entry} for entry_name, entry in json_dict['window_deque'].items()}
+        self.ema = json_dict['ema']
+        return self
+
     def clear(self):
         self._last_discount_ts.clear()
         self._history.clear()
@@ -288,6 +598,57 @@ class MACD(object):
     def macd_diff_adjusted(self):
         return self.macd_diff / self.price
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = dict(
+            short_window=self.short_window,
+            long_window=self.long_window,
+            signal_window=self.signal_window,
+            ema_short=self.ema_short,
+            ema_long=self.ema_long,
+            macd_line=self.macd_line,
+            signal_line=self.signal_line,
+            macd_diff=self.macd_diff,
+            price=self.price
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> MACD:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            short_window=json_dict['short_window'],
+            long_window=json_dict['long_window'],
+            signal_window=json_dict['signal_window']
+        )
+
+        self.ema_short = json_dict['ema_short']
+        self.ema_long = json_dict['ema_long']
+        self.macd_line = json_dict['macd_line']
+        self.signal_line = json_dict['signal_line']
+        self.macd_diff = json_dict['macd_diff']
+        self.price = json_dict['price']
+
+        return self
+
+    def clear(self):
+        self.ema_short = None
+        self.ema_long = None
+
+        self.macd_line = None
+        self.signal_line = None
+        self.macd_diff = None
+        self.price = None
+
 
 class Synthetic(object, metaclass=abc.ABCMeta):
     def __init__(self, weights: dict[str, float]):
@@ -309,6 +670,41 @@ class Synthetic(object, metaclass=abc.ABCMeta):
             self.base_price[ticker] = market_price
 
         self.last_price[ticker] = market_price
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = dict(
+            index_name=self.weights.index_name,
+            weights=dict(self.weights),
+            base_price=self.base_price,
+            last_price=self.last_price,
+            synthetic_base_price=self.synthetic_base_price
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> Synthetic:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        weights = IndexWeight(index_name=json_dict['index_name'], **json_dict['weights'])
+
+        self = cls(
+            weights=weights
+        )
+
+        self.base_price = json_dict['base_price']
+        self.last_price = json_dict['last_price']
+        self.synthetic_base_price = json_dict['synthetic_base_price']
+
+        return self
 
     def clear(self):
         self.base_price.clear()
@@ -495,6 +891,36 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         pass
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = dict(
+            sampling_interval=self.sampling_interval,
+            sample_size=self.sample_size,
+            sample_storage=self.sample_storage
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> FixedIntervalSampler:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size']
+        )
+
+        self.sample_storage = json_dict['sample_storage']
+
+        return self
+
     def clear(self):
         """
         Clears all stored data.
@@ -621,6 +1047,37 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
             volume_accumulated = self._accumulated_volume.get(ticker, 0.)
 
         super().log_obs(ticker=ticker, timestamp=volume_accumulated, observation=observation, **kwargs)
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+
+        data_dict.update(
+            accumulated_volume=self._accumulated_volume
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> FixedVolumeIntervalSampler:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size']
+        )
+
+        self.sample_storage = json_dict['sample_storage']
+        self.accumulated_volume = json_dict['accumulated_volume']
+
+        return self
 
     def clear(self):
         """
@@ -880,6 +1337,42 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
                 for idx_pop in list(obs_storage)[:to_pop]:
                     _ = obs_storage.pop(idx_pop)
                     self.on_entry_removed(ticker=ticker, name=obs_name, value=_)
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
+
+        data_dict.update(
+            baseline_window=self.baseline_window,
+            aligned_interval=self.aligned_interval,
+            volume_baseline=self._volume_baseline
+        )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> AdaptiveVolumeIntervalSampler:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        self = cls(
+            sampling_interval=json_dict['sampling_interval'],
+            sample_size=json_dict['sample_size'],
+            baseline_window=json_dict['baseline_window'],
+            aligned_interval=json_dict['aligned_interval']
+        )
+
+        self.sample_storage = json_dict['sample_storage']
+        self.accumulated_volume = json_dict['accumulated_volume']
+        self._volume_baseline = json_dict['volume_baseline']
+
+        return self
 
     def clear(self):
         """
