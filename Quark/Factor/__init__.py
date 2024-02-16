@@ -1,9 +1,18 @@
-import abc
-from functools import partial
-from typing import Iterable
+from __future__ import annotations
 
-from AlgoEngine.Engine import MarketDataMonitor, MDS
-from PyQuantKit import MarketData, TickData, TradeData, TransactionData, OrderBook
+import abc
+import json
+import os
+import pickle
+import traceback
+from collections import deque
+from ctypes import c_wchar, c_bool
+from functools import partial
+from multiprocessing import shared_memory, RawArray, RawValue, Semaphore, Process
+from typing import Iterable, Self
+
+from AlgoEngine.Engine import MarketDataMonitor, MDS, MonitorManager
+from PyQuantKit import MarketData, TickData, TradeData, TransactionData, OrderBook, OrderBookBuffer, BarDataBuffer, TickDataBuffer, TransactionDataBuffer
 
 from .. import LOGGER
 from ..Base import GlobalStatics
@@ -16,8 +25,17 @@ DEBUG_MODE = GlobalStatics.DEBUG_MODE
 
 class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
     def __init__(self, name: str, monitor_id: str = None):
+        """
+        the init function should never accept *arg or **kwargs as parameters.
+        since the from_json function depends on it.
+        """
+        var_names = self.__class__.__init__.__code__.co_varnames
+
+        if 'kwargs' in var_names or 'args' in var_names:
+            LOGGER.warning(f'*args and **kwargs are should not in {self.__class__.__name__} initialization. All parameters must be explicit.')
+
         assert name.startswith('Monitor')
-        super().__init__(name=name, monitor_id=monitor_id, mds=MDS)
+        super().__init__(name=name, monitor_id=monitor_id)
 
     def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
         # filter the out session data
@@ -97,6 +115,117 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
         return param_grid
 
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = dict(
+            name=self.name,
+            monitor_id=self.monitor_id
+        )
+
+        if isinstance(self, FixedIntervalSampler):
+            data_dict.update(
+                FixedIntervalSampler.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, FixedVolumeIntervalSampler):
+            data_dict.update(
+                FixedVolumeIntervalSampler.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            data_dict.update(
+                AdaptiveVolumeIntervalSampler.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, Synthetic):
+            data_dict.update(
+                Synthetic.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, EMA):
+            data_dict.update(
+                EMA.to_json(self=self, fmt='dict')
+            )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> Self:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        var_names = cls.__init__.__code__.co_varnames
+        kwargs = {name: json_dict[name] for name in var_names if name in json_dict}
+
+        self = cls(**kwargs)
+        self.update_from_json(json_dict=json_dict)
+
+        return self
+
+    def to_shm(self, name: str = None) -> str:
+        if name is None:
+            name = f'{self.monitor_id}.json'
+
+        return super().to_shm(name=name)
+
+    def from_shm(self, name: str = None) -> None:
+        if name is None:
+            name = f'{self.monitor_id}.json'
+
+        shm = shared_memory.SharedMemory(name=name)
+        json_dict = pickle.loads(bytes(shm.buf))
+        shm.close()
+        self.update_from_json(json_dict=json_dict)
+
+    def update_from_json(self, json_dict: dict) -> Self:
+        """
+        a utility function for .from_json()
+        """
+        if isinstance(self, FixedIntervalSampler):
+            self.sample_storage.clear()
+            self.sample_storage.update(json_dict['sample_storage'])
+
+        if isinstance(self, FixedVolumeIntervalSampler):
+            self._accumulated_volume.clear()
+            self._accumulated_volume.update(json_dict['accumulated_volume'])
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            self._volume_baseline.clear()
+            self._volume_baseline.update(json_dict['volume_baseline'])
+
+        if isinstance(self, Synthetic):
+            self.weights.clear()
+            self.weights.index_name = json_dict['index_name']
+            self.weights.update(json_dict['weights'])
+            self.base_price.clear()
+            self.base_price.update(json_dict['base_price'])
+            self.last_price.clear()
+            self.last_price.update(json_dict['last_price'])
+            self.synthetic_base_price = json_dict['synthetic_base_price']
+
+        if isinstance(self, EMA):
+            self._last_discount_ts.clear()
+            self._last_discount_ts.update(json_dict['last_discount_ts'])
+            self._history.clear()
+            self._history.update(json_dict['history'])
+            self._current.clear()
+            self._current.update(json_dict['current'])
+            self._window.clear()
+            self._window.update({entry_name: {ticker: deque(data, maxlen=self.window) for ticker, data in entry} for entry_name, entry in json_dict['window_deque'].items()})
+            self.ema.clear()
+            self.ema.update(json_dict['ema'])
+
+            for name in self.ema:
+                setattr(self, name, self.ema[name])
+
+        return self
+
     def _param_range(self) -> dict[str, list[...]]:
         # give some simple parameter range
         params_range = {}
@@ -158,6 +287,176 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
         return params_list
 
 
+class ConcurrentMonitorManager(MonitorManager):
+    def __init__(self, n_worker: int = None):
+        super().__init__()
+
+        self.n_worker = os.cpu_count() - 1 if n_worker is None else n_worker
+        self.workers = []
+        self.tasks = {
+            'md_dtype': RawArray(c_wchar, 16),
+            'tasks': [RawArray(c_wchar, 8 * 1024) for _ in range(self.n_worker)],
+            'OrderBook': OrderBookBuffer(),
+            'BarData': BarDataBuffer(),
+            'TickData': TickDataBuffer(),
+            'TransactionData': TransactionDataBuffer(),
+            'TradeData': TransactionDataBuffer()
+        }
+        self.enabled = RawValue(c_bool, False)
+        self.semaphore_start = Semaphore(value=0)
+        self.semaphore_done = Semaphore(value=0)
+
+        if self.n_worker <= 1:
+            LOGGER.info('Monitor manager is initialized in single process mode!')
+        else:
+            LOGGER.info(f'Monitor manager is initialized with {self.n_worker} processes mode!')
+            self.init_process()
+
+    def add_monitor(self, monitor: FactorMonitor):
+        super().add_monitor(monitor=monitor)
+
+        if self.workers:
+            try:
+                serialized = pickle.dumps(monitor)
+                size = len(serialized)
+                shm = shared_memory.SharedMemory(name=f'{monitor.monitor_id}.pickle', create=True, size=size)
+                shm.buf[:] = serialized
+                shm.close()
+            except Exception as _:
+                LOGGER.info(f'Monitor {monitor.name} serialization failed, multiprocessing not available.')
+
+    def pop_monitor(self, monitor_id: str):
+        super().pop_monitor(monitor_id=monitor_id)
+
+        if self.workers:
+            try:
+                shm = shared_memory.SharedMemory(name=monitor_id)
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError as _:
+                LOGGER.debug(f'No monitor with id {monitor_id} in shared memory.')
+
+    def __call__(self, market_data: MarketData):
+        # multi processing mode
+        if self.workers:
+            self._task_concurrent(market_data=market_data)
+        # single processing mode
+        else:
+            super().__call__(market_data=market_data)
+
+    def _task_concurrent(self, market_data: MarketData):
+        main_tasks = []
+        child_tasks = []
+
+        # step 1: send market data to the shared memory
+        self.tasks['md_dtype'].value = md_dtype = market_data.__class__.__name__
+        self.tasks[md_dtype].update(market_data=market_data)
+
+        # step 2: send monitor data core to shared memory
+        for monitor_id, monitor in self.monitor.items():
+            try:
+                monitor.to_shm()
+                child_tasks.append(monitor_id)
+            except Exception as _:
+                main_tasks.append(monitor_id)
+
+        # step 3: release semaphore to enable the workers
+        tasks = {worker_id: [] for worker_id in range(self.n_worker)}
+        for task_id, monitor_id in enumerate(child_tasks):
+            worker_id = task_id % self.n_worker
+            tasks[worker_id].append(monitor_id)
+
+        for worker_id, task_list in tasks.items():
+            self.tasks['tasks'][worker_id].value = '\x03'.join(task_list)
+
+        for _ in range(self.n_worker):
+            self.semaphore_start.release()
+
+        # step 4: execute tasks in main thread for those monitors not supporting multiprocessing features
+        for monitor_id in main_tasks:
+            self._work(monitor_id=monitor_id, market_data=market_data)
+
+        # step 5: acquire semaphore to wait till the tasks all done
+        for _ in range(self.n_worker):
+            self.semaphore_done.acquire()
+
+        # step 6: update the monitor from shared memory
+        for monitor_id in child_tasks:
+            monitor = self.monitor.get(monitor_id)
+            if monitor is not None and monitor.enabled:
+                monitor.from_shm()
+
+    def worker(self, worker_id: int):
+        while True:
+            self.semaphore_start.acquire()
+
+            # management job 0: terminate the worker on signal
+            if not self.enabled.value:
+                break
+
+            # step 1.1: reconstruct market data
+            md_dtype = self.tasks['md_dtype'].value
+            task_list = self.tasks['tasks'][worker_id].value.split('\x03')
+            market_data = self.tasks[md_dtype].to_market_data()
+
+            # step 2: do the tasks
+            for monitor_id in task_list:
+
+                if monitor_id not in self.monitor:
+                    try:
+                        LOGGER.debug(f'Worker {worker_id} can not find monitor with id {monitor_id}, looking up in shared memory...')
+                        shm = shared_memory.SharedMemory(name=f'{monitor_id}.pickle')
+                        monitor = pickle.loads(bytes(shm.buf))
+                        self.monitor[monitor_id] = monitor
+                        shm.close()
+                    except Exception as _:
+                        LOGGER.error(f'Deserialize monitor {monitor_id} failed, traceback:\n{traceback.format_exc()}')
+                        continue
+
+                self.monitor[monitor_id].from_shm()
+                self._work(monitor_id=monitor_id, market_data=market_data)
+                self.monitor[monitor_id].to_shm()
+
+            self.semaphore_done.release()
+
+    def init_process(self):
+        self.enabled.value = True
+
+        for i in range(self.n_worker):
+            p = Process(target=self.worker, name=f'{self.__class__.__name__}.worker.{i}', kwargs={'worker_id': i})
+            p.start()
+            self.workers.append(p)
+
+    def clear(self):
+        self.enabled.value = False
+
+        for _ in range(self.n_worker):
+            self.semaphore_start.release()
+
+        for p in self.workers:
+            p.join()
+
+        self.workers.clear()
+        self.enabled.value = False
+
+        while self.semaphore_start.acquire(False):
+            continue
+
+        while self.semaphore_done.acquire(False):
+            continue
+
+        # clear shm
+        for monitor_id in self.monitor:
+            try:
+                shm = shared_memory.SharedMemory(name=f'{monitor_id}.pickle')
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError as _:
+                continue
+
+        super().clear()
+
+
 def add_monitor(monitor: FactorMonitor, **kwargs) -> dict[str, FactorMonitor]:
     monitors = kwargs.get('monitors', {})
     factors = kwargs.get('factors', None)
@@ -189,6 +488,7 @@ ALPHA_01 = 0.9624  # alpha = 0.1 for each minute
 ALPHA_001 = 0.9261  # alpha = 0.01 for each minute
 ALPHA_0001 = 0.8913  # alpha = 0.001 for each minute
 INDEX_WEIGHTS = IndexWeight(index_name='DummyIndex')
+MONITOR_MANAGER = ConcurrentMonitorManager()
 
 from .TradeFlow import *
 from .Correlation import *
@@ -282,7 +582,7 @@ def collect_factor(monitors: dict[str, FactorMonitor] | list[FactorMonitor] | Fa
 
 
 __all__ = [
-    'FactorMonitor', 'LOGGER', 'DEBUG_MODE', 'IndexWeight', 'Synthetic', 'EMA', 'collect_factor',
+    'FactorMonitor', 'LOGGER', 'DEBUG_MODE', 'IndexWeight', 'MONITOR_MANAGER', 'Synthetic', 'EMA', 'collect_factor',
     # from .Correlation module
     'CoherenceMonitor', 'CoherenceAdaptiveMonitor', 'CoherenceEMAMonitor', 'TradeCoherenceMonitor', 'EntropyMonitor', 'EntropyAdaptiveMonitor', 'EntropyEMAMonitor',
     # from Decoder module
