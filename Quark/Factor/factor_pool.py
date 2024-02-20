@@ -215,7 +215,6 @@ class FactorPoolDummyMonitor(FactorMonitor):
         super().__init__(name='Monitor.FactorPool.Dummy')
 
         self.factor_pool = FACTOR_POOL if factor_pool is None else factor_pool
-        self._is_ready = True
         self.timestamp = 0.
         self.cache_index = 0
 
@@ -276,8 +275,8 @@ class FactorPoolDummyMonitor(FactorMonitor):
         return value
 
     @property
-    def is_ready(self) -> bool:
-        return self._is_ready
+    def serializable(self) -> bool:
+        return False
 
 
 FACTOR_POOL = FactorPool()
