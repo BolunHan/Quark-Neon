@@ -3,255 +3,17 @@ from __future__ import annotations
 import abc
 import enum
 import json
-import pickle
 from collections import deque
+from typing import Self
 
 import numpy as np
 from PyQuantKit import MarketData, TradeData, TransactionData, TickData, BarData
 
+from .memory_core import SyncMemoryCore
 from .. import LOGGER
 from ..Calibration.dummies import is_market_session
-from multiprocessing import shared_memory, Lock
 
-__all__ = ['IndexWeight', 'EMA', 'MACD', 'Synthetic', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler']
-
-
-class SharedMemoryCore(object):
-    def __init__(self, encoding='utf-8'):
-        self.encoding = encoding
-
-    def init_buffer(self, name: str, buffer_size: int) -> shared_memory.SharedMemory:
-        try:
-            shm = shared_memory.SharedMemory(name=name)
-
-            if shm.size != buffer_size:
-                shm.close()
-                shm.unlink()
-
-                shm = shared_memory.SharedMemory(name=name, create=True, size=buffer_size)
-        except FileNotFoundError as _:
-            shm = shared_memory.SharedMemory(name=name, create=True, size=buffer_size)
-
-        return shm
-
-    def get_buffer(self, name: str) -> shared_memory.SharedMemory | None:
-        try:
-            shm = shared_memory.SharedMemory(name=name)
-        except FileNotFoundError as _:
-            shm = None
-
-        return shm
-
-    def set_int(self, name: str, value: int, buffer_size: int = 32) -> shared_memory.SharedMemory:
-        shm = self.init_buffer(name=name, buffer_size=buffer_size)
-        shm.buf[:] = value.to_bytes(length=buffer_size)
-        shm.close()
-        return shm
-
-    def get_int(self, name: str, default: int = None) -> int | None:
-        shm = self.get_buffer(name=name)
-        value = default if shm is None else int.from_bytes(shm.buf)
-        shm.close()
-        return value
-
-    def set_vector(self, name: str, vector: list[float | int | bool] | np.ndarray) -> shared_memory.SharedMemory:
-        arr = np.array(vector)
-        shm = self.init_buffer(name=name, buffer_size=arr.nbytes)
-        shm.buf[:] = bytes(arr.data)
-        shm.close()
-        return shm
-
-    def get_vector(self, name: str, target: list = None) -> list[float]:
-        shm = self.get_buffer(name=name)
-        vector = [] if shm is None else np.ndarray(shape=(-1,), buffer=shm.buf).tolist()
-        shm.close()
-
-        if target is None:
-            return vector
-        else:
-            target.clear()
-            target.extend(vector)
-            return target
-
-    def set_str_vector(self, name: str, vector: list[str]) -> None:
-        vector_bytes = b'\x00'.join([_.encode(self.encoding) for _ in vector])
-        shm = self.init_buffer(name=name, buffer_size=len(vector_bytes))
-        shm.buf[:] = vector_bytes
-        shm.close()
-
-    def get_str_vector(self, name: str, target: list = None) -> list[float]:
-        shm = self.get_buffer(name=name)
-        vector = [] if shm is None else [_.decode(self.encoding) for _ in bytes(shm.buf).split(b'\x00')]
-        shm.close()
-
-        if target is None:
-            return vector
-        else:
-            target.clear()
-            target.extend(vector)
-            return target
-
-    def set_named_vector(self, name: str, obj: dict[str, float]) -> None:
-        """
-        sync the dict[str, float]
-        """
-        keys_name = f'{name}.keys'
-        values_name = f'{name}.values'
-
-        self.set_str_vector(name=keys_name, vector=list(obj.keys()))
-        self.set_vector(name=values_name, vector=list(obj.values()))
-
-    def get_name_vector(self, name: str, target: dict = None) -> dict[str, float]:
-        keys_name = f'{name}.keys'
-        values_name = f'{name}.values'
-
-        keys = self.get_str_vector(name=keys_name)
-        values = self.get_vector(name=values_name)
-        shm_dict = dict(zip(keys, values))
-
-        if target is None:
-            return shm_dict
-        else:
-            target.clear()
-            target.update(shm_dict)
-            return target
-
-    def sync(self, name: str, obj: ...) -> shared_memory.SharedMemory:
-        serialized = pickle.dumps(obj)
-        shm = self.init_buffer(name=name, buffer_size=len(serialized))
-        shm.buf[:] = serialized
-        shm.close()
-
-        return shm
-
-    def get(self, name: str, default=None) -> ...:
-        shm = self.get_buffer(name=name)
-        obj = default if shm is None else pickle.loads(bytes(shm.buf))
-        shm.close()
-
-        return obj
-
-
-class CachedMemoryCore(SharedMemoryCore):
-    def __init__(self, prefix: str, encoding='utf-8'):
-        super().__init__(encoding=encoding)
-
-        self.prefix = prefix
-
-        self.shm_size: dict[str, shared_memory.SharedMemory] = {}
-        self.shm_cache: dict[str, shared_memory.SharedMemory] = {}
-
-    def get_buffer(self, name: str = None, real_name: str = None) -> shared_memory.SharedMemory | None:
-
-        if real_name is None and name is None:
-            raise ValueError('Must assign a "name" or "real_name",')
-        elif real_name is None:
-            real_name = f'{self.prefix}.{name}'
-
-        # get the shm storing the size data
-        if real_name in self.shm_size:
-            shm_size = self.shm_size[real_name]
-        else:
-            shm_size = super().get_buffer(name=f'{real_name}.size')
-
-            # no size info found
-            # since the get_buffer should be called after init_buffer, thus the shm_size should be initialized before this function called.
-            # this should not happen. an error message is generated.
-            # no cache info stored
-            if shm_size is None:
-                LOGGER.error(f'Shared memory "{real_name}.size" not found! Expect a 8 bytes shared memory.')
-                return super().get_buffer(name=real_name)
-
-            self.shm_size[real_name] = shm_size
-
-        cache_size = int.from_bytes(shm_size.buf)
-        shm_size.close()
-
-        # cache not hit. This could happen in the child-processes.
-        if name not in self.shm_cache:
-            shm = super().get_buffer(name=real_name)
-
-            # for the similar reason above, the get_buffer should be called after init_buffer
-            # shm should never be None
-            if shm is None:
-                LOGGER.error(f'Shared memory "{real_name}" not found!, you should call init_buffer first')
-            else:
-                self.shm_cache[real_name] = shm
-
-            return shm
-        shm = self.shm_cache[real_name]
-
-        # the cache size is the requested size, cache validated.
-        if shm.size == cache_size:
-            return shm
-
-        # the cache size does not match the requested size, cache validation failed, this could be a result of lack of lock.
-        shm = super().get_buffer(name=real_name)
-        # the get-process should not update the size log, this is the tasks for the process altering shared memory.
-        # shm_size.buf[:] = shm.size.to_bytes(length=8)
-        return shm
-
-    def init_buffer(self, buffer_size: int, name: str = None, real_name: str = None) -> shared_memory.SharedMemory:
-        if real_name is None and name is None:
-            raise ValueError('Must assign a "name" or "real_name",')
-        elif real_name is None:
-            real_name = f'{self.prefix}.{name}'
-
-        # cache size log found in local
-        if real_name in self.shm_size:
-            shm_size = self.shm_size[real_name]
-            cache_size = int.from_bytes(shm_size.buf)
-
-            # since the cache size info exist, the shm must exist, in ether memory or local or both.
-            if real_name in self.shm_cache:
-                shm = self.shm_cache[real_name]
-            else:
-                shm = self.shm_cache[real_name] = shared_memory.SharedMemory(name=real_name)
-
-            # cache hit
-            if shm.size == buffer_size == cache_size:
-                shm_size.close()
-                return shm
-
-            # cache not hit, unlink the original shm and create a new one
-            shm.close()
-            shm.unlink()
-            shm_size.buf[:] = buffer_size.to_bytes(length=8)
-            shm_size.close()
-            shm = self.shm_cache[real_name] = shared_memory.SharedMemory(name=real_name, create=True, size=buffer_size)
-            return shm
-        # cache size info not found
-        elif (shm_size := super().get_buffer(name=f'{real_name}.size')) is None:
-            self.shm_size[real_name] = shm_size = shared_memory.SharedMemory(name=f'{real_name}.size', create=True, size=8)
-            shm_size.buf[:] = buffer_size.to_bytes(length=8)
-            shm_size.close()
-
-            # no cache size info but still have a cached obj, this should never happen
-            if real_name in self.shm_cache:
-                raise ValueError('Cache found but no cache size info found, potential collision on shared memory names, stop and exit is advised.')
-
-            shm = self.shm_cache[real_name] = shared_memory.SharedMemory(name=real_name, create=True, size=buffer_size)
-            return shm
-        # cache size found in memory: update local logs and re-run
-        else:
-            self.shm_size[real_name] = shm_size
-            # avoid issues in nested-inheritance
-            return CachedMemoryCore.init_buffer(self=self, real_name=real_name, buffer_size=buffer_size)
-
-
-class SyncMemoryCore(CachedMemoryCore):
-    def __init__(self, prefix: str, encoding='utf-8'):
-        super().__init__(prefix=prefix, encoding=encoding)
-        self.lock = Lock()
-
-    def get_buffer(self, name: str = None, real_name: str = None) -> shared_memory.SharedMemory | None:
-        with self.lock:
-            return super().get_buffer(name=name, real_name=real_name)
-
-    def init_buffer(self, buffer_size: int, name: str = None, real_name: str = None, ) -> shared_memory.SharedMemory:
-        with self.lock:
-            return super().init_buffer(name=name, real_name=real_name, buffer_size=buffer_size)
-
+__all__ = ['IndexWeight', 'EMA', 'Synthetic', 'SamplerMode', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler']
 
 
 class IndexWeight(dict):
@@ -316,21 +78,22 @@ class IndexWeight(dict):
 
 
 class EMA(object):
-    def __init__(self, discount_interval: float, alpha: float = None, window: int = None):
-        self.discount_interval = discount_interval
+    """
+    Use EMA module with samplers to get best results
+    """
+
+    def __init__(self, alpha: float = None, window: int = None, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
         self.alpha = alpha if alpha else 1 - 2 / (window + 1)
         self.window = window if window else round(2 / (1 - alpha) - 1)
 
+        self.subscription: set[str] = getattr(self, 'subscription', subscription)
+        self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
+
         if not (0 < alpha < 1):
-            LOGGER.warning(f'{self.__class__.__name__} should have an alpha from 0 to 1')
+            LOGGER.warning(f'{self.__class__.__name__} should have an alpha between 0 to 1')
 
-        if discount_interval <= 0:
-            LOGGER.warning(f'{self.__class__.__name__} should have a positive discount_interval')
-
-        self._last_discount_ts: dict[str, float] = {}
-        self._history: dict[str, dict[str, float]] = getattr(self, '_history', {})
-        self._current: dict[str, dict[str, float]] = getattr(self, '_current', {})
-        self._window: dict[str, dict[str, deque[float]]] = getattr(self, '_window', {})
+        self._ema_memory: dict[str, dict[str, float]] = getattr(self, '_ema_memory', {})
+        self._ema_current: dict[str, dict[str, float]] = getattr(self, '_ema_current', {})
         self.ema: dict[str, dict[str, float]] = getattr(self, 'ema', {})
 
     @classmethod
@@ -346,151 +109,76 @@ class EMA(object):
         ema = alpha * value + (1 - alpha) * memory
         return ema
 
-    def register_ema(self, name):
-        self._history[name] = {}
-        self._current[name] = {}
-        self._window[name] = {}
-        _ = self.ema[name] = {}
-        return _
+    def register_ema(self, name: str) -> dict[str, float]:
+        self._ema_memory[name] = {}
+        self._ema_current[name] = {}
+        self.ema[name] = {}
 
-    def update_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **update_data: float):
-        if timestamp:
-            last_discount = self._last_discount_ts.get(ticker, 0.)
+        return self.ema[name]
 
-            if last_discount > timestamp:
-                LOGGER.warning(f'{self.__class__.__name__} received obsolete {ticker} data! ts {timestamp}, data {update_data}')
-                return
+    def update_ema(self, ticker: str, replace_na: float = np.nan, **update_data: float):
+        """
+        update ema on call
 
-            # assign a ts on first update
-            if ticker not in self._last_discount_ts:
-                self._last_discount_ts[ticker] = (timestamp // self.discount_interval) * self.discount_interval
+        Args:
+            ticker: the ticker of the
+            replace_na: replace the memory value with the gaven if it is nan
+            **update_data: {'ema_a': 1, 'ema_b': 2}
 
-            # self._discount_ema(ticker=ticker, timestamp=timestamp)
+        Returns: None
 
-        # update to current
-        for entry_name in update_data:
-            if entry_name in self._current:
-                if np.isfinite(value := update_data[entry_name]):
-                    current = self._current[entry_name][ticker] = value
-                    memory = self._history[entry_name].get(ticker)
+        """
+        # update the current
+        for entry_name, value in update_data.items():
+            if entry_name not in self._ema_current:
+                LOGGER.warning(f'Entry {entry_name} not registered')
+                continue
 
-                    if memory is None:
-                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=replace_na, alpha=self.alpha)
-                    else:
-                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=memory, alpha=self.alpha)
+            if not np.isfinite(value):
+                LOGGER.warning(f'Value for {entry_name} not valid, expect float, got {value}, ignored to prevent data-contamination.')
+                continue
 
-    def accumulate_ema(self, ticker: str, timestamp: float = None, replace_na: float = np.nan, **accumulative_data: float):
-        if timestamp:
-            last_discount = self._last_discount_ts.get(ticker, 0.)
+            current = self._ema_current[entry_name][ticker] = value
+            memory = self._ema_memory[entry_name].get(ticker, np.nan)
 
-            if last_discount > timestamp:
-                LOGGER.warning(f'{self.__class__.__name__} received obsolete {ticker} data! ts {timestamp}, data {accumulative_data}')
+            if np.isfinite(memory):
+                self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=memory, alpha=self.alpha)
+            else:
+                self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=replace_na, alpha=self.alpha)
 
-                time_span = max(0., last_discount - timestamp)
-                adjust_factor = time_span // self.discount_interval
-                alpha = self.alpha ** adjust_factor
-
-                for entry_name in accumulative_data:
-                    if entry_name in self._history:
-                        if np.isfinite(_ := accumulative_data[entry_name]):
-                            current = self._current[entry_name].get(ticker, 0.)
-                            memory = self._history[entry_name][ticker] = self._history[entry_name].get(ticker, 0.) + _ * alpha
-
-                            if memory is None:
-                                self.ema[entry_name][ticker] = replace_na * self.alpha + current * (1 - self.alpha)
-                            else:
-                                self.ema[entry_name][ticker] = memory * self.alpha + current * (1 - self.alpha)
-
-                return
-
-            # assign a ts on first update
-            if ticker not in self._last_discount_ts:
-                self._last_discount_ts[ticker] = (timestamp // self.discount_interval) * self.discount_interval
-
-            # self._discount_ema(ticker=ticker, timestamp=timestamp)
+    def accumulate_ema(self, ticker: str, replace_na: float = np.nan, **accumulative_data: float):
         # add to current
-        for entry_name in accumulative_data:
-            if entry_name in self._current:
-                if np.isfinite(_ := accumulative_data[entry_name]):
-                    current = self._current[entry_name][ticker] = self._current[entry_name].get(ticker, 0.) + _
-                    memory = self._history[entry_name].get(ticker)
+        for entry_name, value in accumulative_data.items():
+            if entry_name not in self._ema_current:
+                LOGGER.warning(f'Entry {entry_name} not registered')
+                continue
 
-                    if memory is None:
-                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=replace_na, alpha=self.alpha)
-                    else:
-                        self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=memory, alpha=self.alpha)
+            if not np.isfinite(value):
+                LOGGER.warning(f'Value for {entry_name} not valid, expect float, got {value}, ignored to prevent data-contamination.')
+                continue
 
-    def discount_ema(self, ticker: str, timestamp: float):
-        last_update = self._last_discount_ts.get(ticker, timestamp)
+            current = self._ema_current[entry_name][ticker] = self._ema_current[entry_name].get(ticker, 0.) + value
+            memory = self._ema_memory[entry_name].get(ticker, np.nan)
 
-        # a discount event is triggered
-        if last_update + self.discount_interval <= timestamp:
-            time_span = timestamp - last_update
-            adjust_power = int(time_span // self.discount_interval)
+            if np.isfinite(memory):
+                self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=memory, alpha=self.alpha)
+            else:
+                self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=replace_na, alpha=self.alpha)
 
-            for entry_name in self._history:
-                current = self._current[entry_name].get(ticker)
-                memory = self._history[entry_name].get(ticker)
-                window: deque = self._window[entry_name].get(ticker, deque(maxlen=self.window))
-
-                # pre-check: drop None or nan
-                if current is None or not np.isfinite(current):
-                    return
-
-                # step 1: update window
-                for _ in range(adjust_power - 1):
-                    if window:
-                        window.append(window[-1])
-
-                window.append(current)
-
-                # step 2: re-calculate memory if window is not full
-                if len(window) < window.maxlen or memory is None:
-                    memory = None
-
-                    for _ in window:
-                        if memory is None:
-                            memory = _
-
-                        memory = memory * self.alpha + _ * (1 - self.alpha)
-
-                # step 3: calculate ema value by memory and current value
-                ema = memory * self.alpha + current * (1 - self.alpha)
-
-                # step 4: update EMA state
-                self._current[entry_name].pop(ticker)
-                self._history[entry_name][ticker] = ema
-                self._window[entry_name][ticker] = window
-                self.ema[entry_name][ticker] = ema
-
-        self._last_discount_ts[ticker] = (timestamp // self.discount_interval) * self.discount_interval
-
-    def _check_discontinuity(self, timestamp: float, tolerance: int = 1):
-        discontinued = []
-
-        for ticker in self._last_discount_ts:
-            last_update = self._last_discount_ts[ticker]
-
-            if last_update + (tolerance + 1) * self.discount_interval < timestamp:
-                discontinued.append(ticker)
-
-        return discontinued
-
-    def discount_all(self, timestamp: float):
-        for _ in self._check_discontinuity(timestamp=timestamp, tolerance=1):
-            self.discount_ema(ticker=_, timestamp=timestamp)
-
-    def to_json(self, fmt='str', **kwargs) -> str | dict:
+    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
         data_dict = dict(
-            discount_interval=self.discount_interval,
             alpha=self.alpha,
             window=self.window,
-            last_discount_ts=self._last_discount_ts,
-            history=self._history,
-            current=self._current,
-            window_deque={entry_name: {ticker: list(dq) for ticker, dq in entry} for entry_name, entry in self._window.items()},
-            ema=self.ema,
+            ema_memory=self._ema_memory,
+            ema_current=self._ema_current,
+            ema=self.ema
         )
+
+        if with_subscription:
+            data_dict['subscription'] = list(self.subscription)
+
+        if with_memory_core:
+            data_dict['memory_core'] = self.memory_core.to_json(fmt='dict')
 
         if fmt == 'dict':
             return data_dict
@@ -506,158 +194,52 @@ class EMA(object):
         else:
             json_dict = json.loads(json_message)
 
+        kwargs = {}
+
+        if 'subscription' in json_dict:
+            kwargs['subscription'] = json_dict('subscription')
+
+        if 'memory_core' in json_dict:
+            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
+
         self = cls(
-            discount_interval=json_dict['discount_interval'],
             alpha=json_dict['alpha'],
-            window=json_dict['window']
+            window=json_dict['window'],
+            **kwargs
         )
 
-        self._last_discount_ts = json_dict['last_discount_ts']
-        self._history = json_dict['history']
-        self._current = json_dict['current']
-        self._window = {entry_name: {ticker: deque(data, maxlen=self.window) for ticker, data in entry} for entry_name, entry in json_dict['window_deque'].items()}
-        self.ema = json_dict['ema']
+        self._ema_memory.update(json_dict['ema_memory'])
+        self._ema_current.update(json_dict['ema_current'])
+        self.ema.update(json_dict['ema'])
+
         return self
 
     def clear(self):
-        self._last_discount_ts.clear()
-        self._history.clear()
-        self._current.clear()
-        self._window.clear()
+        for storage in self._ema_memory.values():
+            storage.clear()
+
+        for storage in self._ema_current.values():
+            storage.clear()
+
+        for storage in self.ema.values():
+            storage.clear()
+
+        self._ema_memory.clear()
+        self._ema_current.clear()
         self.ema.clear()
 
 
-class MACD(object):
-    """
-    This model calculates the MACD absolute value (not the relative / adjusted value)
-
-    use update_macd method to update the close price
-    """
-
-    def __init__(self, short_window=12, long_window=26, signal_window=9):
-        self.short_window = short_window
-        self.long_window = long_window
-        self.signal_window = signal_window
-
-        self.ema_short = None
-        self.ema_long = None
-
-        self.macd_line = None
-        self.signal_line = None
-        self.macd_diff = None
-        self.price = None
-
-    @classmethod
-    def update_ema(cls, value: float, memory: float, window: int = None, alpha: float = None):
-        return EMA.calculate_ema(value=value, memory=memory, window=window, alpha=alpha)
-
-    def calculate_macd(self, price: float) -> dict[str, float]:
-        self.price = price
-        ema_short = price if self.ema_short is None else self.ema_short
-        ema_long = price if self.ema_long is None else self.ema_long
-
-        ema_short = self.update_ema(value=price, memory=ema_short, window=self.short_window)
-        ema_long = self.update_ema(value=price, memory=ema_long, window=self.long_window)
-
-        macd_line = ema_short - ema_long
-
-        signal_line = macd_line if self.signal_line is None else self.signal_line
-
-        signal_line = self.update_ema(value=macd_line, memory=signal_line, window=self.signal_window)
-        macd_diff = macd_line - signal_line
-
-        return dict(
-            ema_short=ema_short,
-            ema_long=ema_long,
-            macd_line=macd_line,
-            signal_line=signal_line,
-            macd_diff=macd_diff
-        )
-
-    def update_macd(self, price: float) -> dict[str, float]:
-        macd_dict = self.calculate_macd(price=price)
-
-        self.ema_short = macd_dict['ema_short']
-        self.ema_long = macd_dict['ema_long']
-        self.macd_line = macd_dict['macd_line']
-        self.signal_line = macd_dict['signal_line']
-        self.macd_diff = macd_dict['macd_diff']
-
-        return macd_dict
-
-    def get_macd_values(self) -> dict[str, float]:
-        return dict(
-            ema_short=self.ema_short,
-            ema_long=self.ema_long,
-            macd_line=self.macd_line,
-            signal_line=self.signal_line,
-            macd_diff=self.macd_diff
-        )
-
-    @property
-    def macd_diff_adjusted(self):
-        return self.macd_diff / self.price
-
-    def to_json(self, fmt='str', **kwargs) -> str | dict:
-        data_dict = dict(
-            short_window=self.short_window,
-            long_window=self.long_window,
-            signal_window=self.signal_window,
-            ema_short=self.ema_short,
-            ema_long=self.ema_long,
-            macd_line=self.macd_line,
-            signal_line=self.signal_line,
-            macd_diff=self.macd_diff,
-            price=self.price
-        )
-
-        if fmt == 'dict':
-            return data_dict
-        elif fmt == 'str':
-            return json.dumps(data_dict, **kwargs)
-        else:
-            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
-
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> MACD:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            short_window=json_dict['short_window'],
-            long_window=json_dict['long_window'],
-            signal_window=json_dict['signal_window']
-        )
-
-        self.ema_short = json_dict['ema_short']
-        self.ema_long = json_dict['ema_long']
-        self.macd_line = json_dict['macd_line']
-        self.signal_line = json_dict['signal_line']
-        self.macd_diff = json_dict['macd_diff']
-        self.price = json_dict['price']
-
-        return self
-
-    def clear(self):
-        self.ema_short = None
-        self.ema_long = None
-
-        self.macd_line = None
-        self.signal_line = None
-        self.macd_diff = None
-        self.price = None
-
-
 class Synthetic(object, metaclass=abc.ABCMeta):
-    def __init__(self, weights: dict[str, float]):
+    def __init__(self, weights: dict[str, float], subscription: list[str] = None, memory_core: SyncMemoryCore = None):
         self.weights: IndexWeight = weights if isinstance(weights, IndexWeight) else IndexWeight(index_name='synthetic', **weights)
         self.weights.normalize()
 
+        self.subscription: set[str] = getattr(self, 'subscription', subscription)
+        self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
+
         self.base_price: dict[str, float] = {}
         self.last_price: dict[str, float] = {}
-        self.synthetic_base_price = 1.
+        self.synthetic_base_price: float = 1.
 
     def composite(self, values: dict[str, float], replace_na: float = 0.):
         return self.weights.composite(values=values, replace_na=replace_na)
@@ -671,7 +253,7 @@ class Synthetic(object, metaclass=abc.ABCMeta):
 
         self.last_price[ticker] = market_price
 
-    def to_json(self, fmt='str', **kwargs) -> str | dict:
+    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
         data_dict = dict(
             index_name=self.weights.index_name,
             weights=dict(self.weights),
@@ -679,6 +261,12 @@ class Synthetic(object, metaclass=abc.ABCMeta):
             last_price=self.last_price,
             synthetic_base_price=self.synthetic_base_price
         )
+
+        if with_subscription:
+            data_dict['subscription'] = list(self.subscription)
+
+        if with_memory_core:
+            data_dict['memory_core'] = self.memory_core.to_json(fmt='dict')
 
         if fmt == 'dict':
             return data_dict
@@ -694,33 +282,44 @@ class Synthetic(object, metaclass=abc.ABCMeta):
         else:
             json_dict = json.loads(json_message)
 
-        weights = IndexWeight(index_name=json_dict['index_name'], **json_dict['weights'])
+        kwargs = {}
+
+        if 'subscription' in json_dict:
+            kwargs['subscription'] = json_dict('subscription')
+
+        if 'memory_core' in json_dict:
+            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
 
         self = cls(
-            weights=weights
+            weights=IndexWeight(index_name=json_dict['index_name'], **json_dict['weights']),
+            **kwargs
         )
 
-        self.base_price = json_dict['base_price']
-        self.last_price = json_dict['last_price']
-        self.synthetic_base_price = json_dict['synthetic_base_price']
+        self.base_price.update(json_dict['base_price'])
+        self.last_price.update(json_dict['last_price'])
+        self.synthetic_base_price.value = json_dict['synthetic_base_price']
 
         return self
 
     def clear(self):
         self.base_price.clear()
         self.last_price.clear()
+        self.synthetic_base_price = 1.
 
     @property
     def synthetic_index(self):
         price_list = []
         weight_list = []
 
-        for ticker in self.weights:
-            weight_list.append(self.weights[ticker])
+        for ticker, weight in self.weights.items():
+            last_price = self.last_price.get(ticker, np.nan)
+            base_price = self.base_price.get(ticker, np.nan)
 
-            if ticker in self.last_price:
-                price_list.append(self.last_price[ticker] / self.base_price[ticker])
+            if np.isfinite(last_price) and np.isfinite(base_price) and weight:
+                weight_list.append(self.weights[ticker])
+                price_list.append(last_price / base_price)
             else:
+                weight_list.append(0.)
                 price_list.append(1.)
 
         synthetic_index = np.average(price_list, weights=weight_list) * self.synthetic_base_price
@@ -729,6 +328,11 @@ class Synthetic(object, metaclass=abc.ABCMeta):
     @property
     def composited_index(self) -> float:
         return self.composite(self.last_price)
+
+
+class SamplerMode(enum.Enum):
+    update = 'update'
+    accumulate = 'accumulate'
 
 
 class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
@@ -768,11 +372,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
 
     """
 
-    class Mode(enum.Enum):
-        update = 'update'
-        accumulate = 'accumulate'
-
-    def __init__(self, sampling_interval: float = 1., sample_size: int = 60):
+    def __init__(self, sampling_interval: float = 1., sample_size: int = 60, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
         """
         Initialize the FixedIntervalSampler.
 
@@ -783,7 +383,10 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         self.sampling_interval = sampling_interval
         self.sample_size = sample_size
 
-        self.sample_storage = getattr(self, 'sample_storage', {})
+        self.subscription: set[str] = getattr(self, 'subscription', subscription)
+        self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
+
+        self.sample_storage = getattr(self, 'sample_storage', {})  # to avoid de-reference the dict using nested inheritance
 
         # Warning for sampling_interval
         if sampling_interval <= 0:
@@ -793,22 +396,25 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         if sample_size <= 2:
             LOGGER.warning(f"{self.__class__.__name__} should have a larger sample_size, by Shannon's Theorem, sample_size should be greater than 2")
 
-    def register_sampler(self, name: str, mode: str | Mode = 'update'):
+    def register_sampler(self, name: str, mode: str | SamplerMode = 'update'):
         if name in self.sample_storage:
             raise ValueError(f'name {name} already registered in {self.__class__.__name__}!')
 
-        if isinstance(mode, self.Mode):
+        if isinstance(mode, SamplerMode):
             mode = mode.value
 
         if mode not in ['update', 'accumulate']:
             raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
 
-        self.sample_storage[name] = dict(
+        sample_storage = self.sample_storage[name] = dict(
             storage={},
+            index={},
             mode=mode
         )
 
-    def get_sampler(self, name: str) -> dict[str, dict]:
+        return sample_storage
+
+    def get_sampler(self, name: str) -> dict[str, deque]:
         if name not in self.sample_storage:
             raise ValueError(f'name {name} not found in {self.__class__.__name__}!')
 
@@ -823,40 +429,36 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         observation_copy.update(kwargs)
 
         idx = timestamp // self.sampling_interval
-        idx_min = idx - self.sample_size
 
         for obs_name, obs_value in observation_copy.items():
             if obs_name not in self.sample_storage:
                 raise ValueError(f'Invalid observation name {obs_name}')
 
             sampler = self.sample_storage[obs_name]
-            storage = sampler['storage']
+            storage: dict[str, deque] = sampler['storage']
+            indices: dict = sampler['index']
             mode = sampler['mode']
 
             if ticker in storage:
                 obs_storage = storage[ticker]
             else:
-                obs_storage = storage[ticker] = {}
+                obs_storage = storage[ticker] = deque(maxlen=self.sample_size)
 
-            if idx not in obs_storage:
-                obs_storage[idx] = obs_value
+            last_idx = indices.get(ticker, 0)
+
+            if idx > last_idx:
+                obs_storage.append(obs_value)
+                indices[ticker] = idx
                 self.on_entry_added(ticker=ticker, name=obs_name, value=obs_value)
             else:
                 if mode == 'update':
-                    obs_storage[idx] = obs_value
+                    last_obs = obs_storage[-1] = obs_value
                 elif mode == 'accumulate':
-                    obs_storage[idx] += obs_value
+                    last_obs = obs_storage[-1] = obs_value + obs_storage[-1]
                 else:
                     raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
 
-                self.on_entry_updated(ticker=ticker, name=obs_name, value=obs_storage[idx])
-
-            for idx_pop in list(obs_storage):
-                if idx_pop < idx_min:
-                    _ = obs_storage.pop(idx_pop)
-                    self.on_entry_removed(ticker=ticker, name=obs_name, value=_)
-                else:
-                    break
+                self.on_entry_updated(ticker=ticker, name=obs_name, value=last_obs)
 
     def on_entry_added(self, ticker: str, name: str, value):
         """
@@ -880,23 +482,21 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         pass
 
-    def on_entry_removed(self, ticker: str, name: str, value):
-        """
-        Callback method triggered when an entry is removed.
-
-        Parameters:
-        - ticker (str): Ticker symbol for the removed entry.
-        - key: Key for the removed entry.
-        - value: Value of the removed entry.
-        """
-        pass
-
-    def to_json(self, fmt='str', **kwargs) -> str | dict:
+    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
         data_dict = dict(
             sampling_interval=self.sampling_interval,
             sample_size=self.sample_size,
-            sample_storage=self.sample_storage
+            sample_storage={name: dict(storage={ticker: list(dq) for ticker, dq in value['storage'].items()},
+                                       index=value['index'],
+                                       mode=value['mode'])
+                            for name, value in self.sample_storage.items()}
         )
+
+        if with_subscription:
+            data_dict['subscription'] = list(self.subscription)
+
+        if with_memory_core:
+            data_dict['memory_core'] = self.memory_core.to_json(fmt='dict')
 
         if fmt == 'dict':
             return data_dict
@@ -906,18 +506,30 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
             raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
 
     @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> FixedIntervalSampler:
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> Self:
         if isinstance(json_message, dict):
             json_dict = json_message
         else:
             json_dict = json.loads(json_message)
 
+        kwargs = {}
+
+        if 'subscription' in json_dict:
+            kwargs['subscription'] = json_dict('subscription')
+
+        if 'memory_core' in json_dict:
+            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
+
         self = cls(
             sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size']
+            sample_size=json_dict['sample_size'],
+            **kwargs
         )
 
-        self.sample_storage = json_dict['sample_storage']
+        self.sample_storage.update({name: dict(storage={ticker: deque(data, maxlen=self.sample_size) for ticker, data in value['storage'].items()},
+                                               index=value['index'],
+                                               mode=value['mode'])
+                                    for name, value in json_dict['sample_storage'].items()})
 
         return self
 
@@ -925,20 +537,23 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         Clears all stored data.
         """
-        for name in self.sample_storage:
-            self.sample_storage[name]['storage'].clear()
+        for name, sample_storage in self.sample_storage.items():
+            for ticker, dq in sample_storage['storage'].items():
+                dq.clear()
+
+            self.sample_storage[name]['index'].clear()
 
         # using this code will require the sampler to be registered again.
         self.sample_storage.clear()
 
     def loc_obs(self, name: str, ticker: str, index: int | slice = None) -> float | list[float]:
         sampler = self.get_sampler(name=name)
-        observation = sampler.get(ticker, {})
+        observation = sampler.get(ticker, [])
 
         if index is None:
-            return list(observation.values())
+            return list(observation)
         else:
-            return list(observation.values())[index]
+            return list(observation)[index]
 
     def active_obs(self, name: str) -> dict[str, float]:
         sampler = self.get_sampler(name=name)
@@ -946,7 +561,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
 
         for ticker, observation in sampler.items():
             if observation:
-                last_obs[ticker] = list(observation.values())[-1]
+                last_obs[ticker] = observation[-1]
 
         return last_obs
 
@@ -980,7 +595,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
 
     """
 
-    def __init__(self, sampling_interval: float = 100., sample_size: int = 20):
+    def __init__(self, sampling_interval: float = 100., sample_size: int = 20, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
         """
         Initialize the FixedVolumeIntervalSampler.
 
@@ -988,7 +603,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         - sampling_interval (float): Volume interval between consecutive samples. Default is 100.
         - sample_size (int): Number of samples to be stored. Default is 20.
         """
-        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size)
+        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, subscription=subscription, memory_core=memory_core)
         self._accumulated_volume: dict[str, float] = {}
 
     def accumulate_volume(self, ticker: str = None, volume: float = 0., market_data: MarketData = None, use_notional: bool = False):
@@ -1063,19 +678,28 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
             raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
 
     @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> FixedVolumeIntervalSampler:
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> Self:
         if isinstance(json_message, dict):
             json_dict = json_message
         else:
             json_dict = json.loads(json_message)
 
+        kwargs = {}
+
+        if 'subscription' in json_dict:
+            kwargs['subscription'] = json_dict('subscription')
+
+        if 'memory_core' in json_dict:
+            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
+
         self = cls(
             sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size']
+            sample_size=json_dict['sample_size'],
+            **kwargs
         )
 
-        self.sample_storage = json_dict['sample_storage']
-        self.accumulated_volume = json_dict['accumulated_volume']
+        self.sample_storage.update(json_dict['sample_storage'])
+        self._accumulated_volume.update(json_dict['accumulated_volume'])
 
         return self
 
@@ -1084,6 +708,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         Clears all stored data, including accumulated volumes.
         """
         super().clear()
+
         self._accumulated_volume.clear()
 
 
@@ -1121,7 +746,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
     """
 
-    def __init__(self, sampling_interval: float = 60., sample_size: int = 20, baseline_window: int = 100, aligned_interval: bool = True):
+    def __init__(self, sampling_interval: float = 60., sample_size: int = 20, baseline_window: int = 100, aligned_interval: bool = True, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
         """
         Initialize the AdaptiveVolumeIntervalSampler.
 
@@ -1131,7 +756,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         - baseline_window (int): Number of observations used for baseline calculation. Default is 100.
         - aligned (bool): Whether the sampling of each ticker is aligned (same temporal interval)
         """
-        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size)
+        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, subscription=subscription, memory_core=memory_core)
         self.baseline_window = baseline_window
         self.aligned_interval = aligned_interval
 
@@ -1139,8 +764,16 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             'baseline': {},  # type: dict[str, float]
             'sampling_interval': {},  # type: dict[str, float]
             'obs_vol_acc_start': {},  # type: dict[str, float]
-            'obs_vol_acc': {},  # type: dict[str, dict[float,float]]
+            'obs_index': {},  # type: dict[str, dict[float,float]]
+            'obs_vol_acc': {},  # type: dict[str, deque]
         }
+
+    def register_sampler(self, name: str, mode='update'):
+        sample_storage = super().register_sampler(name=name, mode=mode)
+
+        sample_storage['index_vol'] = {}
+
+        return sample_storage
 
     def _update_volume_baseline(self, ticker: str, timestamp: float, volume_accumulated: float = None, min_obs: int = None) -> float | None:
         """
@@ -1156,64 +789,68 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
         """
         min_obs = self.sample_size if min_obs is None else min_obs
-        volume_baseline = self._volume_baseline['baseline']
-        volume_sampling_interval = self._volume_baseline['sampling_interval']
 
-        if ticker in volume_baseline:
-            return volume_baseline[ticker]
+        volume_baseline_dict: dict[str, float] = self._volume_baseline['baseline']
+        obs_vol_acc_start_dict: dict[str, float] = self._volume_baseline['obs_vol_acc_start']
+        obs_index_dict: dict[str, float] = self._volume_baseline['obs_index']
 
-        if volume_accumulated is None:
-            volume_accumulated = self._accumulated_volume.get(ticker, 0.)
+        volume_baseline = volume_baseline_dict.get(ticker, np.nan)
+        volume_accumulated = self._accumulated_volume.get(ticker, 0.) if volume_accumulated is None else volume_accumulated
+
+        if np.isfinite(volume_baseline):
+            return volume_baseline
 
         if ticker in (_ := self._volume_baseline['obs_vol_acc']):
-            obs_vol_acc = _[ticker]
+            obs_vol_acc: deque = _[ticker]
         else:
-            obs_vol_acc = _[ticker] = {}
+            obs_vol_acc = _[ticker] = deque(maxlen=self.baseline_window)
 
         if not obs_vol_acc:
-            obs_start_acc_vol = self._volume_baseline['obs_vol_acc_start'][ticker] = volume_accumulated  # in this case, one obs of the trade data will be missed
+            # in this case, one obs of the trade data will be missed
+            obs_start_acc_vol = obs_vol_acc_start_dict[ticker] = volume_accumulated
         else:
-            obs_start_acc_vol = self._volume_baseline['obs_vol_acc_start'][ticker]
+            obs_start_acc_vol = obs_vol_acc_start_dict[ticker]
 
-        obs_ts = (timestamp // self.sampling_interval) * self.sampling_interval
-        obs_ts_start = list(obs_vol_acc)[0] if obs_vol_acc else obs_ts
-        obs_ts_end = obs_ts_start + self.baseline_window * self.sampling_interval
+        last_idx = obs_index_dict.get(ticker, 0)
+        obs_idx = obs_index_dict[ticker] = timestamp // self.sampling_interval
+        obs_ts = obs_idx * self.sampling_interval
+        volume_acc = volume_accumulated - obs_start_acc_vol
+        baseline_ready = False
 
-        if timestamp < obs_ts_end:
-            obs_vol_acc[obs_ts] = volume_accumulated - obs_start_acc_vol
-            baseline_ready = False
+        if not obs_vol_acc:
+            obs_vol_acc.append(volume_acc)
+        elif obs_idx == last_idx:
+            obs_vol_acc[-1] = volume_acc
+        # in this case, the obs_vol_acc is full, and a new index received, baseline is ready
         elif len(obs_vol_acc) == self.baseline_window:
             baseline_ready = True
         else:
-            LOGGER.debug(f'{self.__class__.__name__} baseline validity check failed! {ticker} data missed, expect {self.baseline_window} observation, got {len(obs_vol_acc)}.')
-            baseline_ready = True
+            obs_vol_acc.append(volume_acc)
 
-        obs_vol = {}
+        # convert vol_acc to vol
+        obs_vol = []
         vol_acc_last = 0.
-        for ts, vol_acc in obs_vol_acc.items():
-            obs_vol[ts] = vol_acc - vol_acc_last
+        for vol_acc in obs_vol_acc:
+            obs_vol.append(vol_acc - vol_acc_last)
             vol_acc_last = vol_acc
 
         if len(obs_vol) < min_obs:
             baseline_est = None
-        elif len(obs_vol) == 1:
-            # scale the observation
-            if timestamp - obs_ts > self.sampling_interval * 0.5:
-                baseline_est = obs_vol[obs_ts] / (timestamp - obs_ts) * self.sampling_interval
-            # can not estimate any baseline
-            else:
-                baseline_est = None
         else:
             if baseline_ready:
-                baseline_est = np.mean([obs_vol[ts] for ts in obs_vol])
-            elif timestamp - obs_ts > self.sampling_interval * 0.5:
-                baseline_est = np.mean([obs_vol[ts] if ts != obs_ts else obs_vol[ts] / (timestamp - ts) * self.sampling_interval for ts in obs_vol])
+                baseline_est = np.mean(obs_vol)
             else:
-                baseline_est = np.mean([obs_vol[ts] for ts in obs_vol if ts != obs_ts])
+                obs_vol_history = obs_vol[:-1]
+                obs_vol_current_adjusted = obs_vol[-1] / max(1., timestamp - obs_ts) * self.sampling_interval
+
+                if timestamp - obs_ts > self.sampling_interval * 0.5 and obs_vol_current_adjusted is not None:
+                    obs_vol_history.append(obs_vol_current_adjusted)
+
+                baseline_est = np.mean(obs_vol_history) if obs_vol_history else None
 
         if baseline_ready:
             if np.isfinite(baseline_est) and baseline_est > 0:
-                volume_baseline[ticker] = baseline_est
+                self._volume_baseline['baseline'][ticker] = baseline_est
             else:
                 LOGGER.error(f'{ticker} Invalid estimated baseline {baseline_est}, observation window extended.')
                 obs_vol_acc.clear()
@@ -1221,11 +858,11 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
                 self._volume_baseline['sampling_interval'].pop(ticker)
 
         if baseline_est is not None:
-            volume_sampling_interval[ticker] = baseline_est
+            self._volume_baseline['sampling_interval'][ticker] = baseline_est
 
         return baseline_est
 
-    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, allow_oversampling: bool = False, **kwargs):
+    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, **kwargs):
         """
         Logs an observation for the given ticker at the specified volume-accumulated timestamp.
 
@@ -1284,14 +921,11 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
                 volume_accumulated += vol_acc * weight
                 volume_sampling_interval += vol_sampling_interval * weight
 
-            idx_ts = timestamp // self.sampling_interval if allow_oversampling else 0.
+            idx_ts = 0.
             idx_vol = volume_accumulated // volume_sampling_interval
         else:
-            idx_ts = timestamp // self.sampling_interval if allow_oversampling else 0.
+            idx_ts = 0.
             idx_vol = volume_accumulated // volume_sampling_interval
-
-        idx = (idx_ts, idx_vol)
-        idx_vol_min = idx_vol - self.sample_size
 
         # step 3: update sampler
         for obs_name, obs_value in observation_copy.items():
@@ -1299,52 +933,50 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
                 raise ValueError(f'Invalid observation name {obs_name}')
 
             sampler = self.sample_storage[obs_name]
-            storage = sampler['storage']
+            storage: dict[str, deque] = sampler['storage']
+            indices_timestamp: dict[str, float] = sampler['index']
+            indices_volume: dict[str, float] = sampler['index_vol']
             mode = sampler['mode']
 
             if ticker in storage:
                 obs_storage = storage[ticker]
             else:
-                obs_storage = storage[ticker] = {}
+                obs_storage = storage[ticker] = deque(maxlen=self.sample_size)
 
-            if idx not in obs_storage:
-                obs_storage[idx] = obs_value
+            last_idx_ts = indices_timestamp.get(ticker, 0)
+            last_idx_vol = indices_volume.get(ticker, 0)
+
+            if idx_ts > last_idx_ts or idx_vol > last_idx_vol:
+                obs_storage.append(obs_value)
+                indices_timestamp[ticker] = idx_ts
+                indices_volume[ticker] = idx_vol
                 self.on_entry_added(ticker=ticker, name=obs_name, value=obs_value)
             else:
                 if mode == 'update':
-                    obs_storage[idx] = obs_value
+                    last_obs = obs_storage[-1] = obs_value
                 elif mode == 'accumulate':
-                    obs_storage[idx] += obs_value
+                    last_obs = obs_storage[-1] = obs_value + obs_storage[-1]
                 else:
                     raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
-                self.on_entry_updated(ticker=ticker, name=obs_name, value=obs_storage[idx])
 
-            for idx_pop in list(obs_storage):
-                idx_ts, idx_vol = idx_pop
-
-                # fallback to aligned mode
-                if idx_vol == 0:
-                    allow_oversampling = False
-                    break
-                elif idx_vol < idx_vol_min:
-                    _ = obs_storage.pop(idx_pop)
-                    self.on_entry_removed(ticker=ticker, name=obs_name, value=_)
-                else:
-                    break
-
-            # allow max sample size of len(sampled_obs) + 1 entries. (the extra entry is the active entry)
-            if not allow_oversampling and (to_pop := len(obs_storage) + 1 - self.sample_size) > 0:
-                for idx_pop in list(obs_storage)[:to_pop]:
-                    _ = obs_storage.pop(idx_pop)
-                    self.on_entry_removed(ticker=ticker, name=obs_name, value=_)
+                self.on_entry_updated(ticker=ticker, name=obs_name, value=last_obs)
 
     def to_json(self, fmt='str', **kwargs) -> str | dict:
-        data_dict = super().to_json(fmt='dict')
+        data_dict: dict = super().to_json(fmt='dict')
+
+        for name, sample_storage in self.sample_storage.items():
+            data_dict['sample_storage'][name]['index_vol'] = dict(sample_storage['index_vol'].items())
 
         data_dict.update(
             baseline_window=self.baseline_window,
             aligned_interval=self.aligned_interval,
-            volume_baseline=self._volume_baseline
+            volume_baseline=dict(
+                baseline=dict(self._volume_baseline['baseline']),
+                sampling_interval=dict(self._volume_baseline['sampling_interval']),
+                obs_vol_acc_start=dict(self._volume_baseline['obs_vol_acc_start']),
+                obs_index=dict(self._volume_baseline['obs_index']),
+                obs_vol_acc={ticker: list(dq) for ticker, dq in self._volume_baseline['obs_vol_acc'].items()}
+            )
         )
 
         if fmt == 'dict':
@@ -1355,22 +987,47 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
 
     @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> AdaptiveVolumeIntervalSampler:
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> Self:
         if isinstance(json_message, dict):
             json_dict = json_message
         else:
             json_dict = json.loads(json_message)
 
+        kwargs = {}
+
+        if 'subscription' in json_dict:
+            kwargs['subscription'] = json_dict('subscription')
+
+        if 'memory_core' in json_dict:
+            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
+
         self = cls(
             sampling_interval=json_dict['sampling_interval'],
             sample_size=json_dict['sample_size'],
             baseline_window=json_dict['baseline_window'],
-            aligned_interval=json_dict['aligned_interval']
+            aligned_interval=json_dict['aligned_interval'],
+            **kwargs
         )
 
-        self.sample_storage = json_dict['sample_storage']
-        self.accumulated_volume = json_dict['accumulated_volume']
-        self._volume_baseline = json_dict['volume_baseline']
+        self.sample_storage.update(
+            {name: dict(storage={ticker: deque(data, maxlen=self.sample_size) for ticker, data in value['storage'].items()},
+                        index=value['index'],
+                        index_vol=value['index_vol'],
+                        mode=value['mode'])
+             for name, value in json_dict['sample_storage'].items()}
+        )
+
+        self._accumulated_volume.update(json_dict['accumulated_volume'])
+
+        self._volume_baseline['baseline'].update(json_dict['volume_baseline']['baseline'])
+        self._volume_baseline['sampling_interval'].update(json_dict['volume_baseline']['sampling_interval'])
+        self._volume_baseline['obs_vol_acc_start'].update(json_dict['volume_baseline']['obs_vol_acc_start'])
+        self._volume_baseline['obs_index'].update(json_dict['volume_baseline']['obs_index'])
+        for ticker, data in json_dict['volume_baseline']['obs_vol_acc'].items():
+            if ticker in self._volume_baseline['obs_vol_acc']:
+                self._volume_baseline['obs_vol_acc'][ticker].extend(data)
+            else:
+                self._volume_baseline['obs_vol_acc'][ticker] = deque(data, maxlen=self.baseline_window)
 
         return self
 
@@ -1383,4 +1040,5 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         self._volume_baseline['baseline'].clear()
         self._volume_baseline['sampling_interval'].clear()
         self._volume_baseline['obs_vol_acc_start'].clear()
+        self._volume_baseline['obs_index'].clear()
         self._volume_baseline['obs_vol_acc'].clear()
