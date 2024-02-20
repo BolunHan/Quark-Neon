@@ -208,9 +208,12 @@ class EMA(object):
             **kwargs
         )
 
-        self._ema_memory.update(json_dict['ema_memory'])
-        self._ema_current.update(json_dict['ema_current'])
-        self.ema.update(json_dict['ema'])
+        for name in json_dict['ema']:
+            self.register_ema(name=name)
+
+            self._ema_memory[name].update(json_dict['ema_memory'][name])
+            self._ema_current[name].update(json_dict['ema_current'][name])
+            self.ema[name].update(json_dict['ema'][name])
 
         return self
 
@@ -297,7 +300,7 @@ class Synthetic(object, metaclass=abc.ABCMeta):
 
         self.base_price.update(json_dict['base_price'])
         self.last_price.update(json_dict['last_price'])
-        self.synthetic_base_price.value = json_dict['synthetic_base_price']
+        self.synthetic_base_price = json_dict['synthetic_base_price']
 
         return self
 
@@ -420,7 +423,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
 
         return self.sample_storage[name]['storage']
 
-    def log_obs(self, ticker: str, timestamp: float, observation: dict[str, ...] = None, **kwargs):
+    def log_obs(self, ticker: str, timestamp: float, observation: dict[str, ...] = None, auto_register: bool = True, **kwargs):
         observation_copy = {}
 
         if observation is not None:
@@ -441,8 +444,11 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
 
             if ticker in storage:
                 obs_storage = storage[ticker]
-            else:
+            elif auto_register:
                 obs_storage = storage[ticker] = deque(maxlen=self.sample_size)
+            else:
+                LOGGER.warning(f'Ticker {ticker} not registered in sampler {obs_name}, perhaps the subscription has changed?')
+                continue
 
             last_idx = indices.get(ticker, 0)
 
@@ -647,7 +653,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
             else:
                 raise ValueError('Must assign market_data, or ticker and volume')
 
-    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, **kwargs):
+    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, auto_register: bool = True, **kwargs):
         """
         Logs an observation for the given ticker at the specified volume-accumulated timestamp.
 
@@ -661,10 +667,10 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         if volume_accumulated is None:
             volume_accumulated = self._accumulated_volume.get(ticker, 0.)
 
-        super().log_obs(ticker=ticker, timestamp=volume_accumulated, observation=observation, **kwargs)
+        super().log_obs(ticker=ticker, timestamp=volume_accumulated, observation=observation, auto_register=auto_register, **kwargs)
 
-    def to_json(self, fmt='str', **kwargs) -> str | dict:
-        data_dict = super().to_json(fmt='dict')
+    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict', with_subscription=with_subscription, with_memory_core=with_memory_core)
 
         data_dict.update(
             accumulated_volume=self._accumulated_volume
@@ -775,7 +781,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
         return sample_storage
 
-    def _update_volume_baseline(self, ticker: str, timestamp: float, volume_accumulated: float = None, min_obs: int = None) -> float | None:
+    def _update_volume_baseline(self, ticker: str, timestamp: float, volume_accumulated: float = None, min_obs: int = None, auto_register: bool = True) -> float | None:
         """
         Updates and calculates the baseline volume for a given ticker.
 
@@ -802,8 +808,11 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
         if ticker in (_ := self._volume_baseline['obs_vol_acc']):
             obs_vol_acc: deque = _[ticker]
-        else:
+        elif auto_register:
             obs_vol_acc = _[ticker] = deque(maxlen=self.baseline_window)
+        else:
+            LOGGER.warning(f'Ticker {ticker} not registered in {self.__class__.__name__}, perhaps the subscription has changed?')
+            return None
 
         if not obs_vol_acc:
             # in this case, one obs of the trade data will be missed
@@ -862,7 +871,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
         return baseline_est
 
-    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, **kwargs):
+    def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, auto_register: bool = True, **kwargs):
         """
         Logs an observation for the given ticker at the specified volume-accumulated timestamp.
 
@@ -890,7 +899,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             volume_accumulated = self._accumulated_volume.get(ticker, 0.)
 
         # step 1: calculate sampling interval
-        volume_sampling_interval = self._update_volume_baseline(ticker=ticker, timestamp=timestamp, volume_accumulated=volume_accumulated)
+        volume_sampling_interval = self._update_volume_baseline(ticker=ticker, timestamp=timestamp, volume_accumulated=volume_accumulated, auto_register=auto_register)
 
         # step 2: calculate index
         if volume_sampling_interval is None:
@@ -940,8 +949,11 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
             if ticker in storage:
                 obs_storage = storage[ticker]
-            else:
+            elif auto_register:
                 obs_storage = storage[ticker] = deque(maxlen=self.sample_size)
+            else:
+                LOGGER.warning(f'Ticker {ticker} not registered in sampler {obs_name}, perhaps the subscription has changed?')
+                continue
 
             last_idx_ts = indices_timestamp.get(ticker, 0)
             last_idx_vol = indices_volume.get(ticker, 0)
@@ -961,8 +973,8 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
                 self.on_entry_updated(ticker=ticker, name=obs_name, value=last_obs)
 
-    def to_json(self, fmt='str', **kwargs) -> str | dict:
-        data_dict: dict = super().to_json(fmt='dict')
+    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
+        data_dict: dict = super().to_json(fmt='dict', with_subscription=with_subscription, with_memory_core=with_memory_core)
 
         for name, sample_storage in self.sample_storage.items():
             data_dict['sample_storage'][name]['index_vol'] = dict(sample_storage['index_vol'].items())
@@ -971,10 +983,10 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             baseline_window=self.baseline_window,
             aligned_interval=self.aligned_interval,
             volume_baseline=dict(
-                baseline=dict(self._volume_baseline['baseline']),
-                sampling_interval=dict(self._volume_baseline['sampling_interval']),
-                obs_vol_acc_start=dict(self._volume_baseline['obs_vol_acc_start']),
-                obs_index=dict(self._volume_baseline['obs_index']),
+                baseline=self._volume_baseline['baseline'],
+                sampling_interval=self._volume_baseline['sampling_interval'],
+                obs_vol_acc_start=self._volume_baseline['obs_vol_acc_start'],
+                obs_index=self._volume_baseline['obs_index'],
                 obs_vol_acc={ticker: list(dq) for ticker, dq in self._volume_baseline['obs_vol_acc'].items()}
             )
         )
