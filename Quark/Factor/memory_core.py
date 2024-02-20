@@ -402,7 +402,7 @@ class SyncMemoryCore(CachedMemoryCore):
             dummy=json_dict['dummy']
         )
 
-        self.storage = {name: SyncTemplate.from_json(manager=self, json_message=data) for name, data in json_dict['storage'].items()},
+        self.storage = {name: SyncTemplate.from_json(manager=self, json_message=data) for name, data in json_dict['storage'].items()}
 
         # self.from_shm(override=True)
         return self
@@ -574,6 +574,12 @@ class NamedVector(SyncTemplate):
     def to_shm(self, override: bool = False):
         is_sync = self.is_sync and not override
 
+        # no need to sync an empty dict
+        if not self:
+            LOGGER.warning(f'Sync empty {self.__class__.__name__} {self.name} is not advised, to free up memory, use unlink instead.')
+            LOGGER.warning(f'{self.name} has no data, and will not be synchronized,')
+            return
+
         if not is_sync or self._shm_keys is None or self._shm_values is None:
             self._shm_keys = self._manager.set_str_vector(name=self.name_keys, vector=self._keys)
             self._shm_values = self._manager.set_vector(name=self.name_values, vector=self._values)
@@ -587,6 +593,11 @@ class NamedVector(SyncTemplate):
         if (not is_sync) or self._shm_keys is None or self._shm_values is None:
             self._shm_keys = self._manager.get_buffer(name=self.name_keys)
             self._shm_values = self._manager.get_buffer(name=self.name_values)
+
+            if self._shm_keys is None and self._shm_values is None:
+                LOGGER.info(f'No shm found for {self.name}, {self.__class__.__name__} not synchronized.')
+                return
+
             self._keys = self._manager.deserialize_str_vector(vector_bytes=bytes(self._shm_keys.buf))
             self._idx = {key: idx for idx, key in enumerate(self._keys)}
             self._values = np.ndarray(shape=(-1,), dtype=self._dtype, buffer=self._shm_values.buf)
