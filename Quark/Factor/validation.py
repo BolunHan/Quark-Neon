@@ -37,7 +37,7 @@ from ..Profile import cn
 
 cn.profile_cn_override()
 LOGGER = LOGGER.getChild('validation')
-DUMMY_WEIGHT = True
+DUMMY_WEIGHT = False
 TIME_ZONE = GlobalStatics.TIME_ZONE
 RANGE_BREAK = GlobalStatics.RANGE_BREAK
 START_DATE = datetime.date(2023, 1, 1)
