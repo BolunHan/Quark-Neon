@@ -29,11 +29,6 @@ class EMA(_EMA, metaclass=abc.ABCMeta):
         self._ema_current[name]: NamedVector = self.memory_core.register(name=f'ema.{name}.current', dtype='NamedVector')
         self.ema[name]: NamedVector = self.memory_core.register(name=f'ema.{name}.value', dtype='NamedVector')
 
-        for ticker in self.subscription:
-            self._ema_memory[name][ticker] = np.nan
-            self._ema_current[name][ticker] = 0.  # this can set any value, but 0. is preferred for better compatibility with accumulative_ema
-            self.ema[name][ticker] = np.nan
-
         return self.ema[name]
 
     def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
@@ -84,10 +79,6 @@ class Synthetic(_Synthetic, metaclass=abc.ABCMeta):
         self.last_price: NamedVector = self.memory_core.register(name='last_price', dtype='NamedVector')
         self.synthetic_base_price: FloatValue = self.memory_core.register(name='synthetic_base_price', dtype='FloatValue', size=8, value=1.)
 
-        for ticker in self.subscription:
-            self.base_price[ticker] = np.nan
-            self.last_price[ticker] = np.nan
-
     def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
         data_dict = dict(
             index_name=self.weights.index_name,
@@ -137,9 +128,13 @@ class Synthetic(_Synthetic, metaclass=abc.ABCMeta):
         return self
 
     def clear(self):
-        self.base_price.unlink()
-        self.last_price.unlink()
-        self.synthetic_base_price.unlink()
+        self.base_price.clear(silent=True)
+        self.last_price.clear(silent=True)
+        self.synthetic_base_price.value = 1
+
+        # send cleared NamedVector to shm
+        self.base_price.to_shm()
+        self.last_price.to_shm()
 
     @property
     def synthetic_index(self):
@@ -157,7 +152,11 @@ class Synthetic(_Synthetic, metaclass=abc.ABCMeta):
                 weight_list.append(0.)
                 price_list.append(1.)
 
-        synthetic_index = np.average(price_list, weights=weight_list) * self.synthetic_base_price.value
+        if sum(weight_list):
+            synthetic_index = np.average(price_list, weights=weight_list) * self.synthetic_base_price.value
+        else:
+            synthetic_index = 1.
+
         return synthetic_index
 
     @property
@@ -179,12 +178,22 @@ class FixedIntervalSampler(_FIS, metaclass=abc.ABCMeta):
         sample_storage = super().register_sampler(name=name, mode=mode)
         sample_storage['index'] = self.memory_core.register(name=f'Sampler.{name}.index', dtype='NamedVector')
 
-        for ticker in self.subscription:
-            dq: Deque = self.memory_core.register(name=f'Sampler.{name}.{ticker}', dtype='Deque', maxlen=self.sample_size)
-            sample_storage['storage'][ticker] = dq
-            sample_storage['index'][ticker] = 0
-
         return sample_storage
+
+    def on_subscription(self, subscription: list[str] = None):
+        if subscription:
+            subscription = set(subscription) | set(self.subscription) if self.subscription else set()
+            self.subscription.clear()
+            self.subscription.extend(subscription)
+
+        for name, sample_storage in self.sample_storage.items():
+            for ticker in self.subscription:
+                if ticker in sample_storage['index']:
+                    continue
+
+                dq: Deque = self.memory_core.register(name=f'Sampler.{name}.{ticker}', dtype='Deque', maxlen=self.sample_size)
+                sample_storage['storage'][ticker] = dq
+                sample_storage['index'][ticker] = 0
 
     def log_obs(self, ticker: str, timestamp: float, observation: dict[str, ...] = None, **kwargs):
         return super().log_obs(ticker=ticker, timestamp=timestamp, observation=observation, auto_register=False, **kwargs)
@@ -265,8 +274,8 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, _FVS, metaclass=abc.ABCMe
         super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, subscription=subscription, memory_core=memory_core)
         self._accumulated_volume: NamedVector = self.memory_core.register(name=f'Sampler.Volume.Accumulated', dtype='NamedVector')
 
-        for ticker in self.subscription:
-            self._accumulated_volume[ticker] = 0.
+    def on_subscription(self, subscription: list[str] = None):
+        _FVS.on_subscription(self=self, subscription=subscription)
 
     def accumulate_volume(self, ticker: str = None, volume: float = 0., market_data: MarketData = None, use_notional: bool = False):
         return _FVS.accumulate_volume(self=self, ticker=ticker, volume=volume, market_data=market_data, use_notional=use_notional)
@@ -330,7 +339,10 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, _FVS, metaclass=abc.ABCMe
         """
         super().clear()
 
-        self._accumulated_volume.unlink()
+        self._accumulated_volume.clear(silent=True)
+
+        # send cleared NamedVector to shm
+        self._accumulated_volume.to_shm()
 
 
 class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, _AVS, metaclass=abc.ABCMeta):
@@ -348,7 +360,20 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, _AVS, metaclass=
             'obs_vol_acc': {},  # type: dict[str, Deque]
         }
 
+    def on_subscription(self, subscription: list[str] = None):
+        super().on_subscription(subscription=subscription)
+
+        for name, sample_storage in self.sample_storage.items():
+            for ticker in self.subscription:
+                if ticker in sample_storage['index_vol']:
+                    continue
+
+                sample_storage['index_vol'][ticker] = 0.
+
         for ticker in self.subscription:
+            if ticker in self._volume_baseline['obs_index']:
+                continue
+
             self._volume_baseline['baseline'][ticker] = np.nan
             self._volume_baseline['sampling_interval'][ticker] = np.nan
             self._volume_baseline['obs_vol_acc_start'][ticker] = np.nan
@@ -360,16 +385,13 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, _AVS, metaclass=
 
         sample_storage['index_vol'] = self.memory_core.register(name=f'Sampler.{name}.index_vol', dtype='NamedVector')
 
-        for ticker in self.subscription:
-            sample_storage['index_vol'][ticker] = 0
-
         return sample_storage
 
     def _update_volume_baseline(self, ticker: str, timestamp: float, volume_accumulated: float = None, min_obs: int = None, auto_register=False) -> float | None:
         return _AVS._update_volume_baseline(self=self, ticker=ticker, timestamp=timestamp, volume_accumulated=volume_accumulated, min_obs=min_obs, auto_register=False)
 
     def log_obs(self, ticker: str, timestamp: float, volume_accumulated: float = None, observation: dict[str, ...] = None, **kwargs):
-        return _AVS.log_obs(ticker=ticker, timestamp=timestamp, volume_accumulated=volume_accumulated, observation=observation, auto_register=False, **kwargs)
+        return _AVS.log_obs(self=self, ticker=ticker, timestamp=timestamp, volume_accumulated=volume_accumulated, observation=observation, auto_register=False, **kwargs)
 
     def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
         data_dict: dict = super().to_json(fmt='dict', with_subscription=with_subscription, with_memory_core=with_memory_core)
@@ -450,6 +472,9 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, _AVS, metaclass=
         """
         Clears all stored data, including accumulated volumes and baseline information.
         """
+        # can not call super clear since the FIS would clear the sample_storage before unlink
+        # super().clear()
+
         for name, sample_storage in self.sample_storage.items():
             for ticker, dq in sample_storage['storage'].items():
                 dq.unlink()
@@ -459,15 +484,18 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, _AVS, metaclass=
 
         self.sample_storage.clear()
 
-        self._accumulated_volume.unlink()
-
-        self._volume_baseline['baseline'].unlink()
-        self._volume_baseline['sampling_interval'].unlink()
-        self._volume_baseline['obs_vol_acc_start'].unlink()
-        self._volume_baseline['obs_index'].unlink()
-
-        for ticker, dq in self._volume_baseline['obs_vol_acc'].items():
-            dq.unlink()
-
+        self._accumulated_volume.clear(silent=True)
+        self._volume_baseline['baseline'].clear(silent=True)
+        self._volume_baseline['sampling_interval'].clear(silent=True)
+        self._volume_baseline['obs_vol_acc_start'].clear(silent=True)
+        self._volume_baseline['obs_index'].clear(silent=True)
+        for ticker in self._accumulated_volume:
+            self._volume_baseline['obs_vol_acc'][ticker].unlink()
         self._volume_baseline['obs_vol_acc'].clear()
-        self._volume_baseline.clear()
+
+        # send cleared NamedVector to shm
+        self._accumulated_volume.to_shm()
+        self._volume_baseline['baseline'].to_shm()
+        self._volume_baseline['sampling_interval'].to_shm()
+        self._volume_baseline['obs_vol_acc_start'].to_shm()
+        self._volume_baseline['obs_index'].to_shm()

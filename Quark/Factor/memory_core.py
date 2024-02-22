@@ -8,7 +8,7 @@ import json
 import pickle
 import uuid
 from collections import deque
-from multiprocessing import shared_memory, Lock
+from multiprocessing import shared_memory
 from typing import Iterable, Self
 
 import numpy as np
@@ -51,6 +51,18 @@ class SharedMemoryCore(object):
             shm = None
 
         return shm
+
+    def unlink_buffer(self, name: str):
+        try:
+            shm = shared_memory.SharedMemory(name=name)
+        except FileNotFoundError as _:
+            return
+
+        try:
+            shm.close()
+            shm.unlink()
+        except FileNotFoundError as _:
+            pass
 
     def set_int(self, name: str, value: int, buffer_size: int = 8) -> shared_memory.SharedMemory:
         shm = self.init_buffer(name=name, buffer_size=buffer_size)
@@ -149,7 +161,6 @@ class CachedMemoryCore(SharedMemoryCore):
         return f'{name}._cache_size'
 
     def get_buffer(self, name: str = None, real_name: str = None) -> shared_memory.SharedMemory | None:
-
         if real_name is None and name is None:
             raise ValueError('Must assign a "name" or "real_name",')
         elif real_name is None:
@@ -223,8 +234,7 @@ class CachedMemoryCore(SharedMemoryCore):
                 return shm
 
             # cache not hit, unlink the original shm and create a new one
-            shm.close()
-            shm.unlink()
+            super().unlink_buffer(name=shm.name)
             shm_size.buf[:] = buffer_size.to_bytes(length=8)
             shm = self.shm_cache[real_name] = super().init_buffer(name=real_name, buffer_size=buffer_size)
             return shm
@@ -245,6 +255,32 @@ class CachedMemoryCore(SharedMemoryCore):
             # avoid issues in nested-inheritance
             return CachedMemoryCore.init_buffer(self=self, real_name=real_name, buffer_size=buffer_size)
 
+    def unlink_buffer(self, to_unlink=None, /, name: str = None, real_name: str = None, shm: shared_memory.SharedMemory = None):
+        if to_unlink is not None:
+            if isinstance(to_unlink, str):
+                real_name = to_unlink
+            elif isinstance(to_unlink, shared_memory.SharedMemory):
+                real_name = to_unlink.name
+            else:
+                raise ValueError(f'Invalid to_unlink {to_unlink}, expect a str or SharedMemory.')
+        else:
+            if real_name is None and name is None and shm is None:
+                raise ValueError('Must assign a "name" or "real_name" or "shm".')
+            elif shm is not None:
+                real_name = shm.name
+            elif name is not None:
+                real_name = f'{self.prefix}.{name}'
+
+        super().unlink_buffer(name=real_name)
+
+        if real_name in self.shm_cache:
+            shm_cache = self.shm_cache.pop(real_name)
+            super().unlink_buffer(name=shm_cache.name)
+
+        if real_name in self.shm_size:
+            shm_size = self.shm_size.pop(real_name)
+            super().unlink_buffer(name=shm_size.name)
+
 
 class SyncMemoryCore(CachedMemoryCore):
     class SyncTypes(enum.Enum):
@@ -261,19 +297,10 @@ class SyncMemoryCore(CachedMemoryCore):
 
         self.dummy: bool = dummy
 
-        self.lock = Lock() if not self.dummy else None
         self.storage: dict[str, SyncTemplate] = {}
 
     def __reduce__(self):
         return self.__class__.from_json, (self.to_json(),)
-
-    def get_buffer(self, name: str = None, real_name: str = None) -> shared_memory.SharedMemory | None:
-        with self.lock:
-            return super().get_buffer(name=name, real_name=real_name)
-
-    def init_buffer(self, buffer_size: int, name: str = None, real_name: str = None, ) -> shared_memory.SharedMemory:
-        with self.lock:
-            return super().init_buffer(name=name, real_name=real_name, buffer_size=buffer_size)
 
     def register(self, *args, name: str, dtype: str | SyncTypes, use_cache: bool = True, **kwargs):
         if isinstance(dtype, self.SyncTypes):
@@ -308,6 +335,14 @@ class SyncMemoryCore(CachedMemoryCore):
         self.storage[name] = sync_storage
         return sync_storage
 
+    def unregister(self, name: str):
+        sync_storage = self.storage.pop(name, None)
+
+        if sync_storage is not None:
+            sync_storage.unlink()
+
+        return sync_storage
+
     def register_dummy(self, *args, name: str, dtype: str | SyncTypes, **kwargs):
         if not self.dummy:
             LOGGER.warning('Using register_dummy may override the synchronized storage. This function is for testing only.')
@@ -328,33 +363,26 @@ class SyncMemoryCore(CachedMemoryCore):
         return sync_storage
 
     def unlink(self):
+        LOGGER.info(f'{self.prefix} memory core unlinked {len(self.storage)} storage entries!')
+        for name, sync_storage in list(self.storage.items()):
+            LOGGER.debug(f'{self.prefix} memory core unlinked {sync_storage.__class__.__name__} {name} buffer.')
+            sync_storage.unlink()
 
-        for name, sync_storage in self.storage.items():
-            LOGGER.info(f'Unlinking {sync_storage.__class__.__name__} {name} buffer...')
+        LOGGER.info(f'{self.prefix} memory core unlinked {len(self.shm_size)} cache entries!')
+        for name in list(self.shm_cache):
+            LOGGER.debug(f'{self.prefix} memory core unlinked {name} cache.')
+            self.unlink_buffer(real_name=name)
 
-            try:
-                sync_storage.unlink()
-            except FileNotFoundError as _:
-                continue
+        assert not self.storage
+        assert not self.shm_size
+        assert not self.shm_cache
 
-        LOGGER.info(f'{len(self.storage)} storage entries clean up complete!')
+        # self.storage.clear()
+        # self.shm_size.clear()
+        # self.shm_cache.clear()
+
+    def clear(self):
         self.storage.clear()
-
-        for buffer in self.shm_size.values():
-            try:
-                buffer.close()
-                buffer.unlink()
-            except FileNotFoundError as _:
-                continue
-
-        for buffer in self.shm_cache.values():
-            try:
-                buffer.close()
-                buffer.unlink()
-            except FileNotFoundError as _:
-                continue
-
-        LOGGER.info(f'{len(self.shm_size)} cache entries clean up complete!')
         self.shm_size.clear()
         self.shm_cache.clear()
 
@@ -407,9 +435,19 @@ class SyncMemoryCore(CachedMemoryCore):
         # self.from_shm(override=True)
         return self
 
+    @property
+    def is_sync(self) -> bool:
+        for sync_storage in self.storage.values():
+            is_sync = sync_storage.is_sync
+
+            if not is_sync:
+                return False
+
+        return True
+
 
 class SyncTemplate(object, metaclass=abc.ABCMeta):
-    def __init__(self, manager: SharedMemoryCore, name: str):
+    def __init__(self, manager: SyncMemoryCore, name: str):
         self._name = name
         self._manager = manager
         self._ver_shm = manager.init_buffer(name=f'{name}.ver_code', buffer_size=16)
@@ -468,8 +506,8 @@ class SyncTemplate(object, metaclass=abc.ABCMeta):
 
     def unlink(self):
         try:
-            self._ver_shm.close()
-            self._ver_shm.unlink()
+            self._manager.unlink_buffer(self._ver_shm)
+            self._manager.unregister(name=self.name)
         except FileNotFoundError as _:
             pass
 
@@ -530,7 +568,7 @@ class SyncTemplate(object, metaclass=abc.ABCMeta):
 
 
 class NamedVector(SyncTemplate):
-    def __init__(self, *args, manager: SharedMemoryCore, name: str, **kwargs):
+    def __init__(self, *args, manager: SyncMemoryCore, name: str, **kwargs):
         data = dict(*args, **kwargs)
 
         super().__init__(name=name, manager=manager)
@@ -678,18 +716,10 @@ class NamedVector(SyncTemplate):
         super().unlink()
 
         if self._shm_keys is not None:
-            try:
-                self._shm_keys.close()
-                self._shm_keys.unlink()
-            except FileNotFoundError as _:
-                pass
+            self._manager.unlink_buffer(self._shm_keys)
 
         if self._shm_values is not None:
-            try:
-                self._shm_values.close()
-                self._shm_values.unlink()
-            except FileNotFoundError as _:
-                pass
+            self._manager.unlink_buffer(self._shm_values)
 
         self.clear(silent=True)
 
@@ -703,7 +733,7 @@ class NamedVector(SyncTemplate):
 
 
 class Vector(SyncTemplate):
-    def __init__(self, *args, manager: SharedMemoryCore, name: str, **kwargs):
+    def __init__(self, *args, manager: SyncMemoryCore, name: str, **kwargs):
         data = list(*args, **kwargs)
 
         super().__init__(name=name, manager=manager)
@@ -803,17 +833,13 @@ class Vector(SyncTemplate):
         super().unlink()
 
         if self._shm_values is not None:
-            try:
-                self._shm_values.close()
-                self._shm_values.unlink()
-            except FileNotFoundError as _:
-                pass
+            self._manager.unlink_buffer(self._shm_values)
 
         self.clear(silent=True)
 
 
 class Deque(SyncTemplate):
-    def __init__(self, *args, manager: SharedMemoryCore, name: str, maxlen: int, **kwargs):
+    def __init__(self, *args, manager: SyncMemoryCore, name: str, maxlen: int, **kwargs):
         data = list(*args, **kwargs)
 
         super().__init__(name=name, manager=manager)
@@ -922,8 +948,8 @@ class Deque(SyncTemplate):
             self.append(value)
 
     def clear(self, silent: bool = False):
-        if not silent:
-            LOGGER.warning(f'{self.__class__.__name__} should not be clear. If it is to free the resource, use unlink().')
+        # if not silent:
+        #     LOGGER.warning(f'{self.__class__.__name__} should not be clear. If it is to free the resource, use unlink().')
 
         if self.is_sync:
             self._values[:] = np.zeros(shape=self._maxlen, dtype=self._dtype)
@@ -937,18 +963,10 @@ class Deque(SyncTemplate):
         super().unlink()
 
         if self._shm_values is not None:
-            try:
-                self._shm_values.close()
-                self._shm_values.unlink()
-            except FileNotFoundError as _:
-                pass
+            self._manager.unlink_buffer(self._shm_values)
 
         if self._shm_length is not None:
-            try:
-                self._shm_length.close()
-                self._shm_length.unlink()
-            except FileNotFoundError as _:
-                pass
+            self._manager.unlink_buffer(self._shm_length)
 
         self.clear(silent=True)
 
@@ -980,7 +998,7 @@ class Deque(SyncTemplate):
 
 
 class IntValue(SyncTemplate):
-    def __init__(self, value: int, manager: SharedMemoryCore, name: str, size: int = 8):
+    def __init__(self, value: int, manager: SyncMemoryCore, name: str, size: int = 8):
         super().__init__(name=name, manager=manager)
         self._size = size
         self._value: int = value
@@ -1041,11 +1059,7 @@ class IntValue(SyncTemplate):
         super().unlink()
 
         if self._shm is not None:
-            try:
-                self._shm.close()
-                self._shm.unlink()
-            except FileNotFoundError as _:
-                pass
+            self._manager.unlink_buffer(self._shm)
 
     def clear(self, silent: bool = False):
         pass
@@ -1064,7 +1078,7 @@ class IntValue(SyncTemplate):
 
 
 class FloatValue(SyncTemplate):
-    def __init__(self, value: float, manager: SharedMemoryCore, name: str, size: int = 8):
+    def __init__(self, value: float, manager: SyncMemoryCore, name: str, size: int = 8):
         super().__init__(name=name, manager=manager)
 
         if size != 8:
@@ -1131,11 +1145,7 @@ class FloatValue(SyncTemplate):
         super().unlink()
 
         if self._shm is not None:
-            try:
-                self._shm.close()
-                self._shm.unlink()
-            except FileNotFoundError as _:
-                pass
+            self._manager.unlink_buffer(self._shm)
 
     def clear(self, silent: bool = False):
         pass
@@ -1207,7 +1217,7 @@ class NamedVectorDummy(SyncTemplate, dict):
 
 
 class VectorDummy(SyncTemplate, list):
-    def __init__(self, *args, manager: SharedMemoryCore, name: str, **kwargs):
+    def __init__(self, *args, manager: SyncMemoryCore, name: str, **kwargs):
         super().__init__(name=name, manager=manager)
         list.__init__(self=self, *args, **kwargs)
 
@@ -1261,7 +1271,7 @@ class VectorDummy(SyncTemplate, list):
 
 
 class DequeDummy(SyncTemplate, deque):
-    def __init__(self, *args, manager: SharedMemoryCore, name: str, **kwargs):
+    def __init__(self, *args, manager: SyncMemoryCore, name: str, **kwargs):
         super().__init__(name=name, manager=manager)
         deque.__init__(self=self, *args, **kwargs)
 
@@ -1315,7 +1325,7 @@ class DequeDummy(SyncTemplate, deque):
 
 
 class ValueDummy(SyncTemplate):
-    def __init__(self, value, size: int, manager: SharedMemoryCore, name: str):
+    def __init__(self, value, size: int, manager: SyncMemoryCore, name: str):
         super().__init__(name=name, manager=manager)
 
         self._size = size

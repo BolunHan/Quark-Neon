@@ -86,7 +86,7 @@ class EMA(object):
         self.alpha = alpha if alpha else 1 - 2 / (window + 1)
         self.window = window if window else round(2 / (1 - alpha) - 1)
 
-        self.subscription: set[str] = getattr(self, 'subscription', subscription)
+        self.subscription: list[str] = getattr(self, 'subscription', subscription)
         self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
 
         if not (0 < alpha < 1):
@@ -95,6 +95,21 @@ class EMA(object):
         self._ema_memory: dict[str, dict[str, float]] = getattr(self, '_ema_memory', {})
         self._ema_current: dict[str, dict[str, float]] = getattr(self, '_ema_current', {})
         self.ema: dict[str, dict[str, float]] = getattr(self, 'ema', {})
+
+    def on_subscription(self, subscription: list[str] = None):
+        if subscription:
+            subscription = set(subscription) | set(self.subscription) if self.subscription else set()
+            self.subscription.clear()
+            self.subscription.extend(subscription)
+
+        for name in self.ema:
+            for ticker in self.subscription:
+                if ticker in self._ema_memory[name]:
+                    continue
+
+                self._ema_memory[name][ticker] = np.nan
+                self._ema_current[name][ticker] = 0.  # this can set any value, but 0. is preferred for better compatibility with accumulative_ema
+                self.ema[name][ticker] = np.nan
 
     @classmethod
     def calculate_ema(cls, value: float, memory: float = None, window: int = None, alpha: float = None):
@@ -237,12 +252,25 @@ class Synthetic(object, metaclass=abc.ABCMeta):
         self.weights: IndexWeight = weights if isinstance(weights, IndexWeight) else IndexWeight(index_name='synthetic', **weights)
         self.weights.normalize()
 
-        self.subscription: set[str] = getattr(self, 'subscription', subscription)
+        self.subscription: list[str] = getattr(self, 'subscription', subscription)
         self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
 
         self.base_price: dict[str, float] = {}
         self.last_price: dict[str, float] = {}
         self.synthetic_base_price: float = 1.
+
+    def on_subscription(self, subscription: list[str] = None):
+        if subscription:
+            subscription = set(subscription) | set(self.subscription) if self.subscription else set()
+            self.subscription.clear()
+            self.subscription.extend(subscription)
+
+        for ticker in self.subscription:
+            if ticker not in self.base_price:
+                self.base_price[ticker] = np.nan
+
+            if ticker not in self.last_price:
+                self.last_price[ticker] = np.nan
 
     def composite(self, values: dict[str, float], replace_na: float = 0.):
         return self.weights.composite(values=values, replace_na=replace_na)
@@ -251,7 +279,8 @@ class Synthetic(object, metaclass=abc.ABCMeta):
         if ticker not in self.weights:
             return
 
-        if ticker not in self.base_price:
+        base_price = self.base_price.get(ticker, np.nan)
+        if not np.isfinite(base_price):
             self.base_price[ticker] = market_price
 
         self.last_price[ticker] = market_price
@@ -386,7 +415,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         self.sampling_interval = sampling_interval
         self.sample_size = sample_size
 
-        self.subscription: set[str] = getattr(self, 'subscription', subscription)
+        self.subscription: list[str] = getattr(self, 'subscription', subscription)
         self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
 
         self.sample_storage = getattr(self, 'sample_storage', {})  # to avoid de-reference the dict using nested inheritance
@@ -398,6 +427,21 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         # Warning for sample_interval by Shannon's Theorem
         if sample_size <= 2:
             LOGGER.warning(f"{self.__class__.__name__} should have a larger sample_size, by Shannon's Theorem, sample_size should be greater than 2")
+
+    def on_subscription(self, subscription: list[str] = None):
+        if subscription:
+            subscription = set(subscription) | set(self.subscription) if self.subscription else set()
+            self.subscription.clear()
+            self.subscription.extend(subscription)
+
+        for name, sample_storage in self.sample_storage.items():
+            for ticker in self.subscription:
+                if ticker in sample_storage['index']:
+                    continue
+
+                dq: deque = deque(maxlen=self.sample_size)
+                sample_storage['storage'][ticker] = dq
+                sample_storage['index'][ticker] = 0
 
     def register_sampler(self, name: str, mode: str | SamplerMode = 'update'):
         if name in self.sample_storage:
@@ -612,6 +656,15 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, subscription=subscription, memory_core=memory_core)
         self._accumulated_volume: dict[str, float] = {}
 
+    def on_subscription(self, subscription: list[str] = None):
+        super().on_subscription(subscription=subscription)
+
+        for ticker in self.subscription:
+            if ticker in self._accumulated_volume:
+                continue
+
+            self._accumulated_volume[ticker] = 0.
+
     def accumulate_volume(self, ticker: str = None, volume: float = 0., market_data: MarketData = None, use_notional: bool = False):
         """
         Accumulates volume based on market data or explicit ticker and volume.
@@ -773,6 +826,26 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             'obs_index': {},  # type: dict[str, dict[float,float]]
             'obs_vol_acc': {},  # type: dict[str, deque]
         }
+
+    def on_subscription(self, subscription: list[str] = None):
+        super().on_subscription(subscription=subscription)
+
+        for name, sample_storage in self.sample_storage.items():
+            for ticker in self.subscription:
+                if ticker in sample_storage['index_vol']:
+                    continue
+
+                sample_storage['index_vol'][ticker] = 0.
+
+        for ticker in self.subscription:
+            if ticker in self._volume_baseline['obs_index']:
+                continue
+
+            self._volume_baseline['baseline'][ticker] = np.nan
+            self._volume_baseline['sampling_interval'][ticker] = np.nan
+            self._volume_baseline['obs_vol_acc_start'][ticker] = np.nan
+            self._volume_baseline['obs_index'][ticker] = 0.
+            self._volume_baseline['obs_vol_acc'][ticker] = deque(maxlen=self.baseline_window)
 
     def register_sampler(self, name: str, mode='update'):
         sample_storage = super().register_sampler(name=name, mode=mode)
@@ -1054,3 +1127,33 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         self._volume_baseline['obs_vol_acc_start'].clear()
         self._volume_baseline['obs_index'].clear()
         self._volume_baseline['obs_vol_acc'].clear()
+
+    @property
+    def baseline_ready(self) -> bool:
+        subscription = set(self._volume_baseline['obs_vol_acc'])
+
+        if self.subscription:
+            subscription.update(self.subscription)
+
+        for ticker in subscription:
+            sampling_interval = self._volume_baseline['sampling_interval'].get(ticker, np.nan)
+
+            if not np.isfinite(sampling_interval):
+                return False
+
+        return True
+
+    @property
+    def baseline_stable(self) -> bool:
+        subscription = set(self._volume_baseline['obs_vol_acc'])
+
+        if self.subscription:
+            subscription.update(self.subscription)
+
+        for ticker in subscription:
+            sampling_interval = self._volume_baseline['baseline'].get(ticker, np.nan)
+
+            if not np.isfinite(sampling_interval):
+                return False
+
+        return True

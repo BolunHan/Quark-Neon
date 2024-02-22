@@ -9,13 +9,14 @@ import pathlib
 import random
 import shutil
 from collections import deque
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 from AlgoEngine.Engine import ProgressiveReplay
 from PyQuantKit import MarketData
 
-from . import LOGGER, MDS, IndexWeight, collect_factor, FactorMonitor
+from . import LOGGER, MDS, IndexWeight, collect_factor, FactorMonitor, MONITOR_MANAGER
 from .Correlation import *
 from .Distribution import *
 from .LowPass import *
@@ -36,11 +37,12 @@ from ..Profile import cn
 
 cn.profile_cn_override()
 LOGGER = LOGGER.getChild('validation')
-DUMMY_WEIGHT = False
+DUMMY_WEIGHT = True
 TIME_ZONE = GlobalStatics.TIME_ZONE
 RANGE_BREAK = GlobalStatics.RANGE_BREAK
 START_DATE = datetime.date(2023, 1, 1)
 END_DATE = datetime.date(2023, 4, 1)
+MDS.monitor_manager = MONITOR_MANAGER
 
 
 class FactorValidation(object):
@@ -75,14 +77,16 @@ class FactorValidation(object):
         Args:
             **kwargs: Additional parameters for configuration.
         """
-        # Params for index
-        self.index_name = kwargs.get('index_name', '000016.SH')
-        self.index_weights = IndexWeight(index_name='000016.SH')
-
         # Params for replay
         self.dtype = kwargs.get('dtype', 'TradeData')
         self.start_date = kwargs.get('start_date', START_DATE)
         self.end_date = kwargs.get('end_date', END_DATE)
+
+        # Params for index
+        self.index_name = kwargs.get('index_name', '000016.SH')
+        self.index_weights = IndexWeight(index_name='000016.SH')
+        self._update_index_weights(market_date=self.start_date)
+        self.subscription = list(self.index_weights.keys())
 
         # Params for sampling
         self.sampling_interval = kwargs.get('sampling_interval', 10.)
@@ -100,8 +104,7 @@ class FactorValidation(object):
         ]
 
         self.factor: FactorMonitor | None = None
-        self.synthetic = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights, interval=self.sampling_interval)
-        self.subscription = set()
+        self.synthetic = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights, interval=self.sampling_interval, subscription=self.subscription)
         self.factor_value: dict[float, dict[str, float]] = {}
 
         self.model = {
@@ -223,25 +226,33 @@ class FactorValidation(object):
                 index_weights.pop(_)
 
         # Step 0: Update index weights
+        self.index_weights.clear()
         self.index_weights.update(index_weights)
         self.index_weights.normalize()
-        self.synthetic.weights = self.index_weights
+        # the factors and synthetics are using the same index_weights reference, so no need to update individually
+        # self.synthetic.weights = self.index_weights
+        return index_weights
 
     def _update_subscription(self, replay: ProgressiveReplay):
         """
         Updates market data subscriptions based on index weights.
         """
+        self.subscription.clear()
+        replay.replay_subscription.clear()
+
         subscription = set(self.index_weights.keys())
+        self.subscription.extend(subscription)
 
-        for _ in subscription:
-            if _ not in self.subscription:
-                replay.add_subscription(ticker=_, dtype='TradeData')
+        if isinstance(self.dtype, str):
+            dtype = [self.dtype]
+        elif isinstance(self.dtype, Iterable):
+            dtype = list(self.dtype)
+        else:
+            raise ValueError(f'Invalid dtype {self.dtype}')
 
-        for _ in self.subscription:
-            if _ not in subscription:
-                replay.remove_subscription(ticker=_, dtype='TradeData')
-
-        self.subscription.update(subscription)
+        for ticker in subscription:
+            for _dtype in dtype:
+                replay.add_subscription(ticker=ticker, dtype=_dtype)
 
     def initialize_factor(self, **kwargs) -> FactorMonitor:
         """
@@ -261,6 +272,7 @@ class FactorValidation(object):
             aligned_interval=False
         )
 
+        self.factor.on_subscription()
         MDS.add_monitor(self.factor)
         MDS.add_monitor(self.synthetic)
 
@@ -596,14 +608,14 @@ class FactorBatchValidation(FactorValidation):
                 aligned_interval=False
             ),
             # AggressivenessEMAMonitor(
-            #     discount_interval=1,
             #     alpha=ALPHA_0001,
             #     weights=self.index_weights
             # )
         ]
 
-        for _ in self.factor:
-            MDS.add_monitor(_)
+        for factor in self.factor:
+            factor.on_subscription()
+            MDS.add_monitor(factor)
 
         MDS.add_monitor(self.synthetic)
 
@@ -697,8 +709,11 @@ class FactorBatchValidation(FactorValidation):
         Resets multiple factors.
         """
 
-        MDS.clear()
+        # all reference to the monitor should be cleared before calling MDS.clear()
+        # this ensure the gc before processes join.
+        # the shm will be properly unlinked by the triggering of __del__
         self.factor.clear()
+        MDS.clear()
 
         self.synthetic.clear()
         self.factor_value.clear()
@@ -904,8 +919,9 @@ class FactorValidatorExperiment(InterTemporalValidation):
 
         self.factor_cache = FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
-        for _ in self.factor:
-            MDS.add_monitor(_)
+        for factor in self.factor:
+            factor.on_subscription()
+            MDS.add_monitor(factor)
 
         MDS.add_monitor(self.synthetic)
 
@@ -942,6 +958,7 @@ class FactorParamsOptimizer(InterTemporalValidation):
                                             sample_size=20,
                                             baseline_window=100,
                                             weights=self.index_weights,
+                                            subscription=self.subscription,
                                             aligned_interval=False
                                         ))
         self.features = kwargs.get('features',
@@ -967,6 +984,7 @@ class FactorParamsOptimizer(InterTemporalValidation):
         self.grid_cv = {key: CrossValidation(model=model, folds=10, shuffle=True, strict_no_future=True) for key, model in self.grid_model.items()}
         self.grid_metrics = {key: {} for key in self.grid_cv}
         self.grid_avg_metrics = {factor_name: {} for factor_name in self.grid_params}
+        self.grid_score = {factor_name: {} for factor_name in self.grid_params}
         self.grid_select_metrics = {pred_var: {} for pred_var in self.pred_var}
         self.grid_optimal_params = None
 
@@ -978,8 +996,8 @@ class FactorParamsOptimizer(InterTemporalValidation):
             self.factor.append(selected_factor)
         # use parent factor as initial guess
         else:
-            self.parent_factor.enabled = True
-            self.factor.append(self.parent_factor)
+            selected_factor = self.parent_factor.__class__(**self.parent_factor.params)
+            self.factor.append(selected_factor)
 
         # initialize grid factors
         for factor_name, param in self.grid_params.items():
@@ -988,8 +1006,9 @@ class FactorParamsOptimizer(InterTemporalValidation):
             self.factor.append(factor)
             self.grid_features[factor_name] = features
 
-        for _ in self.factor:
-            MDS.add_monitor(_)
+        for factor in self.factor:
+            factor.on_subscription()
+            MDS.add_monitor(factor)
 
         MDS.add_monitor(self.synthetic)
 
@@ -1069,7 +1088,17 @@ class FactorParamsOptimizer(InterTemporalValidation):
 
         return grid_metrics
 
-    def select_best_params(self, market_date: datetime.date):
+    def select_best_params(self, market_date: datetime.date, alpha: float = 0.5):
+        """
+        calculate score and select best params for next day.
+        note that the score is an ema of previous (validation) average metrics.
+        Args:
+            market_date:
+            alpha:
+
+        Returns:
+
+        """
         grid_metrics = {}
         grid_score = {}
 
@@ -1101,7 +1130,10 @@ class FactorParamsOptimizer(InterTemporalValidation):
                 continue
 
             score = self._grid_score(grid_metrics[factor_name])
-            grid_score[factor_name] = score
+            self.grid_score[factor_name][market_date] = score
+            # calculate a simple ema value using pandas, get the last ema value as the average score
+            score_ema = pd.Series(list(self.grid_score[factor_name].values())).ewm(alpha=alpha).mean().values[-1]
+            grid_score[factor_name] = score_ema
 
         if not grid_score:
             return None
@@ -1110,7 +1142,7 @@ class FactorParamsOptimizer(InterTemporalValidation):
         best_params = self.grid_params[best_factor]
 
         selected_factor = (best_factor, best_params)
-        LOGGER.info(f'Grid CV complete! Best params for {market_date} is {best_factor}:\n{ {key: value for key, value in best_params.items() if key != "weights"} }')
+        LOGGER.info(f'Grid CV complete! Best params for {market_date} is {best_factor} with score {best_score:.4%}:\n{ {key: value for key, value in best_params.items() if key != "weights"} }')
 
         self.grid_optimal_params = selected_factor
         return selected_factor
@@ -1165,11 +1197,12 @@ class FactorParamsOptimizer(InterTemporalValidation):
                 pd.DataFrame(select_metrics).T.to_csv(pathlib.Path(dump_dir, f'select_metrics.{pred_var}.csv'))
 
     def reset(self):
-        super().reset()
-
-        self.parent_factor.clear()
+        # the storage of grid factors must be cleared first, so that the monitor can be properly deleted on MDS.clear()
+        # self.parent_factor.clear()
         self.grid_factor.clear()
         self.grid_features.clear()  # this will be rebuilt on factor initialization
+
+        super().reset()
 
         for _ in self.grid_cv.values():
             _.clear()
