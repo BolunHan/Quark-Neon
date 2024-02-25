@@ -3,9 +3,10 @@ from collections import deque
 from typing import Iterable
 
 import numpy as np
-from PyQuantKit import MarketData, TradeData, TransactionData
+from PyQuantKit import TradeData, TransactionData
 
-from .. import Synthetic, FactorMonitor, FixedIntervalSampler, AdaptiveVolumeIntervalSampler
+from .. import Synthetic, FactorMonitor, FixedIntervalSampler, AdaptiveVolumeIntervalSampler, LOGGER
+from ..memory_core import Deque
 
 
 class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
@@ -19,6 +20,18 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
         self.register_sampler(name='volume', mode='accumulate')
 
         self._historical_trade_imbalance = {}
+
+    def on_subscription(self, subscription: list[str] = None):
+        super().on_subscription(subscription=subscription)
+
+        for ticker in self.subscription:
+            if ticker in self._historical_trade_imbalance:
+                continue
+
+            if not self.use_shm:
+                self._historical_trade_imbalance[ticker] = deque(maxlen=max(5, int(self.sample_size / 2)))
+            else:
+                self._historical_trade_imbalance[ticker]: Deque = self.memory_core.register(name=f'trade_imbalance.{ticker}', dtype='Deque', maxlen=max(5, int(self.sample_size / 2)))
 
     def on_trade_data(self, trade_data: TradeData | TransactionData, **kwargs):
         ticker = trade_data.ticker
@@ -47,16 +60,17 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
 
         if ticker in self._historical_trade_imbalance:
             historical_trade_imbalance = self._historical_trade_imbalance[ticker]
-        else:
+        elif not self.use_shm:
             historical_trade_imbalance = self._historical_trade_imbalance[ticker] = deque(maxlen=max(5, int(self.sample_size / 2)))
+        else:
+            LOGGER.info(f'Ticker {ticker} not registered in {self.name} for _historical_trade_imbalance, perhaps the subscription has been changed?')
+            return
 
         historical_trade_imbalance.append(trade_imbalance)
 
     def slope(self) -> dict[str, float]:
         slope_dict = {}
-        for ticker in self._historical_trade_imbalance:
-            trade_imbalance = list(self._historical_trade_imbalance[ticker])
-
+        for ticker, trade_imbalance in self._historical_trade_imbalance.items():
             if len(trade_imbalance) < 3:
                 slope = np.nan
             else:
@@ -73,7 +87,7 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
     def to_json(self, fmt='str', **kwargs) -> str | dict:
         data_dict = super().to_json(fmt='dict')
         data_dict.update(
-            historical_trade_imbalance=self._historical_trade_imbalance
+            historical_trade_imbalance={ticker: list(dq) for ticker, dq in self._historical_trade_imbalance.items()}
         )
 
         if fmt == 'dict':
@@ -86,13 +100,18 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
     def update_from_json(self, json_dict: dict):
         super().update_from_json(json_dict=json_dict)
 
-        self._historical_trade_imbalance.clear()
-        self._historical_trade_imbalance.update(json_dict['historical_trade_imbalance'])
+        for ticker, data in json_dict['historical_trade_imbalance'].items():
+            if ticker in self._historical_trade_imbalance:
+                self._historical_trade_imbalance[ticker].extend(data)
+            elif not self.use_shm:
+                self._historical_trade_imbalance[ticker] = deque(data, maxlen=max(5, int(self.sample_size / 2)))
+            else:
+                self._historical_trade_imbalance[ticker]: Deque = self.memory_core.register(data, name=f'trade_imbalance.{ticker}', dtype='Deque', maxlen=max(5, int(self.sample_size / 2)))
 
         return self
 
     def clear(self):
-        FixedIntervalSampler.clear(self)
+        super().clear()
 
         self._historical_trade_imbalance.clear()
 
@@ -169,10 +188,10 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
         result = {}
 
         for ticker in volume_dict:
-            price_vector = np.array(list(price_dict[ticker].values()))
+            price_vector = np.array(price_dict[ticker])
             price_pct_vector = np.diff(price_vector) / price_vector[:-1]
-            volume_vector = np.array(list(volume_dict[ticker].values()))[1:]
-            trade_flow_vector = np.array(list(trade_flow_dict[ticker].values()))[1:]
+            volume_vector = np.array(volume_dict[ticker])[1:]
+            trade_flow_vector = np.array(trade_flow_dict[ticker])[1:]
             trade_imbalance = np.array([trade_flow / volume if volume else 0. for trade_flow, volume in zip(trade_flow_vector, volume_vector)])
             observation = np.array([price_pct_vector, trade_imbalance]).T
 
@@ -214,9 +233,9 @@ class TradeFlowMonitor(FactorMonitor, FixedIntervalSampler):
             raise TypeError(f'Invalid ticker {ticker}, expect str, list[str] or None.')
 
         for ticker in tasks:
-            price_vector = list(price_dict[ticker].values())
-            volume_vector = list(volume_dict[ticker].values())[1:]
-            trade_flow_vector = list(trade_flow_dict[ticker].values())[1:]
+            price_vector = list(price_dict[ticker])
+            volume_vector = list(volume_dict[ticker])[1:]
+            trade_flow_vector = list(trade_flow_dict[ticker])[1:]
 
             if len(price_vector) < 4:
                 continue
@@ -268,22 +287,13 @@ class TradeFlowAdaptiveMonitor(TradeFlowMonitor, AdaptiveVolumeIntervalSampler):
             aligned_interval=aligned_interval
         )
 
-    def __call__(self, market_data: MarketData, **kwargs):
-        self.accumulate_volume(market_data=market_data)
-        super().__call__(market_data=market_data, **kwargs)
-
-    def clear(self) -> None:
-        AdaptiveVolumeIntervalSampler.clear(self)
-
-        super().clear()
+    def on_trade_data(self, trade_data: TradeData | TransactionData, **kwargs):
+        self.accumulate_volume(market_data=trade_data)
+        super().on_trade_data(trade_data=trade_data, **kwargs)
 
     @property
     def is_ready(self) -> bool:
-        for ticker in self._volume_baseline['obs_vol_acc']:
-            if ticker not in self._volume_baseline['sampling_interval']:
-                return False
-
-        return True
+        return self.baseline_ready
 
 
 class TradeFlowAdaptiveIndexMonitor(TradeFlowAdaptiveMonitor, Synthetic):
@@ -299,19 +309,6 @@ class TradeFlowAdaptiveIndexMonitor(TradeFlowAdaptiveMonitor, Synthetic):
         )
 
         Synthetic.__init__(self=self, weights=weights)
-
-    def __call__(self, market_data: MarketData, **kwargs):
-        ticker = market_data.ticker
-
-        if self.weights and ticker not in self.weights:
-            return
-
-        super().__call__(market_data=market_data, **kwargs)
-
-    def clear(self) -> None:
-        Synthetic.clear(self)
-
-        super().clear()
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
