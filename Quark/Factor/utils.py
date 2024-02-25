@@ -3,17 +3,29 @@ from __future__ import annotations
 import abc
 import enum
 import json
+import pickle
+import time
+import traceback
 from collections import deque
+from ctypes import c_wchar, c_bool, c_double
+from multiprocessing import RawArray, RawValue, Semaphore, Process, shared_memory, Lock
 from typing import Self
 
 import numpy as np
-from PyQuantKit import MarketData, TradeData, TransactionData, TickData, BarData
+import pandas as pd
+from AlgoEngine.Engine import MarketDataMonitor, MonitorManager
+from PyQuantKit import MarketData, TickData, TradeData, TransactionData, OrderBook, BarData, OrderBookBuffer, BarDataBuffer, TickDataBuffer, TransactionDataBuffer
 
-from .memory_core import SyncMemoryCore
+from . import collect_factor
+from .memory_core import SharedMemoryCore, SyncMemoryCore, NamedVector
 from .. import LOGGER
 from ..Calibration.dummies import is_market_session
 
-__all__ = ['IndexWeight', 'EMA', 'Synthetic', 'SamplerMode', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler']
+ALPHA_05 = 0.9885  # alpha = 0.5 for each minute
+ALPHA_02 = 0.9735  # alpha = 0.2 for each minute
+ALPHA_01 = 0.9624  # alpha = 0.1 for each minute
+ALPHA_001 = 0.9261  # alpha = 0.01 for each minute
+ALPHA_0001 = 0.8913  # alpha = 0.001 for each minute
 
 
 class IndexWeight(dict):
@@ -77,17 +89,638 @@ class IndexWeight(dict):
         return self
 
 
+class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
+    def __init__(self, name: str, monitor_id: str = None):
+        """
+        the init function should never accept *arg or **kwargs as parameters.
+        since the from_json function depends on it.
+
+        the __init__ function of child factor monitor:
+        - must call FactorMonitor.__init__ first, since the subscription and memory core should be defined before other class initialization.
+        - for the same reason, FactorMonitor.from_json, FactorMonitor.update_from_json also should be called first in child classes.
+        - no *args, **kwargs like arbitrary parameter is allowed, since the from_json depends on the full signature of the method.
+        - all parameters should be json serializable, as required in from_json function
+        - param "subscription" is required if multiprocessing is enabled
+
+        Args:
+            name: the name of the monitor.
+            monitor_id: the id of the monitor, if left unset, use uuid4().
+        """
+        var_names = self.__class__.__init__.__code__.co_varnames
+
+        if 'kwargs' in var_names or 'args' in var_names:
+            LOGGER.warning(f'*args and **kwargs are should not in {self.__class__.__name__} initialization. All parameters must be explicit.')
+
+        assert name.startswith('Monitor')
+        super().__init__(name=name, monitor_id=monitor_id)
+
+    def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
+        # filter the out session data
+        if not (is_market_session(market_data.timestamp) or allow_out_session):
+            return
+
+        self.on_market_data(market_data=market_data, **kwargs)
+
+        if isinstance(market_data, TickData):
+            self.on_tick_data(tick_data=market_data, **kwargs)
+        elif isinstance(market_data, (TradeData, TransactionData)):
+            self.on_trade_data(trade_data=market_data, **kwargs)
+        elif isinstance(market_data, OrderBook):
+            self.on_order_book(order_book=market_data, **kwargs)
+        else:
+            raise NotImplementedError(f"Can not handle market data type {type(market_data)}")
+
+    def on_market_data(self, market_data: MarketData, **kwargs):
+        pass
+
+    def on_tick_data(self, tick_data: TickData, **kwargs) -> None:
+        pass
+
+    def on_trade_data(self, trade_data: TradeData | TransactionData, **kwargs) -> None:
+        pass
+
+    def on_order_book(self, order_book: OrderBook, **kwargs) -> None:
+        pass
+
+    @abc.abstractmethod
+    def factor_names(self, subscription: list[str]) -> list[str]:
+        """
+        This method returns a list of string, corresponding with the keys of the what .value returns.
+        This method is design to facilitate facter caching functions.
+        """
+        ...
+
+    @classmethod
+    def _params_grid(cls, param_range: dict[str, list[...]], param_static: dict[str, ...] = None, auto_naming: bool = None) -> list[dict[str, ...]]:
+        """
+        convert param grid to list of params
+        Args:
+            param_range: parameter range, e.g. dict(sampling_interval=[5, 15, 60], sample_size=[10, 20, 30])
+            param_static: static parameter value, e.g. dict(weights=self.weights), this CAN OVERRIDE param_range
+
+        Returns: parameter list
+
+        """
+        param_grid: list[dict] = []
+
+        for name in param_range:
+            _param_range = param_range[name]
+            extended_param_grid = []
+
+            for value in _param_range:
+                if param_grid:
+                    for _ in param_grid:
+                        _ = _.copy()
+                        _[name] = value
+                        extended_param_grid.append(_)
+                else:
+                    extended_param_grid.append({name: value})
+
+            param_grid.clear()
+            param_grid.extend(extended_param_grid)
+
+        if param_static:
+            for _ in param_grid:
+                _.update(param_static)
+
+        if (auto_naming
+                or ('name' not in param_range
+                    and 'name' not in param_static
+                    and auto_naming is None)):
+            for i, param_dict in enumerate(param_grid):
+                param_dict['name'] = f'Monitor.Grid.{cls.__name__}.{i}'
+
+        return param_grid
+
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = dict(
+            name=self.name,
+            monitor_id=self.monitor_id
+            # enabled=self.enabled  # the enable flag will not be serialized, this affects the handling of mask in multiprocessing
+        )
+
+        if isinstance(self, FixedIntervalSampler):
+            data_dict.update(
+                FixedIntervalSampler.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, FixedVolumeIntervalSampler):
+            data_dict.update(
+                FixedVolumeIntervalSampler.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            data_dict.update(
+                AdaptiveVolumeIntervalSampler.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, Synthetic):
+            data_dict.update(
+                Synthetic.to_json(self=self, fmt='dict')
+            )
+
+        if isinstance(self, EMA):
+            data_dict.update(
+                EMA.to_json(self=self, fmt='dict')
+            )
+
+        if fmt == 'dict':
+            return data_dict
+        elif fmt == 'str':
+            return json.dumps(data_dict, **kwargs)
+        else:
+            raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
+
+    @classmethod
+    def from_json(cls, json_message: str | bytes | bytearray | dict) -> Self:
+        if isinstance(json_message, dict):
+            json_dict = json_message
+        else:
+            json_dict = json.loads(json_message)
+
+        var_names = cls.__init__.__code__.co_varnames
+        kwargs = {name: json_dict[name] for name in var_names if name in json_dict}
+
+        self = cls(**kwargs)
+
+        self.update_from_json(json_dict=json_dict)
+
+        return self
+
+    def to_shm(self, name: str = None, manager: SharedMemoryCore = None) -> str:
+        if name is None:
+            name = f'{self.monitor_id}.json'
+
+        if manager is None:
+            manager = SharedMemoryCore()
+
+        serialized = pickle.dumps(self)
+        size = len(serialized)
+
+        shm = manager.init_buffer(name=name, buffer_size=size)
+        shm.buf[:] = serialized
+        shm.close()
+        return name
+
+    @classmethod
+    def from_shm(cls, name: str = None, monitor_id: str = None, manager: SharedMemoryCore = None) -> Self:
+        if name is None and monitor_id is None:
+            raise ValueError('Must assign a name or monitor_id.')
+        if name is None:
+            name = f'{monitor_id}.json'
+
+        if manager is None:
+            manager = SharedMemoryCore()
+
+        shm = manager.get_buffer(name=name)
+        self: Self = pickle.loads(bytes(shm.buf))
+
+        return self
+
+    def clear(self) -> None:
+        if isinstance(self, EMA):
+            EMA.clear(self=self)
+
+        if isinstance(self, Synthetic):
+            Synthetic.clear(self=self)
+
+        if isinstance(self, FixedIntervalSampler):
+            FixedIntervalSampler.clear(self=self)
+
+        if isinstance(self, FixedVolumeIntervalSampler):
+            FixedVolumeIntervalSampler.clear(self=self)
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            AdaptiveVolumeIntervalSampler.clear(self=self)
+
+    def update_from_json(self, json_dict: dict) -> Self:
+        """
+        a utility function for .from_json()
+
+        Note that calling this function DOES NOT CLEAR the object
+        This function will add /update / override the data from json dict
+
+        Call .clear() explicitly if a re-construct is needed.
+        """
+
+        if isinstance(self, EMA):
+            self: EMA
+            for name in json_dict['ema']:
+                self.register_ema(name=name)
+
+                self._ema_memory[name].update(json_dict['ema_memory'][name])
+                self._ema_current[name].update(json_dict['ema_current'][name])
+                self.ema[name].update(json_dict['ema'][name])
+
+        if isinstance(self, Synthetic):
+            self: Synthetic
+
+            self.base_price.update(json_dict['base_price'])
+            self.last_price.update(json_dict['last_price'])
+            self.synthetic_base_price = json_dict['synthetic_base_price']
+
+        if isinstance(self, FixedIntervalSampler):
+            self: FixedIntervalSampler
+
+            for name, sampler in json_dict['sample_storage'].items():
+                mode = sampler['mode']
+                new_sampler = self.register_sampler(name=name, mode=mode)
+                new_sampler['index'].update(sampler['index'])
+
+                for ticker, data in sampler['storage'].items():
+                    if ticker in new_sampler:
+                        new_sampler['storage'][ticker].extend(data)
+                    else:
+                        new_sampler['storage'][ticker] = deque(data, maxlen=self.sample_size)
+
+        if isinstance(self, FixedVolumeIntervalSampler):
+            self: FixedVolumeIntervalSampler
+
+            self._accumulated_volume.update(json_dict['accumulated_volume'])
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            self: AdaptiveVolumeIntervalSampler
+
+            for name, value in json_dict['sample_storage'].items():
+                sampler = self.sample_storage[name]
+                sampler['index_vol'].update(value['index_vol'])
+
+            self._volume_baseline['baseline'].update(json_dict['volume_baseline']['baseline'])
+            self._volume_baseline['sampling_interval'].update(json_dict['volume_baseline']['sampling_interval'])
+            self._volume_baseline['obs_vol_acc_start'].update(json_dict['volume_baseline']['obs_vol_acc_start'])
+            self._volume_baseline['obs_index'].update(json_dict['volume_baseline']['obs_index'])
+            for ticker, data in json_dict['volume_baseline']['obs_vol_acc'].items():
+                if ticker in self._volume_baseline['obs_vol_acc']:
+                    self._volume_baseline['obs_vol_acc'][ticker].extend(data)
+                else:
+                    self._volume_baseline['obs_vol_acc'][ticker] = deque(data, maxlen=self.baseline_window)
+
+        return self
+
+    def _param_range(self) -> dict[str, list[...]]:
+        # give some simple parameter range
+        params_range = {}
+        if isinstance(self, FixedIntervalSampler):
+            params_range.update(
+                sampling_interval=[5, 15, 60],
+                sample_size=[10, 20, 30]
+            )
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            params_range.update(
+                aligned_interval=[True, False]
+            )
+
+        if isinstance(self, EMA):
+            params_range.update(
+                alpha=[ALPHA_05, ALPHA_02, ALPHA_01, ALPHA_001, ALPHA_0001]
+            )
+
+        return params_range
+
+    def _param_static(self) -> dict[str, ...]:
+        param_static = {}
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            param_static.update(
+                baseline_window=self.baseline_window
+            )
+
+        if isinstance(self, Synthetic):
+            param_static.update(
+                weights=self.weights
+            )
+
+        return param_static
+
+    def params_list(self) -> list[dict[str, ...]]:
+        """
+        This method is designed to facilitate the grid cv process.
+        The method will return a list of params to initialize monitor.
+        e.g.
+        > params_list = self.params_grid()
+        > monitors = [SomeMonitor(**_) for _ in params_list]
+        > # cross validation process ...
+        Returns: a list of dict[str, ...]
+
+        """
+
+        params_list = self._params_grid(
+            param_range=self._param_range(),
+            param_static=self._param_static()
+        )
+
+        return params_list
+
+    @property
+    def params(self) -> dict:
+        var_names = self.__class__.__init__.__code__.co_varnames
+        params = dict()
+
+        for var_name in var_names:
+            if var_name in ['self', 'args', 'kwargs', 'monitor_id']:
+                continue
+            var_value = getattr(self, var_name)
+            params[var_name] = var_value
+        return params
+
+    @property
+    def serializable(self) -> bool:
+        return True
+
+    @property
+    def use_shm(self) -> bool:
+        memory_core: SyncMemoryCore = getattr(self, 'memory_core', None)
+
+        if memory_core is None:
+            return False
+        elif memory_core.dummy:
+            return False
+
+        return True
+
+
+class ConcurrentMonitorManager(MonitorManager):
+    def __init__(self, n_worker: int, verbose: bool = True):
+        super().__init__()
+
+        self.n_worker = n_worker
+        self.manager = SyncMemoryCore(prefix='MonitorManager')
+        self.verbose = verbose
+
+        self.workers = []
+        self.child_monitor = {}
+        self.main_monitor = {}
+        self.tasks = {
+            'md_dtype': RawArray(c_wchar, 16),
+            'monitor_value': self.manager.register(name='monitor_value', dtype='NamedVector'),
+            'tasks': [RawArray(c_wchar, 8 * 1024) for _ in range(self.n_worker)],
+            'time_cost': [RawValue(c_double, 0) for _ in range(self.n_worker)],
+            'OrderBook': OrderBookBuffer(),
+            'BarData': BarDataBuffer(),
+            'TickData': TickDataBuffer(),
+            'TransactionData': TransactionDataBuffer(),
+            'TradeData': TransactionDataBuffer()
+        }
+        self.enabled = RawValue(c_bool, False)
+        self.request_value = RawValue(c_bool, False)
+        self.lock = Lock()
+        self.semaphore_start = Semaphore(value=0)
+        self.semaphore_done = Semaphore(value=0)
+        self.progress = 0
+
+        if self.n_worker <= 1:
+            LOGGER.info(f'{self.__class__.__name__} is set as single process mode!')
+        else:
+            LOGGER.info(f'{self.__class__.__name__} is set as {self.n_worker} processes mode!')
+
+    def add_monitor(self, monitor: FactorMonitor):
+        super().add_monitor(monitor=monitor)
+
+        if monitor.serializable:
+            monitor_id = monitor.monitor_id
+            worker_id = len(self.child_monitor) % self.n_worker
+            self.tasks['tasks'][worker_id].value += f'\x03{monitor_id}'
+            self.child_monitor[monitor_id] = monitor
+            if self.enabled.value:
+                monitor.to_shm(manager=self.manager)
+                LOGGER.info(f'Assign monitor {monitor.name} to worker {worker_id}, serialized in shm "{monitor_id}.json".')
+            else:
+                LOGGER.info(f'Assign monitor {monitor.name} to worker {worker_id}, monitor_id {monitor_id}.')
+        else:
+            if not self.enabled:
+                LOGGER.debug(f'Monitor {monitor.name} is marked as not serializable, consider add it after manager started to avoid serializing error.')
+
+            self.main_monitor[monitor.monitor_id] = monitor
+            LOGGER.info(f'Assign monitor {monitor.name} to main process.')
+
+        if self.workers:
+            if monitor.serializable:
+                monitor.to_shm()
+            else:
+                LOGGER.info(f'Monitor {monitor.name} not serializable, multiprocessing not available.')
+
+    def pop_monitor(self, monitor_id: str):
+        if monitor_id in self.main_monitor:
+            self.main_monitor.pop(monitor_id, None)
+        elif monitor_id in self.child_monitor:
+            self.child_monitor.pop(monitor_id, None)
+
+            try:
+                shm = shared_memory.SharedMemory(name=f'{monitor_id}.json')
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError as _:
+                pass
+        else:
+            LOGGER.warning(f'Monitor id {monitor_id} not found!')
+
+        return self.monitor.pop(monitor_id)
+
+    def __call__(self, market_data: MarketData):
+        if self.workers:
+            self._task_concurrent(market_data=market_data)
+        else:
+            super().__call__(market_data=market_data)
+
+    def _task_concurrent(self, market_data: MarketData):
+        # step 1: send market data to the shared memory
+        self.tasks['md_dtype'].value = md_dtype = market_data.__class__.__name__
+        self.tasks[md_dtype].update(market_data=market_data)
+
+        # step 2: release the semaphore
+        for _ in self.workers:
+            self.semaphore_start.release()
+
+        # step 3: execute tasks in main thread for those monitors not supporting multiprocessing features
+        for monitor_id in self.main_monitor:
+            self._work(monitor_id=monitor_id, market_data=market_data)
+
+        # step 4: acquire semaphore to wait till the tasks all done
+        for _ in self.workers:
+            self.semaphore_done.acquire()
+
+        # step 5: log some performance metrics
+        if self.verbose and self.progress and self.progress % 100000 == 0:
+            self.progress += 1
+            LOGGER.info(f'Progress {self.progress - 100000} to {self.progress} working time for the workers:\n{pd.Series([_.value for _ in self.tasks["time_cost"]]).to_string()}')
+            for time_cost in self.tasks['time_cost']:
+                time_cost.value = 0
+
+    def worker(self, worker_id: int):
+        while True:
+            self.semaphore_start.acquire()
+            ts = time.time()
+
+            # management job 0: terminate the worker on signal
+            if not self.enabled.value:
+                break
+
+            # step 1.1: reconstruct market data
+            md_dtype = self.tasks['md_dtype'].value
+            task_list = self.tasks['tasks'][worker_id].value.split('\x03')
+            market_data = self.tasks[md_dtype].to_market_data()
+
+            # when requesting monitor value, the market data will not be updated.
+            if self.request_value.value:
+
+                child_monitor = []
+                for monitor_id in task_list:
+                    if not monitor_id:
+                        continue
+                    elif monitor_id not in self.monitor:
+                        continue
+
+                    child_monitor.append(self.monitor[monitor_id])
+
+                monitor_value_vector: NamedVector = self.tasks['monitor_value']
+                updated_value = collect_factor(child_monitor)
+
+                if updated_value:
+                    with self.lock:
+                        monitor_value_vector.from_shm()
+                        monitor_value_vector.update(updated_value)
+                        monitor_value_vector.to_shm()
+            else:
+                # step 2: do the tasks
+                for monitor_id in task_list:
+                    if not monitor_id:
+                        continue
+
+                    if monitor_id not in self.monitor:
+                        try:
+                            self.monitor[monitor_id] = monitor = FactorMonitor.from_shm(monitor_id=monitor_id, manager=self.manager)
+                            LOGGER.info(f'Worker {worker_id} loaded monitor {monitor.name} {monitor_id} from shared memory successfully.')
+                        except FileNotFoundError as _:
+                            LOGGER.error(f'Monitor {monitor_id} not found in shared memory.')
+                            continue
+                        except Exception as _:
+                            LOGGER.error(f'Deserialize monitor {monitor_id} failed, traceback:\n{traceback.format_exc()}')
+                            continue
+                    else:
+                        monitor = self.monitor[monitor_id]
+
+                    # monitor.memory_core.from_shm()
+                    self._work(monitor_id=monitor_id, market_data=market_data)
+                    # monitor.memory_core.to_shm()
+
+            self.tasks['time_cost'][worker_id].value += time.time() - ts
+            self.semaphore_done.release()
+
+    def start(self):
+        if self.enabled.value:
+            LOGGER.warning(f'{self.__class__.__name__} already started!')
+            return
+
+        self.enabled.value = True
+        self.progress = 0
+
+        if self.n_worker <= 1:
+            LOGGER.info(f'{self.__class__.__name__} in single process mode, and will not spawn any child process.')
+            return
+
+        main_monitor = self.main_monitor
+        child_monitor = self.child_monitor
+        delattr(self, 'main_monitor')
+        delattr(self, 'child_monitor')
+
+        self.monitor.clear()
+
+        for worker_id in range(self.n_worker):
+            task_list = self.tasks['tasks'][worker_id].value.split('\x03')
+
+            for monitor_id in task_list:
+                if not monitor_id:
+                    continue
+                self.monitor[monitor_id] = child_monitor[monitor_id]
+
+            p = Process(target=self.worker, name=f'{self.__class__.__name__}.worker.{worker_id}', kwargs={'worker_id': worker_id})
+            p.start()
+            self.workers.append(p)
+
+            self.monitor.clear()
+
+        self.main_monitor = main_monitor
+        self.child_monitor = child_monitor
+
+        self.monitor.update(main_monitor)
+        self.monitor.update(child_monitor)
+
+        LOGGER.info(f'{self.__class__.__name__} started all {len(self.workers)} workers.')
+
+    def stop(self):
+        self.enabled.value = False
+
+        for _ in self.workers:
+            self.semaphore_start.release()
+
+        for i, p in enumerate(self.workers):
+            p.join()
+            p.close()
+
+        self.workers.clear()
+
+        while self.semaphore_start.acquire(False):
+            continue
+
+        while self.semaphore_done.acquire(False):
+            continue
+
+        LOGGER.info(f'{self.__class__.__name__} all worker stopped and cleared.')
+
+    def clear(self):
+        # clear shm
+        for monitor_id in list(self.monitor):
+            self.pop_monitor(monitor_id)
+
+        super().clear()
+
+        self.tasks['monitor_value'].unlink()
+        self.tasks['monitor_value'] = self.manager.register(name='monitor_value', dtype='NamedVector')
+
+        for _ in self.tasks['time_cost']:
+            _.value = 0
+
+        for _ in self.tasks['tasks']:
+            _.value = ''
+
+        # self.manager.unlink()
+
+    def get_values(self) -> dict[str, float]:
+        self.request_value.value = True
+
+        for _ in self.workers:
+            self.semaphore_start.release()
+
+        monitor_value = collect_factor(self.main_monitor)
+
+        for _ in self.workers:
+            self.semaphore_done.acquire()
+
+        self.request_value.value = False
+
+        monitor_value_vector: NamedVector = self.tasks['monitor_value']
+        monitor_value_vector.from_shm()
+        monitor_value.update(monitor_value_vector)
+
+        return monitor_value
+
+    @property
+    def values(self) -> dict[str, float]:
+        if self.workers:
+            return self.get_values()
+        else:
+            return collect_factor(self.monitor)
+
+
 class EMA(object):
     """
     Use EMA module with samplers to get best results
     """
 
-    def __init__(self, alpha: float = None, window: int = None, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
+    def __init__(self, alpha: float = None, window: int = None):
         self.alpha = alpha if alpha else 1 - 2 / (window + 1)
         self.window = window if window else round(2 / (1 - alpha) - 1)
-
-        self.subscription: list[str] = getattr(self, 'subscription', subscription)
-        self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
 
         if not (0 < alpha < 1):
             LOGGER.warning(f'{self.__class__.__name__} should have an alpha between 0 to 1')
@@ -95,21 +728,6 @@ class EMA(object):
         self._ema_memory: dict[str, dict[str, float]] = getattr(self, '_ema_memory', {})
         self._ema_current: dict[str, dict[str, float]] = getattr(self, '_ema_current', {})
         self.ema: dict[str, dict[str, float]] = getattr(self, 'ema', {})
-
-    def on_subscription(self, subscription: list[str] = None):
-        if subscription:
-            subscription = set(subscription) | set(self.subscription) if self.subscription else set()
-            self.subscription.clear()
-            self.subscription.extend(subscription)
-
-        for name in self.ema:
-            for ticker in self.subscription:
-                if ticker in self._ema_memory[name]:
-                    continue
-
-                self._ema_memory[name][ticker] = np.nan
-                self._ema_current[name][ticker] = 0.  # this can set any value, but 0. is preferred for better compatibility with accumulative_ema
-                self.ema[name][ticker] = np.nan
 
     @classmethod
     def calculate_ema(cls, value: float, memory: float = None, window: int = None, alpha: float = None):
@@ -125,6 +743,10 @@ class EMA(object):
         return ema
 
     def register_ema(self, name: str) -> dict[str, float]:
+        if name in self.ema:
+            LOGGER.warning(f'name {name} already registered in {self.__class__.__name__}!')
+            return self.ema[name]
+
         self._ema_memory[name] = {}
         self._ema_current[name] = {}
         self.ema[name] = {}
@@ -180,7 +802,7 @@ class EMA(object):
             else:
                 self.ema[entry_name][ticker] = self.calculate_ema(value=current, memory=replace_na, alpha=self.alpha)
 
-    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
         data_dict = dict(
             alpha=self.alpha,
             window=self.window,
@@ -188,12 +810,6 @@ class EMA(object):
             ema_current=self._ema_current,
             ema=self.ema
         )
-
-        if with_subscription:
-            data_dict['subscription'] = list(self.subscription)
-
-        if with_memory_core:
-            data_dict['memory_core'] = self.memory_core.to_json(fmt='dict')
 
         if fmt == 'dict':
             return data_dict
@@ -209,18 +825,9 @@ class EMA(object):
         else:
             json_dict = json.loads(json_message)
 
-        kwargs = {}
-
-        if 'subscription' in json_dict:
-            kwargs['subscription'] = json_dict('subscription')
-
-        if 'memory_core' in json_dict:
-            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
-
         self = cls(
             alpha=json_dict['alpha'],
-            window=json_dict['window'],
-            **kwargs
+            window=json_dict['window']
         )
 
         for name in json_dict['ema']:
@@ -233,44 +840,19 @@ class EMA(object):
         return self
 
     def clear(self):
-        for storage in self._ema_memory.values():
-            storage.clear()
-
-        for storage in self._ema_current.values():
-            storage.clear()
-
-        for storage in self.ema.values():
-            storage.clear()
-
         self._ema_memory.clear()
         self._ema_current.clear()
         self.ema.clear()
 
 
 class Synthetic(object, metaclass=abc.ABCMeta):
-    def __init__(self, weights: dict[str, float], subscription: list[str] = None, memory_core: SyncMemoryCore = None):
+    def __init__(self, weights: dict[str, float]):
         self.weights: IndexWeight = weights if isinstance(weights, IndexWeight) else IndexWeight(index_name='synthetic', **weights)
         self.weights.normalize()
-
-        self.subscription: list[str] = getattr(self, 'subscription', subscription)
-        self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
 
         self.base_price: dict[str, float] = {}
         self.last_price: dict[str, float] = {}
         self.synthetic_base_price: float = 1.
-
-    def on_subscription(self, subscription: list[str] = None):
-        if subscription:
-            subscription = set(subscription) | set(self.subscription) if self.subscription else set()
-            self.subscription.clear()
-            self.subscription.extend(subscription)
-
-        for ticker in self.subscription:
-            if ticker not in self.base_price:
-                self.base_price[ticker] = np.nan
-
-            if ticker not in self.last_price:
-                self.last_price[ticker] = np.nan
 
     def composite(self, values: dict[str, float], replace_na: float = 0.):
         return self.weights.composite(values=values, replace_na=replace_na)
@@ -285,7 +867,7 @@ class Synthetic(object, metaclass=abc.ABCMeta):
 
         self.last_price[ticker] = market_price
 
-    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
         data_dict = dict(
             index_name=self.weights.index_name,
             weights=dict(self.weights),
@@ -293,12 +875,6 @@ class Synthetic(object, metaclass=abc.ABCMeta):
             last_price=self.last_price,
             synthetic_base_price=self.synthetic_base_price
         )
-
-        if with_subscription:
-            data_dict['subscription'] = list(self.subscription)
-
-        if with_memory_core:
-            data_dict['memory_core'] = self.memory_core.to_json(fmt='dict')
 
         if fmt == 'dict':
             return data_dict
@@ -314,17 +890,8 @@ class Synthetic(object, metaclass=abc.ABCMeta):
         else:
             json_dict = json.loads(json_message)
 
-        kwargs = {}
-
-        if 'subscription' in json_dict:
-            kwargs['subscription'] = json_dict('subscription')
-
-        if 'memory_core' in json_dict:
-            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
-
         self = cls(
-            weights=IndexWeight(index_name=json_dict['index_name'], **json_dict['weights']),
-            **kwargs
+            weights=IndexWeight(index_name=json_dict['index_name'], **json_dict['weights'])
         )
 
         self.base_price.update(json_dict['base_price'])
@@ -404,7 +971,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
 
     """
 
-    def __init__(self, sampling_interval: float = 1., sample_size: int = 60, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
+    def __init__(self, sampling_interval: float = 1., sample_size: int = 60):
         """
         Initialize the FixedIntervalSampler.
 
@@ -414,9 +981,6 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         self.sampling_interval = sampling_interval
         self.sample_size = sample_size
-
-        self.subscription: list[str] = getattr(self, 'subscription', subscription)
-        self.memory_core: SyncMemoryCore = getattr(self, 'memory_core', memory_core)
 
         self.sample_storage = getattr(self, 'sample_storage', {})  # to avoid de-reference the dict using nested inheritance
 
@@ -428,24 +992,10 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         if sample_size <= 2:
             LOGGER.warning(f"{self.__class__.__name__} should have a larger sample_size, by Shannon's Theorem, sample_size should be greater than 2")
 
-    def on_subscription(self, subscription: list[str] = None):
-        if subscription:
-            subscription = set(subscription) | set(self.subscription) if self.subscription else set()
-            self.subscription.clear()
-            self.subscription.extend(subscription)
-
-        for name, sample_storage in self.sample_storage.items():
-            for ticker in self.subscription:
-                if ticker in sample_storage['index']:
-                    continue
-
-                dq: deque = deque(maxlen=self.sample_size)
-                sample_storage['storage'][ticker] = dq
-                sample_storage['index'][ticker] = 0
-
-    def register_sampler(self, name: str, mode: str | SamplerMode = 'update'):
+    def register_sampler(self, name: str, mode: str | SamplerMode = 'update') -> dict:
         if name in self.sample_storage:
-            raise ValueError(f'name {name} already registered in {self.__class__.__name__}!')
+            LOGGER.warning(f'name {name} already registered in {self.__class__.__name__}!')
+            return self.sample_storage[name]
 
         if isinstance(mode, SamplerMode):
             mode = mode.value
@@ -532,7 +1082,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         """
         pass
 
-    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
         data_dict = dict(
             sampling_interval=self.sampling_interval,
             sample_size=self.sample_size,
@@ -541,12 +1091,6 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
                                        mode=value['mode'])
                             for name, value in self.sample_storage.items()}
         )
-
-        if with_subscription:
-            data_dict['subscription'] = list(self.subscription)
-
-        if with_memory_core:
-            data_dict['memory_core'] = self.memory_core.to_json(fmt='dict')
 
         if fmt == 'dict':
             return data_dict
@@ -562,24 +1106,21 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         else:
             json_dict = json.loads(json_message)
 
-        kwargs = {}
-
-        if 'subscription' in json_dict:
-            kwargs['subscription'] = json_dict('subscription')
-
-        if 'memory_core' in json_dict:
-            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
-
         self = cls(
             sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            **kwargs
+            sample_size=json_dict['sample_size']
         )
 
-        self.sample_storage.update({name: dict(storage={ticker: deque(data, maxlen=self.sample_size) for ticker, data in value['storage'].items()},
-                                               index=value['index'],
-                                               mode=value['mode'])
-                                    for name, value in json_dict['sample_storage'].items()})
+        for name, sampler in json_dict['sample_storage'].items():
+            mode = sampler['mode']
+            new_sampler = self.register_sampler(name=name, mode=mode)
+            new_sampler['index'].update(sampler['index'])
+
+            for ticker, data in sampler['storage'].items():
+                if ticker in new_sampler:
+                    new_sampler['storage'][ticker].extend(data)
+                else:
+                    new_sampler['storage'][ticker] = deque(data, maxlen=self.sample_size)
 
         return self
 
@@ -645,7 +1186,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
 
     """
 
-    def __init__(self, sampling_interval: float = 100., sample_size: int = 20, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
+    def __init__(self, sampling_interval: float = 100., sample_size: int = 20):
         """
         Initialize the FixedVolumeIntervalSampler.
 
@@ -653,17 +1194,8 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         - sampling_interval (float): Volume interval between consecutive samples. Default is 100.
         - sample_size (int): Number of samples to be stored. Default is 20.
         """
-        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, subscription=subscription, memory_core=memory_core)
+        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size)
         self._accumulated_volume: dict[str, float] = {}
-
-    def on_subscription(self, subscription: list[str] = None):
-        super().on_subscription(subscription=subscription)
-
-        for ticker in self.subscription:
-            if ticker in self._accumulated_volume:
-                continue
-
-            self._accumulated_volume[ticker] = 0.
 
     def accumulate_volume(self, ticker: str = None, volume: float = 0., market_data: MarketData = None, use_notional: bool = False):
         """
@@ -722,8 +1254,8 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
 
         super().log_obs(ticker=ticker, timestamp=volume_accumulated, observation=observation, auto_register=auto_register, **kwargs)
 
-    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
-        data_dict = super().to_json(fmt='dict', with_subscription=with_subscription, with_memory_core=with_memory_core)
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict = super().to_json(fmt='dict')
 
         data_dict.update(
             accumulated_volume=self._accumulated_volume
@@ -743,21 +1275,22 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         else:
             json_dict = json.loads(json_message)
 
-        kwargs = {}
-
-        if 'subscription' in json_dict:
-            kwargs['subscription'] = json_dict('subscription')
-
-        if 'memory_core' in json_dict:
-            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
-
         self = cls(
             sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            **kwargs
+            sample_size=json_dict['sample_size']
         )
 
-        self.sample_storage.update(json_dict['sample_storage'])
+        for name, sampler in json_dict['sample_storage'].items():
+            mode = sampler['mode']
+            new_sampler = self.register_sampler(name=name, mode=mode)
+            new_sampler['index'].update(sampler['index'])
+
+            for ticker, data in sampler['storage'].items():
+                if ticker in new_sampler:
+                    new_sampler['storage'][ticker].extend(data)
+                else:
+                    new_sampler['storage'][ticker] = deque(data, maxlen=self.sample_size)
+
         self._accumulated_volume.update(json_dict['accumulated_volume'])
 
         return self
@@ -805,7 +1338,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
     """
 
-    def __init__(self, sampling_interval: float = 60., sample_size: int = 20, baseline_window: int = 100, aligned_interval: bool = True, subscription: list[str] = None, memory_core: SyncMemoryCore = None):
+    def __init__(self, sampling_interval: float = 60., sample_size: int = 20, baseline_window: int = 100, aligned_interval: bool = True):
         """
         Initialize the AdaptiveVolumeIntervalSampler.
 
@@ -815,7 +1348,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         - baseline_window (int): Number of observations used for baseline calculation. Default is 100.
         - aligned (bool): Whether the sampling of each ticker is aligned (same temporal interval)
         """
-        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, subscription=subscription, memory_core=memory_core)
+        super().__init__(sampling_interval=sampling_interval, sample_size=sample_size)
         self.baseline_window = baseline_window
         self.aligned_interval = aligned_interval
 
@@ -827,30 +1360,11 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             'obs_vol_acc': {},  # type: dict[str, deque]
         }
 
-    def on_subscription(self, subscription: list[str] = None):
-        super().on_subscription(subscription=subscription)
-
-        for name, sample_storage in self.sample_storage.items():
-            for ticker in self.subscription:
-                if ticker in sample_storage['index_vol']:
-                    continue
-
-                sample_storage['index_vol'][ticker] = 0.
-
-        for ticker in self.subscription:
-            if ticker in self._volume_baseline['obs_index']:
-                continue
-
-            self._volume_baseline['baseline'][ticker] = np.nan
-            self._volume_baseline['sampling_interval'][ticker] = np.nan
-            self._volume_baseline['obs_vol_acc_start'][ticker] = np.nan
-            self._volume_baseline['obs_index'][ticker] = 0.
-            self._volume_baseline['obs_vol_acc'][ticker] = deque(maxlen=self.baseline_window)
-
     def register_sampler(self, name: str, mode='update'):
         sample_storage = super().register_sampler(name=name, mode=mode)
 
-        sample_storage['index_vol'] = {}
+        if 'index_vol' not in sample_storage:
+            sample_storage['index_vol'] = {}
 
         return sample_storage
 
@@ -1046,8 +1560,8 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
 
                 self.on_entry_updated(ticker=ticker, name=obs_name, value=last_obs)
 
-    def to_json(self, fmt='str', with_subscription: bool = False, with_memory_core: bool = False, **kwargs) -> str | dict:
-        data_dict: dict = super().to_json(fmt='dict', with_subscription=with_subscription, with_memory_core=with_memory_core)
+    def to_json(self, fmt='str', **kwargs) -> str | dict:
+        data_dict: dict = super().to_json(fmt='dict')
 
         for name, sample_storage in self.sample_storage.items():
             data_dict['sample_storage'][name]['index_vol'] = dict(sample_storage['index_vol'].items())
@@ -1078,29 +1592,24 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         else:
             json_dict = json.loads(json_message)
 
-        kwargs = {}
-
-        if 'subscription' in json_dict:
-            kwargs['subscription'] = json_dict('subscription')
-
-        if 'memory_core' in json_dict:
-            kwargs['memory_core'] = SyncMemoryCore.from_json(json_dict['memory_core'])
-
         self = cls(
             sampling_interval=json_dict['sampling_interval'],
             sample_size=json_dict['sample_size'],
             baseline_window=json_dict['baseline_window'],
-            aligned_interval=json_dict['aligned_interval'],
-            **kwargs
+            aligned_interval=json_dict['aligned_interval']
         )
 
-        self.sample_storage.update(
-            {name: dict(storage={ticker: deque(data, maxlen=self.sample_size) for ticker, data in value['storage'].items()},
-                        index=value['index'],
-                        index_vol=value['index_vol'],
-                        mode=value['mode'])
-             for name, value in json_dict['sample_storage'].items()}
-        )
+        for name, sampler in json_dict['sample_storage'].items():
+            mode = sampler['mode']
+            new_sampler = self.register_sampler(name=name, mode=mode)
+            new_sampler['index'].update(sampler['index'])
+            new_sampler['index_vol'].update(sampler['index_vol'])
+
+            for ticker, data in sampler['storage'].items():
+                if ticker in new_sampler:
+                    new_sampler['storage'][ticker].extend(data)
+                else:
+                    new_sampler['storage'][ticker] = deque(data, maxlen=self.sample_size)
 
         self._accumulated_volume.update(json_dict['accumulated_volume'])
 
@@ -1132,9 +1641,6 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
     def baseline_ready(self) -> bool:
         subscription = set(self._volume_baseline['obs_vol_acc'])
 
-        if self.subscription:
-            subscription.update(self.subscription)
-
         for ticker in subscription:
             sampling_interval = self._volume_baseline['sampling_interval'].get(ticker, np.nan)
 
@@ -1147,9 +1653,6 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
     def baseline_stable(self) -> bool:
         subscription = set(self._volume_baseline['obs_vol_acc'])
 
-        if self.subscription:
-            subscription.update(self.subscription)
-
         for ticker in subscription:
             sampling_interval = self._volume_baseline['baseline'].get(ticker, np.nan)
 
@@ -1157,3 +1660,9 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
                 return False
 
         return True
+
+
+__all__ = ['FactorMonitor', 'ConcurrentMonitorManager',
+           'EMA', 'ALPHA_05', 'ALPHA_02', 'ALPHA_01', 'ALPHA_001', 'ALPHA_0001',
+           'Synthetic', 'IndexWeight',
+           'SamplerMode', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler']

@@ -338,8 +338,8 @@ class SyncMemoryCore(CachedMemoryCore):
     def unregister(self, name: str):
         sync_storage = self.storage.pop(name, None)
 
-        if sync_storage is not None:
-            sync_storage.unlink()
+        # if sync_storage is not None:
+        #     sync_storage.unlink()
 
         return sync_storage
 
@@ -363,23 +363,34 @@ class SyncMemoryCore(CachedMemoryCore):
         return sync_storage
 
     def unlink(self):
-        LOGGER.info(f'{self.prefix} memory core unlinked {len(self.storage)} storage entries!')
+        LOGGER.info(f'{self.prefix} memory core unlinked {len(self.storage)} storage entries, {len(self.shm_size)} cache entries!')
         for name, sync_storage in list(self.storage.items()):
             LOGGER.debug(f'{self.prefix} memory core unlinked {sync_storage.__class__.__name__} {name} buffer.')
             sync_storage.unlink()
 
-        LOGGER.info(f'{self.prefix} memory core unlinked {len(self.shm_size)} cache entries!')
         for name in list(self.shm_cache):
-            LOGGER.debug(f'{self.prefix} memory core unlinked {name} cache.')
+            LOGGER.info(f'{self.prefix} memory core unlinked {name} cache.')
             self.unlink_buffer(real_name=name)
+            #
+            # try:
+            #     self.shm_cache[name].close()
+            #     self.shm_cache[name].unlink()
+            # except FileNotFoundError as _:
+            #     pass
+            #
+            # try:
+            #     self.shm_size[name].close()
+            #     self.shm_size[name].unlink()
+            # except FileNotFoundError as _:
+            #     pass
 
-        assert not self.storage
-        assert not self.shm_size
-        assert not self.shm_cache
+        # assert not self.storage
+        # assert not self.shm_size
+        # assert not self.shm_cache
 
-        # self.storage.clear()
-        # self.shm_size.clear()
-        # self.shm_cache.clear()
+        self.storage.clear()
+        self.shm_size.clear()
+        self.shm_cache.clear()
 
     def clear(self):
         self.storage.clear()
@@ -566,6 +577,17 @@ class SyncTemplate(object, metaclass=abc.ABCMeta):
             return True
         return False
 
+    @property
+    def empty_shm(self) -> bool:
+        """
+        if ver_shm is all null, for sure the shm is not initialized.
+        Returns:
+
+        """
+        if self.ver_shm == 16 * b'\x00' or self.ver_shm == b'':
+            return True
+        return False
+
 
 class NamedVector(SyncTemplate):
     def __init__(self, *args, manager: SyncMemoryCore, name: str, **kwargs):
@@ -626,6 +648,9 @@ class NamedVector(SyncTemplate):
             return
 
     def from_shm(self, override: bool = False):
+        if self.empty_shm:
+            return
+
         is_sync = self.is_sync and not override
 
         if (not is_sync) or self._shm_keys is None or self._shm_values is None:
@@ -781,6 +806,9 @@ class Vector(SyncTemplate):
             return
 
     def from_shm(self, override: bool = False):
+        if self.empty_shm:
+            return
+
         is_sync = self.is_sync and not override
 
         if (not is_sync) or self._shm_values is None:
@@ -896,6 +924,9 @@ class Deque(SyncTemplate):
             return
 
     def from_shm(self, override: bool = False):
+        if self.empty_shm:
+            return
+
         is_sync = self.is_sync and not override
 
         if (not is_sync) or self._shm_values is None or self._shm_length is None:
@@ -1047,6 +1078,9 @@ class IntValue(SyncTemplate):
             return
 
     def from_shm(self, override: bool = False):
+        if self.empty_shm:
+            return
+
         is_sync = self.is_sync and not override
 
         if (not is_sync) or self._shm is None:
@@ -1133,6 +1167,9 @@ class FloatValue(SyncTemplate):
             return
 
     def from_shm(self, override: bool = False):
+        if self.empty_shm:
+            return
+
         is_sync = self.is_sync and not override
 
         if (not is_sync) or self._shm is None:
@@ -1391,7 +1428,7 @@ class ValueDummy(SyncTemplate):
         self._value = new_value
 
 
-__all__ = ['SyncMemoryCore',
+__all__ = ['SharedMemoryCore', 'CachedMemoryCore', 'SyncMemoryCore',
            'Vector', 'NamedVector', 'Deque', 'IntValue', 'FloatValue',
            'VectorDummy', 'NamedVectorDummy', 'DequeDummy', 'ValueDummy']
 
