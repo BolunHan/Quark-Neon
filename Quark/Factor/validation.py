@@ -16,7 +16,7 @@ import pandas as pd
 from AlgoEngine.Engine import ProgressiveReplay
 from PyQuantKit import MarketData
 
-from . import LOGGER, MDS, IndexWeight, collect_factor, FactorMonitor, MONITOR_MANAGER
+from . import LOGGER, MDS, IndexWeight, FactorMonitor, MONITOR_MANAGER
 from .Correlation import *
 from .Distribution import *
 from .LowPass import *
@@ -93,7 +93,7 @@ class FactorValidation(object):
 
         # Params for validation
         self.poly_degree = kwargs.get('poly_degree', 1)
-        self.pred_var = kwargs.get('pred_var', ['target_smoothed', 'target_actual'])
+        self.pred_var = kwargs.get('pred_var', ['target_actual'])
         self.decoder = RecursiveDecoder(level=3)
         self.pred_target = f'{self.index_name}.market_price'
         self.features = [
@@ -104,7 +104,7 @@ class FactorValidation(object):
         ]
 
         self.factor: FactorMonitor | None = None
-        self.synthetic = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights, interval=self.sampling_interval, subscription=self.subscription)
+        self.synthetic = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights, interval=self.sampling_interval)
         self.factor_value: dict[float, dict[str, float]] = {}
 
         self.model = {
@@ -132,11 +132,8 @@ class FactorValidation(object):
         return validation_id
 
     def _collect_factor(self, entry_log: dict[str, float]):
-        factors = collect_factor(monitors=self.factor)
-        entry_log.update(factors)
-
-        synthetic = collect_factor(monitors=self.synthetic)
-        entry_log.update(synthetic)
+        factor_value = MDS.monitor_manager.values
+        entry_log.update(factor_value)
 
     def _cross_validation(self, x, y, factors: pd.DataFrame, cv: CrossValidation):
         valid_mask = np.all(np.isfinite(x), axis=1) & np.isfinite(y)
@@ -222,7 +219,7 @@ class FactorValidation(object):
 
         # A lite setting for fast debugging
         if DUMMY_WEIGHT:
-            for _ in list(index_weights.keys())[10:]:
+            for _ in list(index_weights.keys())[5:]:
                 index_weights.pop(_)
 
         # Step 0: Update index weights
@@ -254,6 +251,9 @@ class FactorValidation(object):
             for _dtype in dtype:
                 replay.add_subscription(ticker=ticker, dtype=_dtype)
 
+        # this should be only affecting behaviors of the concurrent manager using the shm feature.
+        MDS.monitor_manager.subscription = subscription
+
     def initialize_factor(self, **kwargs) -> FactorMonitor:
         """
         Initializes the factor for validation.
@@ -272,7 +272,6 @@ class FactorValidation(object):
             aligned_interval=False
         )
 
-        self.factor.on_subscription()
         MDS.add_monitor(self.factor)
         MDS.add_monitor(self.synthetic)
 
@@ -395,9 +394,15 @@ class FactorValidation(object):
         # Startup task 3: Update caches
         self.initialize_factor()
 
+        # start the manager
+        MDS.monitor_manager.start()
+
     def eod(self, market_date: datetime.date, replay: ProgressiveReplay, **kwargs) -> None:
         random.seed(42)
         LOGGER.info(f'Starting {market_date} eod process...')
+
+        # stop the manager
+        MDS.monitor_manager.stop()
 
         self.validation(market_date=market_date)
 
@@ -448,14 +453,6 @@ class FactorBatchValidation(FactorValidation):
 
         self.factor_pool = FACTOR_POOL
         self.factor_cache = FactorPoolDummyMonitor(factor_pool=self.factor_pool)
-
-    def _collect_factor(self, entry_log: dict[str, float]):
-        # only un-cached monitors is registered
-        super()._collect_factor(entry_log=entry_log)
-
-        if not self.override_cache:
-            factors = collect_factor(monitors=self.factor_cache)
-            entry_log.update(factors)
 
     def _plot_factors(self, factors: pd.DataFrame, precision=4):
         import plotly.graph_objects as go
@@ -614,7 +611,6 @@ class FactorBatchValidation(FactorValidation):
         ]
 
         for factor in self.factor:
-            factor.on_subscription()
             MDS.add_monitor(factor)
 
         MDS.add_monitor(self.synthetic)
@@ -693,7 +689,6 @@ class FactorBatchValidation(FactorValidation):
                 pd.DataFrame(metrics).T.to_csv(pathlib.Path(dump_dir, f'metrics.{pred_var}.csv'))
 
     def bod(self, market_date: datetime.date, replay: ProgressiveReplay, **kwargs) -> None:
-
         super().bod(market_date=market_date, replay=replay, **kwargs)
 
         self.initialize_cache(market_date=market_date, replay=replay)
@@ -920,7 +915,6 @@ class FactorValidatorExperiment(InterTemporalValidation):
         self.factor_cache = FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
         for factor in self.factor:
-            factor.on_subscription()
             MDS.add_monitor(factor)
 
         MDS.add_monitor(self.synthetic)
@@ -958,7 +952,6 @@ class FactorParamsOptimizer(InterTemporalValidation):
                                             sample_size=20,
                                             baseline_window=100,
                                             weights=self.index_weights,
-                                            subscription=self.subscription,
                                             aligned_interval=False
                                         ))
         self.features = kwargs.get('features',
@@ -1007,7 +1000,6 @@ class FactorParamsOptimizer(InterTemporalValidation):
             self.grid_features[factor_name] = features
 
         for factor in self.factor:
-            factor.on_subscription()
             MDS.add_monitor(factor)
 
         MDS.add_monitor(self.synthetic)
