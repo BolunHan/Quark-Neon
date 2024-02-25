@@ -26,6 +26,7 @@ from ..Strategy import Strategy, MDS
 
 DUMMY_WEIGHT = False
 cn.profile_cn_override()
+MDS.monitor_manager = MONITOR_MANAGER
 
 
 class BackTest(object):
@@ -34,6 +35,7 @@ class BackTest(object):
         self.index_name = index_name
         self.start_date = start_date
         self.end_date = end_date
+        self.dtype = ['TradeData']
         self.override_cache = kwargs.get('override_cache', False)
         self.use_dummy_core = kwargs.get('dummy_core', False)
         self.sampling_interval = kwargs.get('sampling_interval', 10.)
@@ -64,6 +66,7 @@ class BackTest(object):
         # local variable (over each iteration)
         self.market_date: datetime.date = self.calendar[0]
         self.index_weights: IndexWeight = IndexWeight(self.index_name, simulated_env.query(ticker=self.index_name, market_date=self.market_date, topic='index_weights'))
+        self.subscription: list[str] = list(self.index_weights)
         self.factor: list[FactorMonitor] = []
         self.factor_cache: FactorPoolDummyMonitor | None = None
         self.synthetic: SyntheticIndexMonitor = SyntheticIndexMonitor(index_name=self.index_name, weights=self.index_weights)
@@ -111,21 +114,30 @@ class BackTest(object):
         self.strategy.index_weights = self.index_weights
 
     def _update_subscription(self, replay: ProgressiveReplay):
-        subscription = set(self.index_weights.keys())
-
-        for _ in subscription:
-            if _ not in self.strategy.subscription:
-                replay.add_subscription(ticker=_, dtype='TradeData')
-
-        for _ in self.strategy.subscription:
-            if _ not in subscription:
-                replay.remove_subscription(ticker=_, dtype='TradeData')
-
+        """
+        Updates market data subscriptions based on index weights.
+        """
+        self.subscription.clear()
         self.strategy.subscription.clear()
+        replay.replay_subscription.clear()
+
+        subscription = set(self.index_weights.keys())
+        self.subscription.extend(subscription)
         self.strategy.subscription.update(subscription)
 
         # add additional subscription for strategy: the index tick data (not available for replay api)
         self.strategy.subscription.add(self.index_name)
+
+        if isinstance(self.dtype, str):
+            dtype = [self.dtype]
+        elif isinstance(self.dtype, list):
+            dtype = list(self.dtype)
+        else:
+            raise ValueError(f'Invalid dtype {self.dtype}')
+
+        for ticker in subscription:
+            for _dtype in dtype:
+                replay.add_subscription(ticker=ticker, dtype=_dtype)
 
     @classmethod
     def _get_test_id(cls):
@@ -167,9 +179,9 @@ class BackTest(object):
         # avoid over-sampling to preserve resources
         elif self.fake_market_data and int((last_fake_data := self.fake_market_data[-1]).timestamp // sampling_interval) == int(timestamp // sampling_interval):
             if isinstance(market_data, (TradeData, TransactionData)):
-                last_fake_data.total_traded_volume += market_data.volume
-                last_fake_data.total_traded_notional += market_data.notional
-                last_fake_data.total_trade_count += 1
+                last_fake_data['total_traded_volume'] += market_data.volume
+                last_fake_data['total_traded_notional'] += market_data.notional
+                last_fake_data['total_trade_count'] += 1
         # simulate the index data for match making and cache
         else:
             index_price = self.synthetic.index_price
@@ -262,9 +274,9 @@ class BackTest(object):
 
         self.factor_cache = FactorPoolDummyMonitor(factor_pool=self.factor_pool)
 
-        for _ in self.factor:
-            MDS.add_monitor(_)
-            self.strategy.monitors[_.name] = _
+        for factor in self.factor:
+            MDS.add_monitor(factor)
+            self.strategy.monitors[factor.name] = factor
 
         MDS.add_monitor(self.synthetic)
         self.strategy.monitors[self.synthetic.name] = self.synthetic
@@ -529,9 +541,13 @@ class BackTest(object):
         # reset timer
         self.epoch_ts = time.time()
 
+        MDS.monitor_manager.start()
+
     def eod(self, market_date: datetime.date, **kwargs) -> None:
         if market_date not in self.calendar:
             return
+
+        MDS.monitor_manager.stop()
 
         # EoD task -1: randomness cancellation patch
         random.seed(42)
