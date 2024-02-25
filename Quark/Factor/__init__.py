@@ -52,6 +52,9 @@ def collect_factor(monitors: dict[str, MarketDataMonitor] | list[MarketDataMonit
 
 
 from .utils import *
+
+if ENABLE_SHM:  # mask the singleton codes
+    from .utils_shm import *
 from .ta import *
 
 INDEX_WEIGHTS = IndexWeight(index_name='DummyIndex')
