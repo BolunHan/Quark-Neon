@@ -1,30 +1,30 @@
 flowchart TB
     subgraph External["&nbsp"]
-        subgraph SM ["Sim Match"]
+        subgraph SM["Sim Match"]
             S1{{"market data"}}
             S2{{"trade reports"}}
         end
 
-        subgraph EX ["Exchange"]
+        subgraph EX["Exchange"]
             E1{{"market data"}}
             E2{{"trade reports"}}
             E3{{"trade orders"}}
         end
 
-        subgraph Storage ["Cache"]
+        subgraph Storage["Cache"]
             DB[("\n Factor \n Pool \n\n")]
         end
     end
 
-    subgraph Local ["&nbsp"]
-        subgraph PyAlgoEngine ["&nbsp"]
-            subgraph Layer1 ["&nbsp"]
+    subgraph Local["&nbsp"]
+        subgraph PyAlgoEngine["&nbsp"]
+            subgraph Layer1["&nbsp"]
                 MDS("MDS")
                 DMA("DMA")
             end
 
-            subgraph Layer2 ["&nbsp"]
-                subgraph MonitorManager ["Monitor Manager"]
+            subgraph Layer2["&nbsp"]
+                subgraph MonitorManager["Monitor Manager"]
                     MD1["Market \n Data"]:::hidden
                     MD2["Market \n Data"]:::hidden
                     MD3["\n Monitor Manager \n Process Pool"]:::hidden
@@ -42,7 +42,7 @@ flowchart TB
 
                 OD["Order \n Data"]:::hidden
 
-                subgraph AlgoEngine ["Algo Engine"]
+                subgraph AlgoEngine["Algo Engine"]
                     direction TB
                     A1["\n\n VWAP \n\n\n"]
                     A2["\n\n TWAP \n\n\n"]
@@ -57,7 +57,7 @@ flowchart TB
 %%                VAL["Training \n and \n Validation"]:::hidden
             end
 
-            subgraph Layer3 ["&nbsp"]
+            subgraph Layer3["&nbsp"]
                 SHM[("Shared Memory")]
 
                 F5["Factor \n Values"]:::hidden
@@ -66,10 +66,10 @@ flowchart TB
             end
         end
 
-        subgraph Quark ["&nbsp"]
-            subgraph DataLore ["Data Lore"]
+        subgraph Quark["&nbsp"]
+            subgraph DataLore["Data Lore"]
 
-                subgraph Layer4 ["&nbsp"]
+                subgraph Layer4["&nbsp"]
                     C1["\n\n Model \n\n 1 \n\n"]
                     C2["\n\n Model \n\n 2 \n\n"]
                     C3["... ..."]:::hidden
@@ -77,8 +77,8 @@ flowchart TB
                     placeholder3["&nbsp"]:::hidden
                 end
 
-                DEC[["Market \n Decoder"]]
-                subgraph Layer5 ["&nbsp"]
+                DEC[["Market \n Trend \n Decoder"]]
+                subgraph Layer5["&nbsp"]
                     P1["Predicted \n Value"]:::hidden
                     P2["Predicted \n Value"]:::hidden
                     P3["&nbsp"]:::hidden
@@ -86,7 +86,7 @@ flowchart TB
                     placeholder4["&nbsp"]:::hidden
                 end
 
-                subgraph Layer6 ["&nbsp"]
+                subgraph Layer6["&nbsp"]
                     T1["\n\n Target \n\n 1 \n\n"]
                     T2["\n\n Target \n\n 2 \n\n"]
                     T3["... ..."]:::hidden
@@ -95,7 +95,7 @@ flowchart TB
                 end
             end
 
-            subgraph DecisionCore ["Decision Core"]
+            subgraph DecisionCore["Decision Core"]
                 K1["\n\n Kelly \n Criteria \n\n 1 \n\n"]
                 K2["\n\n Kelly \n Criteria \n\n 2 \n\n"]
                 K3["... ..."]:::hidden
@@ -104,7 +104,7 @@ flowchart TB
                 MDC{"Majority Decision Core"}
             end
 
-            subgraph Strategy ["Strategy"]
+            subgraph Strategy["Strategy"]
                 Signal(("Trade Logic Core"))
                 EOD("EoD")
                 BOD("BoD")
