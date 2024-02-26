@@ -1,0 +1,164 @@
+flowchart TB
+    subgraph External["&nbsp"]
+        subgraph SM ["Sim Match"]
+            S1{{"market data"}}
+            S2{{"trade reports"}}
+        end
+
+        subgraph EX ["Exchange"]
+            E1{{"market data"}}
+            E2{{"trade reports"}}
+            E3{{"trade orders"}}
+        end
+
+        subgraph Storage ["Cache"]
+            DB[("\n Factor \n Pool \n\n")]
+        end
+    end
+
+    subgraph Local ["&nbsp"]
+        subgraph PyAlgoEngine ["&nbsp"]
+            subgraph Layer1 ["&nbsp"]
+                MDS("MDS")
+                DMA("DMA")
+            end
+
+            subgraph Layer2 ["&nbsp"]
+                subgraph MonitorManager ["Monitor Manager"]
+                    MD1["Market \n Data"]:::hidden
+                    MD2["Market \n Data"]:::hidden
+                    MD3["\n Monitor Manager \n Process Pool"]:::hidden
+                    MD4["Market \n Data"]:::hidden
+
+                    M1["\n\n Factor \n\n 1 \n\n"]
+                    M2["\n\n Factor \n\n 2 \n\n"]
+                    M3["... ..."]:::hidden
+                    M4["\n\n Factor \n\n n \n\n"]
+
+                    F1["Factor \n Values"]:::hidden
+                    F2["Factor \n Values"]:::hidden
+                    F4["Factor \n Values"]:::hidden
+                end
+
+                OD["Order \n Data"]:::hidden
+
+                subgraph AlgoEngine ["Algo Engine"]
+                    direction TB
+                    A1["\n\n VWAP \n\n\n"]
+                    A2["\n\n TWAP \n\n\n"]
+                    A3["\n\n Iceberg \n\n\n"]
+                    A4["... ..."]:::hidden
+                end
+
+                PM["Position Management"]
+                RM["Risk Management"]
+
+%%                CACHE["Storage \n and \n Caching"]:::hidden
+%%                VAL["Training \n and \n Validation"]:::hidden
+            end
+
+            subgraph Layer3 ["&nbsp"]
+                SHM[("Shared Memory")]
+
+                F5["Factor \n Values"]:::hidden
+                F6["Factor \n Values"]:::hidden
+                F8["Factor \n Values"]:::hidden
+            end
+        end
+
+        subgraph Quark ["&nbsp"]
+            subgraph DataLore ["Data Lore"]
+
+                subgraph Layer4 ["&nbsp"]
+                    C1["\n\n Model \n\n 1 \n\n"]
+                    C2["\n\n Model \n\n 2 \n\n"]
+                    C3["... ..."]:::hidden
+                    C4["\n\n Model \n\n n \n\n"]
+                    placeholder3["&nbsp"]:::hidden
+                end
+
+                DEC[["Market \n Decoder"]]
+                subgraph Layer5 ["&nbsp"]
+                    P1["Predicted \n Value"]:::hidden
+                    P2["Predicted \n Value"]:::hidden
+                    P3["&nbsp"]:::hidden
+                    P4["Predicted \n Value"]:::hidden
+                    placeholder4["&nbsp"]:::hidden
+                end
+
+                subgraph Layer6 ["&nbsp"]
+                    T1["\n\n Target \n\n 1 \n\n"]
+                    T2["\n\n Target \n\n 2 \n\n"]
+                    T3["... ..."]:::hidden
+                    T4["\n\n Target \n\n n \n\n"]
+                    placeholder5["&nbsp"]:::hidden
+                end
+            end
+
+            subgraph DecisionCore ["Decision Core"]
+                K1["\n\n Kelly \n Criteria \n\n 1 \n\n"]
+                K2["\n\n Kelly \n Criteria \n\n 2 \n\n"]
+                K3["... ..."]:::hidden
+                K4["\n\n Kelly \n Criteria \n\n n \n\n"]
+
+                MDC{"Majority Decision Core"}
+            end
+
+            subgraph Strategy ["Strategy"]
+                Signal(("Trade Logic Core"))
+                EOD("EoD")
+                BOD("BoD")
+                IPC("IPC")
+            end
+        end
+    end
+
+    DB <--> MDS
+    S1 --> MDS
+    S2 --> DMA
+
+    E1 --> MDS
+    E2 <--> DMA
+    E3 <--> DMA
+
+    DB <--> MonitorManager
+    MDS --- MD1 --> M1 --- F1 ---> SHM
+    MDS --- MD2 --> M2 --- F2 ---> SHM
+    MDS ~~~ MD3 ~~~ M3       ~~~~~ SHM
+    MDS --- MD4 --> M4 --- F4 ---> SHM
+
+    DMA --- OD --> AlgoEngine --> PM --> RM
+
+    DB <--> DataLore
+    SHM --- F5 --> C1 --- P1 --> T1 --- K1 --- MDC
+    SHM --- F6 --> C2 --- P2 --> T2 --- K2 --- MDC
+    SHM ~~~        C3 ~~~ P3 ~~~ T3 ~~~ K3 ~~~ MDC
+    SHM --- F8 --> C4 --- P4 --> T4 --- K4 --- MDC
+
+    placeholder3 ~~~ placeholder4 ~~~ placeholder5
+    placeholder3 <-- "Train \n Models" --> DEC <-- "Define \n Targets" --> placeholder5
+
+    MDC ---> Signal
+    EOD & BOD & IPC --> Signal
+    RM <-- "Send Signal" --> Signal
+
+    classDef hidden fill-opacity: 0, stroke-opacity: 0
+
+    style External fill-opacity: 0, stroke-opacity: 0
+    style Storage fill-opacity: 0, stroke-opacity: 0
+    style SM fill-opacity: 0, stroke-opacity: 0
+    style EX fill-opacity: 0, stroke-opacity: 0
+    style Local fill-opacity: 0, stroke-opacity: 0
+    style PyAlgoEngine fill-opacity: 0, stroke-opacity: 0
+    style Layer1 fill-opacity: 0, stroke-opacity: 0
+    style Layer2 fill-opacity: 0, stroke-opacity: 0
+%%    style MonitorManager fill-opacity: 0, stroke-opacity: 0
+%%    style AlgoEngine fill-opacity: 0, stroke-opacity: 0
+    style Quark fill-opacity: 0, stroke-opacity: 0
+    style Layer3 fill-opacity: 0, stroke-opacity: 0
+    style Layer4 fill-opacity: 0, stroke-opacity: 0
+    style Layer5 fill-opacity: 0, stroke-opacity: 0
+    style Layer6 fill-opacity: 0, stroke-opacity: 0
+%%    style DataLore fill-opacity: 0, stroke-opacity: 0
+%%    style DecisionCore fill-opacity: 0, stroke-opacity: 0
+%%    style Strategy fill-opacity: 0, stroke-opacity: 0
