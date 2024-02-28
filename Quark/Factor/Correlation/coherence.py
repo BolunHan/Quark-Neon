@@ -112,7 +112,7 @@ class CoherenceMonitor(FactorMonitor, FixedIntervalSampler):
             if self.weights and ticker not in self.weights:
                 continue
 
-            price_vector = np.array(list(historical_price[ticker].values())[-vector_length:])
+            price_vector = np.array(list(historical_price[ticker])[-vector_length:])
             price_pct_vector = np.diff(price_vector) / price_vector[:-1]
             price_pct_matrix.append(price_pct_vector)
             weights.append(self.weights[ticker] if self.weights else 1)
@@ -191,8 +191,6 @@ class CoherenceMonitor(FactorMonitor, FixedIntervalSampler):
 
         self.update_from_json(json_dict=json_dict)
 
-        self._is_ready = json_dict['is_ready']
-
         return self
 
     def clear(self):
@@ -210,14 +208,18 @@ class CoherenceMonitor(FactorMonitor, FixedIntervalSampler):
     def _param_range(self) -> dict[str, list[...]]:
         param_range = super()._param_range()
 
-        param_range.update(
-            center_mode=['absolute', 'median', 'mean', 'weighted']
-        )
+        # param_range.update(
+        #     center_mode=['absolute', 'median', 'mean', 'weighted']
+        # )
 
         return param_range
 
     def _param_static(self) -> dict[str, ...]:
         param_static = super()._param_static()
+
+        param_static.update(
+            center_mode='median'
+        )
 
         param_static.update(
             weights=self.weights
@@ -284,7 +286,6 @@ class CoherenceAdaptiveMonitor(CoherenceMonitor, AdaptiveVolumeIntervalSampler):
 
         self.update_from_json(json_dict=json_dict)
 
-        self._is_ready = json_dict['is_ready']
         return self
 
     def clear(self) -> None:
@@ -303,11 +304,7 @@ class CoherenceAdaptiveMonitor(CoherenceMonitor, AdaptiveVolumeIntervalSampler):
 
     @property
     def is_ready(self) -> bool:
-        for ticker in self._volume_baseline['obs_vol_acc']:
-            if ticker not in self._volume_baseline['sampling_interval']:
-                return False
-
-        return True
+        return self.baseline_ready
 
 
 class CoherenceEMAMonitor(CoherenceMonitor, EMA):
@@ -317,20 +314,11 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
     Inherits from CoherenceMonitor and EMA classes.
     """
 
-    def __init__(self, sampling_interval: float, sample_size: int, discount_interval: float, alpha: float, weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Price.EMA', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, alpha: float, weights: dict[str, float] = None, name: str = 'Monitor.Coherence.Price.EMA', monitor_id: str = None):
         super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, weights=weights, name=name, monitor_id=monitor_id)
-        EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
+        EMA.__init__(self=self, alpha=alpha)
 
         self.dispersion_ratio = self.register_ema(name='dispersion_ratio')
-
-    def __call__(self, market_data: MarketData, **kwargs):
-        ticker = market_data.ticker
-        timestamp = market_data.timestamp
-
-        self.discount_ema(ticker='dispersion_ratio', timestamp=timestamp)
-        self.discount_all(timestamp=timestamp)
-
-        super().__call__(market_data=market_data, **kwargs)
 
     def on_entry_added(self, ticker: str, name: str, value):
         super().on_entry_added(ticker=ticker, name=name, value=value)
@@ -360,7 +348,6 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
         self = cls(
             sampling_interval=json_dict['sampling_interval'],
             sample_size=json_dict['sample_size'],
-            discount_interval=json_dict['discount_interval'],
             alpha=json_dict['alpha'],
             weights=json_dict['weights'],
             name=json_dict['name'],
@@ -369,7 +356,6 @@ class CoherenceEMAMonitor(CoherenceMonitor, EMA):
         self.update_from_json(json_dict=json_dict)
 
         self.dispersion_ratio = self.ema['dispersion_ratio']
-        self._is_ready = json_dict['is_ready']
 
         return self
 
@@ -432,8 +418,6 @@ class TradeCoherenceMonitor(CoherenceMonitor):
 
         self.update_from_json(json_dict=json_dict)
 
-        self._is_ready = json_dict['is_ready']
-
         return self
 
     def clear(self):
@@ -465,9 +449,9 @@ class TradeCoherenceMonitor(CoherenceMonitor):
             if self.weights is not None and ticker not in self.weights:
                 continue
 
-            price_vector = np.array(list(historical_price[ticker].values())[-vector_length:])
-            volume_vector = np.array(list(volume[ticker].values())[-vector_length:])
-            volume_net_vector = np.array(list(volume_net[ticker].values())[-vector_length:])
+            price_vector = np.array(list(historical_price[ticker])[-vector_length:])
+            volume_vector = np.array(list(volume[ticker])[-vector_length:])
+            volume_net_vector = np.array(list(volume_net[ticker])[-vector_length:])
 
             price_pct_vector = np.diff(price_vector) / price_vector[:-1]
             flow_vector = volume_net_vector / volume_vector
