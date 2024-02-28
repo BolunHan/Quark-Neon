@@ -51,8 +51,6 @@ class DecoderMonitor(FactorMonitor, OnlineDecoder):
         super().__init__(name=name, monitor_id=monitor_id)
         OnlineDecoder.__init__(self=self, confirmation_level=confirmation_level, timeout=timeout, up_threshold=up_threshold, down_threshold=down_threshold, retrospective=retrospective)
 
-        self._is_ready = False  # This monitor does not have a valid .value function, so it is never ready
-
     def __call__(self, market_data: MarketData, **kwargs):
         """
         Updates the DecoderMonitor with market data.
@@ -102,7 +100,7 @@ class DecoderMonitor(FactorMonitor, OnlineDecoder):
         Returns:
             bool: True if the monitor is ready, False otherwise.
         """
-        return self._is_ready
+        return False
 
 
 class IndexDecoderMonitor(DecoderMonitor, Synthetic):

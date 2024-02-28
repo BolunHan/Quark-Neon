@@ -40,8 +40,6 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
 
         self.register_sampler(name='price', mode='update')
 
-        self._is_ready = True
-
     def __call__(self, market_data: MarketData, **kwargs):
         """
         Updates the EntropyMonitor with market data.
@@ -142,8 +140,7 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
         data_dict.update(
             weights=dict(self.weights),
             pct_change=self.pct_change,
-            ignore_primary=self.ignore_primary,
-            is_ready=self._is_ready
+            ignore_primary=self.ignore_primary
         )
 
         if fmt == 'dict':
@@ -152,29 +149,6 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
             return json.dumps(data_dict, **kwargs)
         else:
             raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
-
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> EntropyMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            weights=json_dict['weights'],
-            pct_change=json_dict['pct_change'],
-            ignore_primary=json_dict['ignore_primary'],
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self._is_ready = json_dict['is_ready']
-
-        return self
 
     @property
     def value(self) -> float:
@@ -196,7 +170,7 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
 
             for ticker in self.weights:
                 if ticker in historical_price:
-                    price_matrix.append(list(historical_price[ticker].values())[-vector_length:])
+                    price_matrix.append(list(historical_price[ticker])[-vector_length:])
                     weight_vector.append(self.weights[ticker])
         else:
             vector_length = min([len(_) for _ in historical_price.values()])
@@ -204,7 +178,7 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
             if vector_length < 3:
                 return np.nan
 
-            price_matrix.extend([list(historical_price[ticker].values())[-vector_length:] for ticker in historical_price])
+            price_matrix.extend([list(historical_price[ticker])[-vector_length:] for ticker in historical_price])
             weight_vector.extend([1] * len(historical_price))
 
         if len(price_matrix) < 3:
@@ -239,7 +213,7 @@ class EntropyMonitor(FactorMonitor, FixedIntervalSampler):
             if len(_) < 3:
                 return False
 
-        return self._is_ready
+        return True
 
 
 class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
@@ -261,30 +235,6 @@ class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
         self.accumulate_volume(market_data=market_data)
         super().__call__(market_data=market_data, **kwargs)
 
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> EntropyAdaptiveMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            baseline_window=json_dict['baseline_window'],
-            weights=json_dict['weights'],
-            pct_change=json_dict['pct_change'],
-            ignore_primary=json_dict['ignore_primary'],
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self._is_ready = json_dict['is_ready']
-
-        return self
-
     def clear(self) -> None:
         AdaptiveVolumeIntervalSampler.clear(self)
 
@@ -292,11 +242,7 @@ class EntropyAdaptiveMonitor(EntropyMonitor, AdaptiveVolumeIntervalSampler):
 
     @property
     def is_ready(self) -> bool:
-        for ticker in self._volume_baseline['obs_vol_acc']:
-            if ticker not in self._volume_baseline['sampling_interval']:
-                return False
-
-        return self._is_ready
+        return self.baseline_ready
 
 
 class EntropyEMAMonitor(EntropyMonitor, EMA):
@@ -306,13 +252,12 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
     Inherits from EntropyMonitor and EMA classes.
     """
 
-    def __init__(self, sampling_interval: float, sample_size: int, discount_interval: float, alpha: float, weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.EMA', monitor_id: str = None):
+    def __init__(self, sampling_interval: float, sample_size: int, alpha: float, weights: dict[str, float] = None, pct_change: bool = True, ignore_primary: bool = True, name: str = 'Monitor.Entropy.Price.EMA', monitor_id: str = None):
         """
         Initializes the EntropyEMAMonitor.
 
         Args:
             sample_size (int): Max sample size.
-            discount_interval (float): Time interval for discounting EMA values.
             alpha (float): Exponential moving average smoothing factor.
             sampling_interval (float): Time interval for sampling market data.
             weights (dict): Weights for individual stocks in the pool.
@@ -321,7 +266,7 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
             monitor_id (str): Identifier for the monitor.
         """
         super().__init__(sampling_interval=sampling_interval, sample_size=sample_size, weights=weights, pct_change=pct_change, ignore_primary=ignore_primary, name=name, monitor_id=monitor_id)
-        EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
+        EMA.__init__(self=self, alpha=alpha)
 
         self.entropy_ema = self.register_ema(name='entropy')
 
@@ -333,47 +278,6 @@ class EntropyEMAMonitor(EntropyMonitor, EMA):
 
         entropy = super().value
         self.update_ema(ticker='entropy', entropy=entropy)
-
-    def __call__(self, market_data: MarketData, **kwargs):
-        """
-        Updates the EntropyEMAMonitor with market data.
-
-        Args:
-            market_data (MarketData): Market data object containing price information.
-        """
-        ticker = market_data.ticker
-        timestamp = market_data.timestamp
-
-        self.discount_ema(ticker='entropy', timestamp=timestamp)
-        self.discount_all(timestamp=timestamp)
-
-        super().__call__(market_data=market_data, **kwargs)
-
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> EntropyEMAMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            discount_interval=json_dict['discount_interval'],
-            alpha=json_dict['alpha'],
-            weights=json_dict['weights'],
-            pct_change=json_dict['pct_change'],
-            ignore_primary=json_dict['ignore_primary'],
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self.entropy_ema = self.ema['entropy']
-        self._is_ready = json_dict['is_ready']
-
-        return self
 
     def clear(self):
         """

@@ -1,5 +1,5 @@
-from .volatility import VolatilityMonitor
 from .decoder import DecoderMonitor, IndexDecoderMonitor
+from .volatility import VolatilityMonitor
 from .. import add_monitor, INDEX_WEIGHTS
 
 MONITOR = {}

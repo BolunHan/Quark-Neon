@@ -18,6 +18,7 @@ Date: 2023-12-27
 from __future__ import annotations
 
 import json
+from typing import Self
 
 import numpy as np
 from PyQuantKit import MarketData, TradeData, TransactionData
@@ -41,19 +42,8 @@ class AggressivenessMonitor(FactorMonitor):
         self._trade_price: dict[str, dict[int, float]] = dict()
         self._aggressive_buy: dict[str, float] = {}
         self._aggressive_sell: dict[str, float] = {}
-        self._is_ready = True
 
-    def __call__(self, market_data: MarketData, **kwargs):
-        """
-        Update the monitor based on market data.
-
-        Args:
-        - market_data (MarketData): Market data to update the monitor.
-        """
-        if isinstance(market_data, (TradeData, TransactionData)):
-            self._on_trade(trade_data=market_data)
-
-    def _on_trade(self, trade_data: TradeData | TransactionData):
+    def on_trade_data(self, trade_data: TradeData | TransactionData, **kwargs):
         """
         Handle trade data to update aggressive buying/selling volumes.
 
@@ -136,30 +126,20 @@ class AggressivenessMonitor(FactorMonitor):
         else:
             raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
 
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> AggressivenessMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
+    def update_from_json(self, json_dict: dict) -> Self:
+        super().update_from_json(json_dict=json_dict)
 
-        self = cls(
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self._last_update = json_dict['last_update']
-        self._trade_price = json_dict['trade_price']
-        self._aggressive_buy = json_dict['aggressive_buy']
-        self._aggressive_sell = json_dict['aggressive_sell']
-        self._is_ready = json_dict['is_ready']
+        self._last_update.update(json_dict['last_update'])
+        self._trade_price.update(json_dict['trade_price'])
+        self._aggressive_buy.update(json_dict['aggressive_buy'])
+        self._aggressive_sell.update(json_dict['aggressive_sell'])
 
         return self
 
     def clear(self):
         """Clear the monitor data."""
+        super().clear()
+
         self._last_update.clear()
         self._trade_price.clear()
         self._aggressive_buy.clear()
@@ -191,23 +171,12 @@ class AggressivenessMonitor(FactorMonitor):
         result['Net'] = np.nansum(list(self._aggressive_buy.values())) - np.nansum(list(self._aggressive_sell.values()))
         return result
 
-    @property
-    def is_ready(self) -> bool:
-        """
-        Check if the monitor is ready.
-
-        Returns:
-        bool: True if the monitor is ready, False otherwise.
-        """
-        return self._is_ready
-
 
 class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
     """
     Exponential Moving Average (EMA) of aggressive buying/selling volume.
 
     Args:
-    - discount_interval (float): Interval for EMA discounting.
     - alpha (float): EMA smoothing factor.
     - weights (dict[str, float]): Dictionary of ticker weights.
     - normalized (bool, optional): Whether to use normalized EMA. Defaults to True.
@@ -215,9 +184,9 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
     - monitor_id (str, optional): Identifier for the monitor. Defaults to None.
     """
 
-    def __init__(self, discount_interval: float, alpha: float, weights: dict[str, float], normalized: bool = True, name: str = 'Monitor.Aggressiveness.EMA', monitor_id: str = None):
+    def __init__(self, alpha: float, weights: dict[str, float], normalized: bool = True, name: str = 'Monitor.Aggressiveness.EMA', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id)
-        EMA.__init__(self=self, discount_interval=discount_interval, alpha=alpha)
+        EMA.__init__(self=self, alpha=alpha)
         Synthetic.__init__(self=self, weights=weights)
 
         self.normalized = normalized
@@ -225,6 +194,8 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         self._aggressive_buy: dict[str, float] = self.register_ema(name='aggressive_buy')  # EMA of aggressive buying volume
         self._aggressive_sell: dict[str, float] = self.register_ema(name='aggressive_sell')  # EMA of aggressive selling volume
         self._trade_volume: dict[str, float] = self.register_ema(name='trade_volume')  # EMA of total trade volume
+
+        raise DeprecationWarning(f'{self.__class__.__name__} monitor is deprecated!')
 
     def _update_aggressiveness(self, ticker: str, volume: float, side: int, timestamp: float):
         """
@@ -249,7 +220,7 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
             if not (0 <= adjusted_volume_ratio <= 1):
                 raise ValueError(f'{ticker} {self.__class__.__name__} encounter invalid value, total_volume={total_volume}, aggressiveness={aggressiveness_volume}, side={side}')
 
-    def _on_trade(self, trade_data: TradeData | TransactionData):
+    def on_trade_data(self, trade_data: TradeData | TransactionData, **kwargs):
         """
         Handle trade data to update aggressive buying/selling volumes and accumulate EMAs.
 
@@ -258,7 +229,7 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         """
         ticker = trade_data.ticker
         self.accumulate_ema(ticker=ticker, replace_na=0., trade_volume=trade_data.volume)  # to avoid redundant calculation, timestamp is not passed-in, so that the discount function will not be triggered
-        super()._on_trade(trade_data=trade_data)
+        super().on_trade_data(trade_data=trade_data)
 
     def __call__(self, market_data: MarketData, **kwargs):
         """
@@ -270,8 +241,8 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
         ticker = market_data.ticker
         timestamp = market_data.timestamp
 
-        self.discount_ema(ticker=ticker, timestamp=timestamp)
-        self.discount_all(timestamp=timestamp)
+        # self.discount_ema(ticker=ticker, timestamp=timestamp)
+        # self.discount_all(timestamp=timestamp)
 
         return super().__call__(market_data=market_data, **kwargs)
 
@@ -296,7 +267,6 @@ class AggressivenessEMAMonitor(AggressivenessMonitor, EMA, Synthetic):
             json_dict = json.loads(json_message)
 
         self = cls(
-            discount_interval=json_dict['discount_interval'],
             alpha=json_dict['alpha'],
             weights=json_dict['weights'],
             normalized=json_dict['normalized'],

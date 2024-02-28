@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from typing import Iterable
+from typing import Iterable, Self
 
 import numpy as np
 from PyQuantKit import MarketData
@@ -20,8 +20,6 @@ class SkewnessMonitor(FactorMonitor, FixedIntervalSampler):
         self.register_sampler(name='price', mode='update')
         self._historical_skewness: dict[str, deque[float]] = {}
 
-        self._is_ready = True
-
     def __call__(self, market_data: MarketData, **kwargs):
         ticker = market_data.ticker
 
@@ -33,8 +31,7 @@ class SkewnessMonitor(FactorMonitor, FixedIntervalSampler):
     def to_json(self, fmt='str', **kwargs) -> str | dict:
         data_dict = super().to_json(fmt='dict')
         data_dict.update(
-            historical_skewness=self._historical_skewness,
-            is_ready=self._is_ready
+            historical_skewness=self._historical_skewness
         )
 
         if fmt == 'dict':
@@ -44,25 +41,9 @@ class SkewnessMonitor(FactorMonitor, FixedIntervalSampler):
         else:
             raise ValueError(f'Invalid format {fmt}, except "dict" or "str".')
 
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> SkewnessMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self._historical_skewness = json_dict['historical_skewness']
-        self._is_ready = json_dict['is_ready']
-
+    def update_from_json(self, json_dict: dict) -> Self:
+        super().update_from_json(json_dict=json_dict)
+        self._historical_skewness.update(json_dict['historical_skewness'])
         return self
 
     def clear(self) -> None:
@@ -127,7 +108,7 @@ class SkewnessMonitor(FactorMonitor, FixedIntervalSampler):
             raise TypeError(f'Invalid ticker {ticker}, expect str, list[str] or None.')
 
         for ticker in tasks:
-            price_vector = list(historical_price[ticker].values())
+            price_vector = list(historical_price[ticker])
 
             if drop_last:
                 price_vector.pop(-1)
@@ -158,7 +139,7 @@ class SkewnessMonitor(FactorMonitor, FixedIntervalSampler):
             if len(_) < 3:
                 return False
 
-        return self._is_ready
+        return True
 
 
 class SkewnessIndexMonitor(SkewnessMonitor, Synthetic):
@@ -180,28 +161,6 @@ class SkewnessIndexMonitor(SkewnessMonitor, Synthetic):
             return
 
         super().__call__(market_data=market_data, **kwargs)
-
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> SkewnessIndexMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            weights=json_dict['weights'],
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self._historical_skewness = json_dict['historical_skewness']
-        self._is_ready = json_dict['is_ready']
-
-        return self
 
     def clear(self) -> None:
         Synthetic.clear(self)
@@ -241,29 +200,6 @@ class SkewnessAdaptiveMonitor(SkewnessMonitor, AdaptiveVolumeIntervalSampler):
         self.accumulate_volume(market_data=market_data)
         super().__call__(market_data=market_data, **kwargs)
 
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> SkewnessAdaptiveMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            baseline_window=json_dict['baseline_window'],
-            aligned_interval=json_dict['aligned_interval'],
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self._historical_skewness = json_dict['historical_skewness']
-        self._is_ready = json_dict['is_ready']
-
-        return self
-
     def clear(self) -> None:
         AdaptiveVolumeIntervalSampler.clear(self)
 
@@ -271,11 +207,7 @@ class SkewnessAdaptiveMonitor(SkewnessMonitor, AdaptiveVolumeIntervalSampler):
 
     @property
     def is_ready(self) -> bool:
-        for ticker in self._volume_baseline['obs_vol_acc']:
-            if ticker not in self._volume_baseline['sampling_interval']:
-                return False
-
-        return self._is_ready
+        return self.baseline_ready
 
 
 class SkewnessIndexAdaptiveMonitor(SkewnessAdaptiveMonitor, Synthetic):
@@ -299,30 +231,6 @@ class SkewnessIndexAdaptiveMonitor(SkewnessAdaptiveMonitor, Synthetic):
             return
 
         super().__call__(market_data=market_data, **kwargs)
-
-    @classmethod
-    def from_json(cls, json_message: str | bytes | bytearray | dict) -> SkewnessIndexAdaptiveMonitor:
-        if isinstance(json_message, dict):
-            json_dict = json_message
-        else:
-            json_dict = json.loads(json_message)
-
-        self = cls(
-            sampling_interval=json_dict['sampling_interval'],
-            sample_size=json_dict['sample_size'],
-            baseline_window=json_dict['baseline_window'],
-            aligned_interval=json_dict['aligned_interval'],
-            weights=json_dict['weights'],
-            name=json_dict['name'],
-            monitor_id=json_dict['monitor_id']
-        )
-
-        self.update_from_json(json_dict=json_dict)
-
-        self._historical_skewness = json_dict['historical_skewness']
-        self._is_ready = json_dict['is_ready']
-
-        return self
 
     def clear(self) -> None:
         Synthetic.clear(self)

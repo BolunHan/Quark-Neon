@@ -43,8 +43,6 @@ class VolatilityMonitor(FactorMonitor, Synthetic):
         self.daily_volatility: dict[str, float] = {}  # must be assigned from outside
         self.index_volatility: float = np.nan  # must be assigned from outside
 
-        self._is_ready = True
-
     def __call__(self, market_data: MarketData, **kwargs):
         """
         Update the synthetic index based on the received market data.
@@ -58,8 +56,7 @@ class VolatilityMonitor(FactorMonitor, Synthetic):
         data_dict = super().to_json(fmt='dict')
         data_dict.update(
             daily_volatility=self.daily_volatility,
-            index_volatility=self.index_volatility,
-            is_ready=self._is_ready
+            index_volatility=self.index_volatility
         )
 
         if fmt == 'dict':
@@ -161,13 +158,3 @@ class VolatilityMonitor(FactorMonitor, Synthetic):
         weighted_index -= diff_base
 
         return weighted_index
-
-    @property
-    def is_ready(self) -> bool:
-        """
-        Check if the monitor is ready.
-
-        Returns:
-        bool: True if the monitor is ready, False otherwise.
-        """
-        return self._is_ready
