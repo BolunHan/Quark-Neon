@@ -31,6 +31,8 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
     """
     Monitors market data and generates synthetic bar data for index price and volume movement.
 
+    Note: the name of this class is used in collect_factor function, do not amend the name!
+
     Args:
     - index_name (str): Name of the synthetic index.
     - weights (dict[str, float]): Dictionary of ticker weights.
@@ -49,8 +51,6 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         self._active_bar_data: BarData | None = None
         self._last_bar_data: BarData | None = None
         self._index_price = None
-
-        self._is_ready = True
 
     def __call__(self, market_data: MarketData, **kwargs):
         """
@@ -105,8 +105,7 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
             interval=self.interval,
             active_bar_data=self._active_bar_data.to_json(fmt='dict') if self._active_bar_data is not None else None,
             last_bar_data=self._last_bar_data.to_json(fmt='dict') if self._last_bar_data is not None else None,
-            index_price=self._index_price,
-            is_ready=self._is_ready
+            index_price=self._index_price
         )
 
         if fmt == 'dict':
@@ -136,7 +135,6 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         self._active_bar_data = BarData.from_json(json_dict['active_bar_data']) if json_dict['active_bar_data'] is not None else None
         self._last_bar_data = BarData.from_json(json_dict['last_bar_data']) if json_dict['last_bar_data'] is not None else None
         self._index_price = json_dict['index_price']
-        self._is_ready = json_dict['is_ready']
 
         return self
 
@@ -158,7 +156,7 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         if self._last_bar_data is None:
             return False
         else:
-            return self._is_ready
+            return True
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
@@ -231,3 +229,7 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         BarData | None: last bar data.
         """
         return self._last_bar_data
+
+    @property
+    def serializable(self) -> bool:
+        return False
