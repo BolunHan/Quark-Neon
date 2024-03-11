@@ -106,9 +106,12 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
         info_selected['state'] = -flag
 
         # Step 3: Merge the result back into the original DataFrame
-        factors['local_max'].update(info_selected['local_max'])
-        factors['local_min'].update(info_selected['local_min'])
-        factors['state'].update(info_selected['state'])
+        # updated to compliant with (pandas) CoW rules
+        # factors['local_max'].update(info_selected['local_max'])
+        # factors['local_min'].update(info_selected['local_min'])
+        # factors['state'].update(info_selected['state'])
+        factors.update(info_selected[['local_max', 'local_min', 'state']])
+
 
     factors['up_actual'] = factors['local_max'] / factors[key] - 1
     factors['down_actual'] = factors['local_min'] / factors[key] - 1
@@ -141,8 +144,9 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
             hold_prob = potential_loss.apply(lambda _: 1 - _ / smooth_threshold if _ > smooth_threshold else 0)
             up_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.up_actual
             target_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.down_smoothed
-            factors['up_smoothed'].update(up_smoothed)
-            factors['target_smoothed'].update(target_smoothed)
+            # factors['up_smoothed'].update(up_smoothed)
+            # factors['target_smoothed'].update(target_smoothed)
+            factors.update({'up_smoothed': up_smoothed, 'target_smoothed': target_smoothed})
         elif break_type == 1:
             potential_loss = (-smooth_range.up_actual[::-1]).cummin()[::-1]
             potential_gain = (next_extreme_price / smooth_range[key] - 1).clip(None, 0)  # in this case, the potential gain is negative,
@@ -151,8 +155,9 @@ def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.
             hold_prob = potential_loss.apply(lambda _: 1 - _ / smooth_threshold if _ > smooth_threshold else 0)
             down_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.down_actual
             target_smoothed = hold_prob * potential_gain + (1 - hold_prob) * smooth_range.up_smoothed
-            factors['down_smoothed'].update(down_smoothed)
-            factors['target_smoothed'].update(target_smoothed)
+            # factors['down_smoothed'].update(down_smoothed)
+            # factors['target_smoothed'].update(target_smoothed)
+            factors.update({'down_smoothed': down_smoothed, 'target_smoothed': target_smoothed})
         else:
             continue
 
