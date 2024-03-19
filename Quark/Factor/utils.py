@@ -1000,7 +1000,7 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
         if isinstance(mode, SamplerMode):
             mode = mode.value
 
-        if mode not in ['update', 'accumulate']:
+        if mode not in ['update', 'max', 'min', 'accumulate']:
             raise NotImplementedError(f'Invalid mode {mode}, expect "update" or "accumulate".')
 
         sample_storage = self.sample_storage[name] = dict(
@@ -1053,6 +1053,10 @@ class FixedIntervalSampler(object, metaclass=abc.ABCMeta):
             else:
                 if mode == 'update':
                     last_obs = obs_storage[-1] = obs_value
+                elif mode == 'max':
+                    last_obs = obs_storage[-1] = max(obs_value, obs_storage[-1])
+                elif mode == 'min':
+                    last_obs = obs_storage[-1] = min(obs_value, obs_storage[-1])
                 elif mode == 'accumulate':
                     last_obs = obs_storage[-1] = obs_value + obs_storage[-1]
                 else:
@@ -1553,6 +1557,10 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
             else:
                 if mode == 'update':
                     last_obs = obs_storage[-1] = obs_value
+                elif mode == 'max':
+                    last_obs = obs_storage[-1] = max(obs_value, obs_storage[-1])
+                elif mode == 'min':
+                    last_obs = obs_storage[-1] = min(obs_value, obs_storage[-1])
                 elif mode == 'accumulate':
                     last_obs = obs_storage[-1] = obs_value + obs_storage[-1]
                 else:
