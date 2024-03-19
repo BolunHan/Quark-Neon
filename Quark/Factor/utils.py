@@ -1385,7 +1385,7 @@ class AdaptiveVolumeIntervalSampler(FixedVolumeIntervalSampler, metaclass=abc.AB
         - float | None: Calculated baseline volume or None if the baseline is not ready.
 
         """
-        min_obs = self.sample_size if min_obs is None else min_obs
+        min_obs = min(self.sample_size, int(self.baseline_window // 2)) if min_obs is None else min_obs
 
         volume_baseline_dict: dict[str, float] = self._volume_baseline['baseline']
         obs_vol_acc_start_dict: dict[str, float] = self._volume_baseline['obs_vol_acc_start']
