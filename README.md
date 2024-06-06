@@ -121,8 +121,8 @@ To implement new decision core
 
 To further implement new trading behavior and trading algorithm,
 - clone the [PyAlgoEngine](https://github.com/BolunHan/PyAlgoEngine.git)
-- add new algo in `AlgoEngine/Engine/AlgoEngine.py`
-- add or amend execution logic at `AlgoEngine/Engine/TradeEngine.py`
+- add new algo in `algo_engine/engine/algo_engine.py`
+- add or amend execution logic at `algo_engine/engine/trade_engine.py`
 
 To init / amend backtest
 - edit `Quark/Backtest/__main__.py`
