@@ -1,4 +1,4 @@
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 import logging
 
@@ -11,6 +11,7 @@ def set_logger(logger: logging.Logger):
     factor.set_logger(logger=LOGGER.getChild('Factor'))
     decision_core.set_logger(logger=LOGGER.getChild('DecisionCore'))
     strategy.set_logger(logger=LOGGER.getChild('Strategy'))
+
 
 import base
 import api
