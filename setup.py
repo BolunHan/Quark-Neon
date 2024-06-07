@@ -24,7 +24,7 @@ long_description = read("README.md")
 
 setuptools.setup(
     name="Quark",
-    version=get_version(os.path.join('Quark', '__init__.py')),
+    version=get_version(os.path.join('quark', '__init__.py')),
     author="Bolun.Han",
     author_email="Bolun.Han@outlook.com",
     description="HFT Factor Mining Platform",
