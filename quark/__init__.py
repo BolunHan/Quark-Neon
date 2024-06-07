@@ -1,4 +1,4 @@
-__version__ = "0.2.1"
+__version__ = "0.2.1.post1"
 
 import logging
 
@@ -13,8 +13,15 @@ def set_logger(logger: logging.Logger):
     strategy.set_logger(logger=LOGGER.getChild('Strategy'))
 
 
-import base
-import api
-import factor
-import decision_core
-import strategy
+from . import base
+from . import api
+from . import factor
+from . import decision_core
+from . import strategy
+
+try:
+    from . import calibration
+    from . import datalore
+except ImportError as _:
+    LOGGER.error(f'{_}')
+    LOGGER.warning('Quark Datalore model not found! Please install Quark-Calibration to use calibration function!')

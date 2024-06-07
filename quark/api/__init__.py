@@ -13,7 +13,7 @@ def set_logger(logger: logging.Logger):
     historical_xtp.LOGGER = logger
 
 
-import external
-import historical
-import historical_xtp
-import utils
+from . import external
+from . import historical
+from . import historical_xtp
+from . import utils
