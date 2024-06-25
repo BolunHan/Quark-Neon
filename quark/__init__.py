@@ -1,4 +1,4 @@
-__version__ = "0.2.1.post1"
+__version__ = "0.2.2"
 
 import logging
 
@@ -7,14 +7,12 @@ from .base import LOGGER
 
 def set_logger(logger: logging.Logger):
     base.set_logger(logger=logger)
-    api.set_logger(logger=LOGGER.getChild('API'))
     factor.set_logger(logger=LOGGER.getChild('Factor'))
     decision_core.set_logger(logger=LOGGER.getChild('DecisionCore'))
     strategy.set_logger(logger=LOGGER.getChild('Strategy'))
 
 
 from . import base
-from . import api
 from . import factor
 from . import decision_core
 from . import strategy
