@@ -43,12 +43,7 @@ def session_dummies(timestamp: float | list[float], inplace: dict[str, float | l
 
 
 def is_market_session(timestamp: float | int) -> bool:
-    market_time = datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE).time()
-    if (market_time < datetime.time(9, 30)
-            or datetime.time(11, 30) < market_time < datetime.time(13, 0)
-            or datetime.time(15, 0) < market_time):
-        return False
-    return True
+    return GlobalStatics.PROFILE.is_market_session(timestamp=timestamp)
 
 
 def market_session_mask(timestamp: list[float], inplace: dict[str, float | list[float]] | pd.DataFrame = None) -> list[bool]:
