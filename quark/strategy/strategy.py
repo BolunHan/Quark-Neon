@@ -1,12 +1,10 @@
-import datetime
 import enum
 
-from algo_engine.base import MarketData, TransactionSide, TradeInstruction, TradeReport, OrderState
+from algo_engine.base import MarketData, TradeInstruction, TradeReport, OrderState
 
 from . import STRATEGY_ENGINE, LOGGER
 from .metric import StrategyMetrics
 from ..decision_core import DummyDecisionCore
-from ..factor import IndexWeight
 
 LOGGER = LOGGER.getChild('Strategy')
 
@@ -20,41 +18,18 @@ class StatusCode(enum.Enum):
 
 
 class Strategy(object):
-    def __init__(
-            self,
-            index_ticker: str = "000016.SH",
-            index_weights: dict[str, float] = None,
-            strategy_engine=None,
-            metric: StrategyMetrics = None,
-            **kwargs
-    ):
-        self.index_ticker = index_ticker
-        self.index_weights = IndexWeight(index_name=self.index_ticker, **index_weights)
+    def __init__(self, strategy_engine=None, metric: StrategyMetrics = None):
         self.engine = strategy_engine if strategy_engine is not None else STRATEGY_ENGINE
-        self.position_tracker = self.engine.position_tracker
-        self.strategy_metric = metric if metric is not None else StrategyMetrics(sampling_interval=10)
-        self.mds = self.engine.mds
-        self.synthetic = None
-        self.mode = kwargs.pop('mode', 'production')
-
         self.subscription = self.engine.subscription
-        self.eod_status = {'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.}
 
         # Using dummy core as default, no trading action will be triggered. To override this, a proper BoD function is needed.
         # This behavior is intentional, so that accidents might be avoided if strategy is not properly initialized.
         # Signals still can be collected with a dummy core, which is useful in backtest mode.
         self.decision_core = DummyDecisionCore()
         self.status = StatusCode.idle
-
-        self._last_update_ts = 0.
-        self.trading_disabled = False
-
-    def get_underlying(self, ticker: str, side: int):
-        # note that the strategy metrics assumes that only one underlying is traded by this strategy
-        return ticker
+        self.eod_status = {'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.}
 
     def register(self, **kwargs):
-        self.engine.multi_threading = kwargs.get('multi_threading', False)
         self.engine.add_handler_safe(on_market_data=self._on_market_data)
         self.engine.add_handler_safe(on_order=self._on_order)
         self.engine.add_handler_safe(on_report=self._on_trade)
@@ -62,7 +37,7 @@ class Strategy(object):
         self.status = StatusCode.working
         return
 
-    def unwind_all(self):
+    def pre_eod_unwind_all(self):
         self.position_tracker.unwind_all()
         self.status = StatusCode.closing
         self.eod_status['last_unwind_timestamp'] = self.mds.timestamp
@@ -70,7 +45,7 @@ class Strategy(object):
         self.eod_status['retry_count'] += 1
         self.eod_status['status'] = 'working'
 
-    def _check_unwind(self):
+    def pre_eod_check_unwind(self):
         if not self.status == StatusCode.closing:
             return
 
@@ -89,7 +64,7 @@ class Strategy(object):
         if eod_status == 'canceling':
             # Scenario 1.1: all canceled
             if not working['Long'] and not working['Short']:
-                self.unwind_all()
+                self.pre_eod_unwind_all()
             # Scenario 1.2: still canceling
             else:
                 pass
@@ -104,94 +79,22 @@ class Strategy(object):
             return
 
     def _on_market_data(self, market_data: MarketData, **kwargs):
-        market_time = market_data.market_time
-        ticker = market_data.ticker
-        timestamp = market_data.timestamp
-
-        # working condition 1: in working status
-        if self.status == StatusCode.idle or self.status == StatusCode.closed or self.status == StatusCode.error:
-            return
-        elif self.status == StatusCode.closing:
-            self._check_unwind()
-            return
-
-        # signal condition 1: in trade session
-        if not self.mds.in_trade_session(market_time):
-            return
-
-        # signal condition 2: avoid market-closing auction
-        if market_time.time() >= datetime.time(14, 55):
-            if self.profile.clear_on_eod:
-                return self.unwind_all()
-            return
-
-        # Optional signal condition 3: only subscribed ticker
-        if not (ticker == self.index_ticker or ticker in self.index_weights):
-            return
-
-        # all conditions passed, checking prediction and signal
-        synthetic_price = self.synthetic.index_price
-        self.strategy_metric.collect_synthetic_price(synthetic_price=synthetic_price, timestamp=timestamp)
-        # sampling override: in production mode or in sampling mode after a giving sampling_interval
-        if self.mode == 'sampling' and self._last_update_ts + self.profile.sampling_interval > timestamp:
-            return
-        factor_value = self.mds.monitor_manager.values
-        self.strategy_metric.collect_factors(factor_value=factor_value, timestamp=timestamp)
-        prediction = self.decision_core.predict(mds=self.mds, factor_value=factor_value, timestamp=timestamp)
-        self.strategy_metric.on_prediction(prediction=prediction, timestamp=timestamp)
-        signal = 0 if factor_value is None else self.decision_core.signal(mds=self.mds, position=self.position_tracker, prediction=prediction)
-        self.strategy_metric.on_signal(signal=signal, timestamp=timestamp)
-
-        if not signal or self.trading_disabled:
-            pass
-        # trade condition 0: signal long action
-        elif signal > 0:
-            self.engine.open_pos(
-                ticker=self.get_underlying(ticker=self.index_ticker, side=1),
-                volume=self.decision_core.trade_volume(
-                    position=self.position_tracker,
-                    cash=0,
-                    margin=0,
-                    timestamp=timestamp,
-                    signal=1
-                ),
-                side=TransactionSide.Buy_to_Long
-            )
-        # trade condition 0: signal short action
-        elif signal < 0:
-            self.engine.open_pos(
-                ticker=self.get_underlying(ticker=self.index_ticker, side=1),
-                volume=self.decision_core.trade_volume(
-                    position=self.position_tracker,
-                    cash=0,
-                    margin=0,
-                    timestamp=timestamp,
-                    signal=1
-                ),
-                side=TransactionSide.Sell_to_Short
-            )
-
-        self._last_update_ts = (timestamp // self.profile.sampling_interval) * self.profile.sampling_interval
+        """
+        implement your strategy here!
+        """
+        pass
 
     def _on_order(self, order: TradeInstruction, **kwargs):
-        if order.order_state == OrderState.Rejected:
-            self.status = StatusCode.error
-
-        self.strategy_metric.on_order(order=order)
+        """
+        implement your strategy here!
+        """
+        pass
 
     def _on_trade(self, report: TradeReport, **kwargs):
-        self.strategy_metric.on_trade(report=report)
-
-        trade_metrics = self.strategy_metric.actual_trade_metrics
-
-        self.state.pos_pnl = trade_metrics._current_pnl  # optional, since this should be always zero.
-        self.state.pos_cash_flow = trade_metrics._current_cash_flow
-
-        # update timestamp if position newly opened
-        if trade_metrics.exposure and not self.state.exposure:
-            self.state.pos_start_ts = report.timestamp
-
-        self.state.exposure = trade_metrics.exposure
+        """
+        implement your strategy here!
+        """
+        pass
 
     def clear(self):
         self.engine.remove_handler_safe(on_market_data=self._on_market_data)
@@ -199,7 +102,6 @@ class Strategy(object):
         self.engine.remove_handler_safe(on_report=self._on_trade)
 
         self.position_tracker.clear()
-        self.strategy_metric.clear()
         self.mds.clear()
 
         self.status = StatusCode.idle
@@ -209,8 +111,6 @@ class Strategy(object):
 
         self.engine.unregister()
 
-        self._last_update_ts = 0.
-
     @property
     def state(self):
         return self.decision_core.state
@@ -218,6 +118,18 @@ class Strategy(object):
     @property
     def profile(self):
         return self.decision_core.profile
+
+    @property
+    def mds(self):
+        return self.engine.mds
+
+    @property
+    def dma(self):
+        return self.engine.dma
+
+    @property
+    def position_tracker(self):
+        return self.engine.position_tracker
 
 
 __all__ = ['StatusCode', 'Strategy']
