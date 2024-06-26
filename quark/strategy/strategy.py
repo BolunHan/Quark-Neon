@@ -1,9 +1,8 @@
 import enum
 
-from algo_engine.base import MarketData, TradeInstruction, TradeReport, OrderState
+from algo_engine.base import MarketData, TradeInstruction, TradeReport
 
 from . import STRATEGY_ENGINE, LOGGER
-from .metric import StrategyMetrics
 from ..decision_core import DummyDecisionCore
 
 LOGGER = LOGGER.getChild('Strategy')
@@ -18,7 +17,7 @@ class StatusCode(enum.Enum):
 
 
 class Strategy(object):
-    def __init__(self, strategy_engine=None, metric: StrategyMetrics = None):
+    def __init__(self, strategy_engine=None):
         self.engine = strategy_engine if strategy_engine is not None else STRATEGY_ENGINE
         self.subscription = self.engine.subscription
 
