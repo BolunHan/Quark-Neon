@@ -19,7 +19,6 @@ class StatusCode(enum.Enum):
 class Strategy(object):
     def __init__(self, strategy_engine=None):
         self.engine = strategy_engine if strategy_engine is not None else STRATEGY_ENGINE
-        self.subscription = self.engine.subscription
 
         # Using dummy core as default, no trading action will be triggered. To override this, a proper BoD function is needed.
         # This behavior is intentional, so that accidents might be avoided if strategy is not properly initialized.
@@ -104,7 +103,6 @@ class Strategy(object):
         self.mds.clear()
 
         self.status = StatusCode.idle
-        self.subscription = self.engine.subscription
         self.eod_status.update({'last_unwind_timestamp': 0., 'retry_count': -1, 'status': 'idle', 'retry_interval': 30.})
         self.decision_core.clear()
 
@@ -129,6 +127,10 @@ class Strategy(object):
     @property
     def position_tracker(self):
         return self.engine.position_tracker
+
+    @property
+    def subscription(self):
+        return self.engine.subscription
 
 
 __all__ = ['StatusCode', 'Strategy']

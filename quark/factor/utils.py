@@ -117,7 +117,7 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
     def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
         # filter the out session data
-        if not (GlobalStatics.PROFILE.in_trade_session(market_data.timestamp) or allow_out_session):
+        if not (GlobalStatics.PROFILE.is_market_session(market_data.timestamp) or allow_out_session):
             return
 
         self.on_market_data(market_data=market_data, **kwargs)
@@ -670,8 +670,14 @@ class ConcurrentMonitorManager(MonitorManager):
 
         super().clear()
 
-        self.tasks['monitor_value'].unlink()
-        self.tasks['monitor_value'] = self.manager.register(name='monitor_value', dtype='NamedVector')
+        # this is a monkey patch for windows shm management.
+        # Python does not release shared memory on unlink() and will cause register failed.
+        # this is the reason way multiprocessing is disabled on windows platform
+        if self.n_worker <= 1:
+            pass
+        else:
+            self.tasks['monitor_value'].unlink()
+            self.tasks['monitor_value'] = self.manager.register(name='monitor_value', dtype='NamedVector')
 
         for _ in self.tasks['time_cost']:
             _.value = 0
@@ -909,14 +915,19 @@ class Synthetic(object, metaclass=abc.ABCMeta):
             last_price = self.last_price.get(ticker, np.nan)
             base_price = self.base_price.get(ticker, np.nan)
 
-            if np.isfinite(last_price) and np.isfinite(base_price) and weight:
-                weight_list.append(self.weights[ticker])
+            assert weight > 0, f'Weight of {ticker} in {self.weights.index_name} must be greater than zero.'
+            weight_list.append(weight)
+
+            if np.isfinite(last_price) and np.isfinite(base_price):
                 price_list.append(last_price / base_price)
             else:
-                weight_list.append(0.)
                 price_list.append(1.)
 
-        synthetic_index = np.average(price_list, weights=weight_list) * self.synthetic_base_price
+        if sum(weight_list):
+            synthetic_index = np.average(price_list, weights=weight_list) * self.synthetic_base_price
+        else:
+            synthetic_index = 1.
+
         return synthetic_index
 
     @property
@@ -1210,7 +1221,7 @@ class FixedVolumeIntervalSampler(FixedIntervalSampler, metaclass=abc.ABCMeta):
         - NotImplementedError: If market data type is not supported.
 
         """
-        if market_data is not None and (not GlobalStatics.PROFILE.in_trade_session(market_data.timestamp)):
+        if market_data is not None and (not GlobalStatics.PROFILE.is_market_session(market_data.timestamp)):
             return
 
         if market_data is not None and isinstance(market_data, (TradeData, TransactionData)):
