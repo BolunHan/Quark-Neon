@@ -35,6 +35,14 @@ class Strategy(object):
         self.status = StatusCode.working
         return
 
+    def unregister(self, **kwargs):
+        self.engine.remove_handler_safe(on_market_data=self._on_market_data)
+        self.engine.remove_handler_safe(on_order=self._on_order)
+        self.engine.remove_handler_safe(on_report=self._on_trade)
+        self.engine.unregister()
+        self.status = StatusCode.idle
+        return
+
     def pre_eod_unwind_all(self):
         self.position_tracker.unwind_all()
         self.status = StatusCode.closing
