@@ -18,9 +18,10 @@ from ._telemetries import LOGGER, PROFILER
 
 
 def safe_exit(code: int = 0, *args, **kwargs):
-    import _thread
+    stop()
 
     try:
+        import _thread
         _thread.interrupt_main()
     except KeyboardInterrupt as _:
         LOGGER.info('Daemon threads interrupted!')
@@ -63,7 +64,8 @@ def start():
 
 def stop():
     try:
-        EVENT_ENGINE.stop()
+        if EVENT_ENGINE.active:
+            EVENT_ENGINE.stop()
     except RuntimeError:
         pass
 

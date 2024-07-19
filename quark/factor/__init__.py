@@ -61,10 +61,11 @@ def set_logger(logger: logging.Logger):
     utils_shm.LOGGER = LOGGER.getChild('Utils.SHM')
 
 
-from .utils import *
-
 if ENABLE_SHM:  # mask the singleton codes
     from .utils_shm import *
+else:
+    from .utils import *
+
 from .ta import *
 
 INDEX_WEIGHTS = IndexWeight(index_name='DummyIndex')

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 __package__ = 'quark.base'
 
 import functools
