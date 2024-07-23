@@ -487,7 +487,7 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
     @property
     def meta(self) -> dict[str, str | float | int | bool]:
-        meta_info = self._update_meta_info(meta_info=self.__meta_info)
+        meta_info = self._update_meta_info(meta_info=self.__additional_meta_info)
         return {k: meta_info[k] for k in sorted(meta_info)}
 
     def digest(self, encoding: str = 'utf-8') -> str:
