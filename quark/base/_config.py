@@ -2,7 +2,6 @@ import configparser
 import json
 import os.path
 import pathlib
-from collections import defaultdict
 from types import SimpleNamespace
 
 import dateutil
@@ -24,7 +23,7 @@ def update_config(context: dict, config: SimpleNamespace) -> SimpleNamespace:
 
 
 def from_ini(file_path):
-    config_dict = defaultdict(dict)
+    config_dict = {}
 
     parser = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation(), allow_no_value=True)
     parser.optionxform = str
@@ -39,7 +38,11 @@ def from_ini(file_path):
 
             sub_dict = config_dict
             for prefix in address[:-1]:
+                if prefix not in sub_dict:
+                    sub_dict[prefix] = {}
+
                 sub_dict = sub_dict[prefix]
+                assert isinstance(sub_dict, dict), f'Config key collision, {".".join(address)} assigned value to {sub_dict}!'
 
             if isinstance(value, str):
 
@@ -63,7 +66,11 @@ def from_ini(file_path):
                 except Exception as _:
                     value = value
 
-            sub_dict[key] = value
+            if key not in sub_dict:
+                sub_dict[key] = value
+            else:
+                assert not isinstance(sub_dict[key], dict), f'Config key collision, {".".join(address)} assigned as section {sub_dict[key]}!'
+                sub_dict[key] = value
 
     update_config(context=config_dict, config=CONFIG)
 
