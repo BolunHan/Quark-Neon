@@ -20,6 +20,7 @@ from . import collect_factor
 from .memory_core import SharedMemoryCore, SyncMemoryCore, NamedVector
 from .. import LOGGER
 from ..base import GlobalStatics
+import hashlib
 
 LOGGER = LOGGER.getChild('Utils')
 ALPHA_05 = 0.9885  # alpha = 0.5 for each minute
@@ -91,7 +92,7 @@ class IndexWeight(dict):
 
 
 class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
-    def __init__(self, name: str, monitor_id: str = None):
+    def __init__(self, name: str, monitor_id: str = None, meta_info: dict[str, str | float | int | bool] = None):
         """
         the init function should never accept *arg or **kwargs as parameters.
         since the from_json function depends on it.
@@ -114,6 +115,8 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
         assert name.startswith('Monitor')
         super().__init__(name=name, monitor_id=monitor_id)
+        self._meta_info = {}
+        self._update_meta_info(meta_info=meta_info)
 
     def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
         # filter the out session data
@@ -192,6 +195,48 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
                 param_dict['name'] = f'Monitor.Grid.{cls.__name__}.{i}'
 
         return param_grid
+
+    def _update_meta_info(self, meta_info: dict[str, str | float | int | bool] = None):
+        _meta_info = self._meta_info
+
+        _meta_info.update(
+            name=self.name,
+            type=self.__class__.__name__
+        )
+
+        if meta_info:
+            _meta_info.update(meta_info)
+
+        if isinstance(self, FixedIntervalSampler):
+            _meta_info.update(
+                sampling_interval=self.sampling_interval,
+                sample_size=self.sample_size
+            )
+
+        if isinstance(self, FixedVolumeIntervalSampler):
+            # no additional meta info
+            pass
+
+        if isinstance(self, AdaptiveVolumeIntervalSampler):
+            _meta_info.update(
+                baseline_window=self.baseline_window,
+                aligned_interval=self.aligned_interval
+            )
+
+        if isinstance(self, Synthetic):
+            _meta_info.update(
+                index_name=self.weights.index_name
+            )
+
+        if isinstance(self, EMA):
+            LOGGER.warning('Meta info for EMA may not be accurate due to precision limitation!')
+
+            _meta_info.update(
+                alpha=self.alpha,
+                window=self.window
+            )
+
+        return _meta_info
 
     def to_json(self, fmt='str', **kwargs) -> str | dict:
         data_dict = dict(
@@ -439,6 +484,14 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
             return False
 
         return True
+
+    @property
+    def meta(self) -> dict[str, str | float | int | bool]:
+        return {k: self._meta_info[k] for k in sorted(self._meta_info)}
+
+    def digest(self, encoding: str = 'utf-8') -> str:
+        hashed_str = hashlib.sha256(json.dumps(self._meta_info, sort_keys=True).encode(encoding=encoding)).hexdigest()
+        return hashed_str
 
 
 class ConcurrentMonitorManager(MonitorManager):
