@@ -115,8 +115,8 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
         assert name.startswith('Monitor')
         super().__init__(name=name, monitor_id=monitor_id)
-        self._meta_info = {}
-        self._update_meta_info(meta_info=meta_info)
+
+        self.__meta_info = meta_info.copy()
 
     def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
         # filter the out session data
@@ -196,8 +196,8 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
         return param_grid
 
-    def _update_meta_info(self, meta_info: dict[str, str | float | int | bool] = None):
-        _meta_info = self._meta_info
+    def _update_meta_info(self, meta_info: dict[str, str | float | int | bool] = None, **kwargs) -> dict[str, str | float | int | bool]:
+        _meta_info = {}
 
         _meta_info.update(
             name=self.name,
@@ -205,7 +205,7 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
         )
 
         if meta_info:
-            _meta_info.update(meta_info)
+            _meta_info.update(meta_info, **kwargs)
 
         if isinstance(self, FixedIntervalSampler):
             _meta_info.update(
@@ -487,10 +487,11 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
 
     @property
     def meta(self) -> dict[str, str | float | int | bool]:
-        return {k: self._meta_info[k] for k in sorted(self._meta_info)}
+        meta_info = self._update_meta_info(meta_info=self.__meta_info)
+        return {k: meta_info[k] for k in sorted(meta_info)}
 
     def digest(self, encoding: str = 'utf-8') -> str:
-        hashed_str = hashlib.sha256(json.dumps(self._meta_info, sort_keys=True).encode(encoding=encoding)).hexdigest()
+        hashed_str = hashlib.sha256(json.dumps(self.meta, sort_keys=True).encode(encoding=encoding)).hexdigest()
         return hashed_str
 
 
