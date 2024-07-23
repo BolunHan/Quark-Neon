@@ -116,7 +116,7 @@ class FactorMonitor(MarketDataMonitor, metaclass=abc.ABCMeta):
         assert name.startswith('Monitor')
         super().__init__(name=name, monitor_id=monitor_id)
 
-        self.__meta_info = meta_info.copy()
+        self.__additional_meta_info = {} if meta_info is None else meta_info.copy()
 
     def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
         # filter the out session data
