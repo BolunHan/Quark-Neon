@@ -1,6 +1,7 @@
 """
 calculate and save factors to accelerate backtesting
 """
+import abc
 import csv
 import datetime
 import os.path
@@ -16,11 +17,10 @@ from ..base import GlobalStatics, CONFIG
 LOGGER = LOGGER.getChild('FactorPool')
 
 
-class FactorPool(object):
+class FactorPool(object, metaclass=abc.ABCMeta):
 
-    def __init__(self, **kwargs):
-        self.factor_dir = kwargs.get('factor_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'Factors'))
-        self.log_interval = kwargs.get('log_interval', CONFIG.Statistics.FACTOR_SAMPLING_INTERVAL)
+    def __init__(self, log_interval=None):
+        self.log_interval = CONFIG.Statistics.FACTOR_SAMPLING_INTERVAL if log_interval is None else log_interval
 
         self.storage: dict[datetime.date, dict[float, dict[str, float]]] = {}  # market_date -> timestamp -> entry_key -> entry_value
 
@@ -80,7 +80,7 @@ class FactorPool(object):
         if key_range is None:
             return (timestamp // step) * step
 
-        for _ in key_range:
+        for _ in sorted(key_range):
             if _ < timestamp:
                 continue
 
@@ -97,6 +97,37 @@ class FactorPool(object):
                 continue
             break
         return i
+
+    @abc.abstractmethod
+    def dump(self, **kwargs):
+        ...
+
+    @abc.abstractmethod
+    def load(self, market_date: datetime.date, **kwargs) -> dict[float, dict[str, float]]:
+        ...
+
+    def clear(self):
+        self.storage.clear()
+
+    def factor_names(self, market_date: datetime.date) -> set[str]:
+        column_names = set()
+
+        if market_date not in self.storage:
+            storage = self.load(market_date=market_date)
+        else:
+            storage = self.storage[market_date]
+
+        for factor_dict in storage.values():
+            column_names.update(factor_dict.keys())
+
+        column_names = set(sorted(column_names))
+        return column_names
+
+
+class FileCacheFactorPool(FactorPool):
+    def __init__(self, **kwargs):
+        super().__init__(log_interval=kwargs.get('log_interval'))
+        self.factor_dir = kwargs.get('factor_dir', pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value, 'Res', 'Factors'))
 
     def dump(self, factor_dir: str | pathlib.Path = None):
 
@@ -185,23 +216,6 @@ class FactorPool(object):
 
         return result
 
-    def clear(self):
-        self.storage.clear()
-
-    def factor_names(self, market_date: datetime.date) -> set[str]:
-        column_names = set()
-
-        if market_date not in self.storage:
-            storage = self.load(market_date=market_date)
-        else:
-            storage = self.storage[market_date]
-
-        for factor_dict in storage.values():
-            column_names.update(factor_dict.keys())
-
-        column_names = set(sorted(column_names))
-        return column_names
-
 
 class FactorPoolDummyMonitor(FactorMonitor):
     """
@@ -278,5 +292,5 @@ class FactorPoolDummyMonitor(FactorMonitor):
         return False
 
 
-FACTOR_POOL = FactorPool()
-__all__ = [FACTOR_POOL, FactorPool]
+FACTOR_POOL = FileCacheFactorPool()
+__all__ = [FACTOR_POOL, FactorPool, FileCacheFactorPool]
