@@ -90,6 +90,7 @@ class _GlobalStatics(object):
         self.CANCEL_SIGNAL = _Constants('Signal.CANCEL_SIGNAL')
         self.TOPIC = _TopicSet
         self.DEBUG_MODE = 0
+        self.CONFIG = None
 
         if 'QUARK_CWD' in os.environ:
             self.WORKING_DIRECTORY = _Constants(os.path.realpath(os.environ['QUARK_CWD']))

@@ -191,6 +191,9 @@ class FileCacheFactorPool(FactorPool):
                 # Store the factor dictionary in the loaded_factors dictionary
                 storage[timestamp] = factor_dict
 
+        # insure the key of the cache is sorted
+        storage = {_ts: storage[_ts] for _ts in sorted(storage)}
+
         self.storage[market_date] = storage
         return storage
 

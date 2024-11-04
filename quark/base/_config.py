@@ -1,10 +1,12 @@
 import configparser
+import datetime
 import json
 import os.path
 import pathlib
+import traceback
+import warnings
 from types import SimpleNamespace
 
-import dateutil
 import pandas as pd
 
 from . import GlobalStatics
@@ -56,7 +58,7 @@ def from_ini(file_path):
                 # noinspection PyBroadException
                 try:
                     # noinspection PyUnresolvedReferences
-                    value = dateutil.parser(value)
+                    value = datetime.date.fromisoformat(value)
                 except Exception as _:
                     pass
 
@@ -75,10 +77,22 @@ def from_ini(file_path):
     update_config(context=config_dict, config=CONFIG)
 
 
-if os.path.isfile(CWD.joinpath('config.ini')):
-    from_ini(CWD.joinpath('config.ini'))
-else:
-    raise FileNotFoundError(f'{CWD.joinpath("config.ini")} not found!')
+_configs = []
+for file in os.listdir(CWD):
+    if file.endswith(('.ini', '.INI')):
+        try:
+            from_ini(CWD.joinpath(file))
+            _configs.append(file)
+        except Exception as _:
+            warnings.warn(f'Invalid configuration file {file}!\n{traceback.format_exc()}')
+
+if not _configs:
+    warnings.warn(f'No configuration file found at {CWD}!')
 
 # update some entries in GS
-GlobalStatics.DEBUG_MODE = CONFIG.Telemetric.DEBUG_MODE
+try:
+    GlobalStatics.DEBUG_MODE = CONFIG.Telemetric.DEBUG_MODE
+except Exception as _:
+    pass
+
+GlobalStatics.CONFIG = CONFIG

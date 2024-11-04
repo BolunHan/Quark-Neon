@@ -24,6 +24,7 @@ def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 
     This function does not take the market (session) breaks into account, as intended.
     And may return a series with Nan values.
     """
+    DeprecationWarning('Use quark.calibration.future.PredictionTarget instead!')
     target = dict()
     for ts, row in factors.iterrows():  # type: float, dict
         t0 = ts
@@ -60,6 +61,7 @@ def fix_prediction_target(factors: pd.DataFrame, pred_length: float, key: str = 
 
 
 def wavelet_prediction_target(factors: pd.DataFrame, key: str = 'SyntheticIndex.market_price', inplace: bool = True, session_filter=None, decoder: RecursiveDecoder = None, decode_level=4, enable_smooth: bool = True, smooth_alpha=0.008, smooth_look_back=15 * 60) -> pd.DataFrame:
+    DeprecationWarning('Use quark.calibration.future.PredictionTarget instead!')
     if not inplace:
         factors = pd.DataFrame({key: factors[key]})
 

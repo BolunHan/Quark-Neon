@@ -51,27 +51,22 @@ def collect_factor(monitors: dict[str, MarketDataMonitor] | list[MarketDataMonit
 def set_logger(logger: logging.Logger):
     from . import decoder
     from . import factor_pool
-    from . import memory_core
-    from . import utils, utils_shm
+    from . import utils
 
     decoder.LOGGER = logger.getChild('Decoder')
     factor_pool.LOGGER = LOGGER.getChild('FactorPool')
-    memory_core.LOGGER = LOGGER.getChild('MemoryCore')
     utils.LOGGER = LOGGER.getChild('Utils')
-    utils_shm.LOGGER = LOGGER.getChild('Utils.SHM')
 
 
-if ENABLE_SHM:  # mask the singleton codes
-    from .utils_shm import *
-else:
-    from .utils import *
-
+from .sampler import *
+from .utils import *
+from .monitor_manager import ConcurrentMonitorManager
 from .ta import *
 
 INDEX_WEIGHTS = IndexWeight(index_name='DummyIndex')
 # MONITOR_MANAGER = ConcurrentMonitorManager(n_worker=N_CORES)
 
-from .trade_flow import *
+# from .trade_flow import *
 from .misc import *
 
 
@@ -99,12 +94,12 @@ def add_monitor(monitor: FactorMonitor, **kwargs) -> dict[str, FactorMonitor]:
 
 
 __all__ = [
-    'FactorMonitor', 'IndexWeight', 'Synthetic', 'EMA', 'collect_factor', 'N_CORES',
+    'FactorMonitor', 'TelemetryMonitor', 'IndexWeight', 'Synthetic', 'EMA', 'collect_factor', 'N_CORES',
     # from misc module
     'SyntheticIndexMonitor',
     # from utils module
-    'FactorMonitor', 'ConcurrentMonitorManager', 'EMA',
+    'FactorMonitor', 'ConcurrentMonitorManager', 'EMA', 'MACD',
     'ALPHA_05', 'ALPHA_02', 'ALPHA_01', 'ALPHA_001', 'ALPHA_0001',
     'Synthetic', 'IndexWeight',
-    'SamplerMode', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler'
+    'SamplerMode', 'SamplerData', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler'
 ]

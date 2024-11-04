@@ -1,6 +1,6 @@
 import logging
 
-from .. import LOGGER
+from quark import LOGGER
 
 LOGGER = LOGGER.getChild('DecisionCore')
 

@@ -1,5 +1,3 @@
-__package__ = 'quark.base'
-
 import functools
 import glob
 import inspect
@@ -25,7 +23,10 @@ from ._statics import get_current_path
 
 FILE_PATH = get_current_path()
 CWD = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value)
-LOG_LEVEL = CONFIG.Telemetric.LOG_LEVEL
+try:
+    LOG_LEVEL = CONFIG.Telemetric.LOG_LEVEL
+except AttributeError:
+    LOG_LEVEL = logging.INFO
 
 INFO = SimpleNamespace(
     program='Quark',

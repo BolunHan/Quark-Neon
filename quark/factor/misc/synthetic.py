@@ -18,16 +18,15 @@ Author: Bolun
 Date: 2023-12-27
 """
 
-import datetime
 import json
 from typing import Self
 
 from algo_engine.base import MarketData, TradeData, TransactionData, BarData
 
-from .. import Synthetic, FactorMonitor, GlobalStatics
+from .. import Synthetic, FactorMonitor, FixedIntervalSampler, SamplerMode
 
 
-class SyntheticIndexMonitor(FactorMonitor, Synthetic):
+class SyntheticIndexMonitor(FactorMonitor, FixedIntervalSampler, Synthetic):
     """
     Monitors market data and generates synthetic bar data for index price and volume movement.
 
@@ -41,71 +40,63 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
     - monitor_id (str, optional): Identifier for the monitor. Defaults to None.
     """
 
-    def __init__(self, index_name: str, weights: dict[str, float], interval: float = 60., name='Monitor.SyntheticIndex', monitor_id: str = None):
+    def __init__(self, index_name: str, weights: dict[str, float], sampling_interval: float = 60., name='Monitor.SyntheticIndex', monitor_id: str = None):
         super().__init__(name=name, monitor_id=monitor_id)
+        FixedIntervalSampler.__init__(self=self, sampling_interval=sampling_interval, sample_size=1)
         Synthetic.__init__(self=self, weights=weights)
 
+        self.register_sampler(topic='open_price', mode=SamplerMode.first)
+        self.register_sampler(topic='close_price', mode=SamplerMode.update)
+        self.register_sampler(topic='high_price', mode=SamplerMode.max)
+        self.register_sampler(topic='low_price', mode=SamplerMode.min)
+        self.register_sampler(topic='volume', mode=SamplerMode.accumulate)
+        self.register_sampler(topic='notional', mode=SamplerMode.accumulate)
+        self.register_sampler(topic='flow', mode=SamplerMode.accumulate)
+        self.register_sampler(topic='trade_count', mode=SamplerMode.accumulate)
+
         self.index_name = index_name
-        self.interval = interval
+        self.timestamp = 0
+        self._serializable = True
 
-        self._active_bar_data: BarData | None = None
-        self._last_bar_data: BarData | None = None
-        self._index_price = None
-
-    def __call__(self, market_data: MarketData, **kwargs):
-        """
-        Update the synthetic index and generate synthetic bar data based on received market data.
-
-        Args:
-        - market_data (MarketData): Market data to update the monitor.
-        """
+    def __call__(self, market_data: MarketData, allow_out_session: bool = True, **kwargs):
         ticker = market_data.ticker
-        timestamp = market_data.timestamp
-        market_price = market_data.market_price
 
-        if ticker in self.weights:
-            self.update_synthetic(ticker=ticker, market_price=market_price)
-            self._index_price = index_price = self.synthetic_index
-        elif ticker == self.index_name:
-            self._index_price = index_price = market_price
-        else:
+        if self.weights and ticker not in self.weights:
             return
 
-        if self._active_bar_data is None or timestamp >= self._active_bar_data.timestamp:
-            self._last_bar_data = self._active_bar_data
-            bar_data = self._active_bar_data = BarData(
-                ticker=self.index_name,
-                bar_start_time=datetime.datetime.fromtimestamp((timestamp // self.interval) * self.interval, tz=GlobalStatics.TIME_ZONE),
-                timestamp=(timestamp // self.interval + 1) * self.interval,  # by definition, timestamp when the bar ends
-                bar_span=datetime.timedelta(seconds=self.interval),
-                high_price=index_price,
-                low_price=index_price,
-                open_price=index_price,
-                close_price=index_price,
-                volume=0.,
-                notional=0.,
-                trade_count=0
-            )
-        else:
-            bar_data = self._active_bar_data
+        super().__call__(market_data, allow_out_session=allow_out_session, **kwargs)
+
+    def on_market_data(self, market_data: MarketData, **kwargs):
+        ticker = market_data.ticker
+        timestamp = market_data.timestamp
+        price = market_data.market_price
 
         if isinstance(market_data, (TradeData, TransactionData)):
-            bar_data['volume'] += market_data.volume
-            bar_data['notional'] += market_data.notional
-            bar_data['trade_count'] += 1
+            volume = market_data.volume
+            notional = market_data.notional
+            flow = market_data.flow
+        else:
+            volume = notional = flow = 0
 
-        bar_data['close_price'] = index_price
-        bar_data['high_price'] = max(bar_data.high_price, index_price)
-        bar_data['low_price'] = min(bar_data.low_price, index_price)
+        self.log_obs(
+            ticker=ticker,
+            timestamp=timestamp,
+            open_price=price,
+            close_price=price,
+            high_price=price,
+            low_price=price,
+            volume=volume,
+            notional=notional,
+            flow=flow,
+            trade_count=1
+        )
+
+        self.timestamp = timestamp
 
     def to_json(self, fmt='str', **kwargs) -> str | dict:
         data_dict = super().to_json(fmt='dict')
         data_dict.update(
-            index_name=self.index_name,
-            interval=self.interval,
-            active_bar_data=self._active_bar_data.to_json(fmt='dict') if self._active_bar_data is not None else None,
-            last_bar_data=self._last_bar_data.to_json(fmt='dict') if self._last_bar_data is not None else None,
-            index_price=self._index_price
+            index_name=self.index_name
         )
 
         if fmt == 'dict':
@@ -125,38 +116,13 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         self = cls(
             index_name=json_dict['index_name'],
             weights=json_dict['weights'],
-            interval=json_dict['interval'],
+            sampling_interval=json_dict['sampling_interval'],
             name=json_dict['name'],
             monitor_id=json_dict['monitor_id']
         )
 
         self.update_from_json(json_dict=json_dict)
-
-        self._active_bar_data = BarData.from_json(json_dict['active_bar_data']) if json_dict['active_bar_data'] is not None else None
-        self._last_bar_data = BarData.from_json(json_dict['last_bar_data']) if json_dict['last_bar_data'] is not None else None
-        self._index_price = json_dict['index_price']
-
         return self
-
-    def clear(self):
-        """
-        Clear the monitor data, including bar data and values.
-        """
-        self._active_bar_data = None
-        self._last_bar_data = None
-
-    @property
-    def is_ready(self) -> bool:
-        """
-        Check if the monitor is ready based on the availability of the last bar data.
-
-        Returns:
-        bool: True if the monitor is ready, False otherwise.
-        """
-        if self._last_bar_data is None:
-            return False
-        else:
-            return True
 
     def factor_names(self, subscription: list[str]) -> list[str]:
         return [
@@ -171,6 +137,10 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         ]
 
     @property
+    def is_ready(self) -> bool:
+        return bool(self.base_price)
+
+    @property
     def value(self) -> dict[str, float]:
         """
         Retrieve the last generated bar data.
@@ -178,23 +148,27 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         Returns:
         dict[str, float]: Dictionary of last generated bar data.
         """
-        bar_data = self._last_bar_data
 
-        if bar_data is not None:
-            result = dict(
-                market_price=self.index_price,
-                high_price=bar_data.high_price,
-                low_price=bar_data.low_price,
-                open_price=bar_data.open_price,
-                close_price=bar_data.close_price,
-                volume=bar_data.volume,
-                notional=bar_data.notional,
-                trade_count=bar_data.trade_count
-            )
-        else:
-            result = dict(
-                market_price=self.index_price
-            )
+        base_price = self.composite(self.base_price) if self.base_price else 1.
+        open_price = self.composite(self.get_active(topic='open_price')) / base_price
+        close_price = self.composite(self.get_latest(topic='close_price')) / base_price
+        high_price = self.composite(self.get_latest(topic='high_price')) / base_price
+        low_price = self.composite(self.get_latest(topic='low_price')) / base_price
+        volume = sum(self.get_latest(topic='volume'))
+        notional = sum(self.get_latest(topic='notional'))
+        # flow = sum(self.get_latest(topic='flow'))
+        trade_count = sum(self.get_latest(topic='trade_count'))
+
+        result = dict(
+            market_price=self.index_price,
+            high_price=high_price,
+            low_price=low_price,
+            open_price=open_price,
+            close_price=close_price,
+            volume=volume,
+            notional=notional,
+            trade_count=trade_count
+        )
 
         return result
 
@@ -205,10 +179,7 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         Returns: (float) the synthetic index price
 
         """
-        if self._index_price is None:
-            return self.synthetic_index
-        else:
-            return self._index_price
+        return self.synthetic_index
 
     @property
     def active_bar(self) -> BarData | None:
@@ -218,7 +189,17 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         Returns:
         BarData | None: Currently active bar data.
         """
-        return self._active_bar_data
+
+        if not self.is_ready:
+            return None
+
+        candlestick = BarData(
+            ticker=self.index_name,
+            timestamp=self.timestamp,
+            **self.value
+        )
+
+        return candlestick
 
     @property
     def last_bar(self) -> BarData | None:
@@ -228,8 +209,35 @@ class SyntheticIndexMonitor(FactorMonitor, Synthetic):
         Returns:
         BarData | None: last bar data.
         """
-        return self._last_bar_data
+        base_price = self.composite(self.base_price) if self.base_price else 1.
+        open_price = self.composite({ticker: storage[-1] for ticker, storage in self.get_history(topic='open_price') if storage}) / base_price
+        close_price = self.composite({ticker: storage[-1] for ticker, storage in self.get_history(topic='close_price') if storage}) / base_price
+        high_price = self.composite({ticker: storage[-1] for ticker, storage in self.get_history(topic='high_price') if storage}) / base_price
+        low_price = self.composite({ticker: storage[-1] for ticker, storage in self.get_history(topic='low_price') if storage}) / base_price
+        volume = sum([storage[-1] for storage in self.get_history(topic='volume').values() if storage])
+        notional = sum([storage[-1] for storage in self.get_history(topic='notional').values() if storage])
+        flow = sum([storage[-1] for storage in self.get_history(topic='flow').values() if storage])
+        trade_count = sum([storage[-1] for storage in self.get_history(topic='trade_count').values() if storage])
+
+        candlestick = BarData(
+            ticker=self.index_name,
+            timestamp=self.timestamp,
+            open_price=open_price,
+            close_price=close_price,
+            high_price=high_price,
+            low_price=low_price,
+            volume=volume,
+            notional=notional,
+            flow=flow,
+            trade_count=trade_count
+        )
+
+        return candlestick
 
     @property
     def serializable(self) -> bool:
-        return False
+        return self._serializable
+
+    @serializable.setter
+    def serializable(self, serializable: bool) -> None:
+        self._serializable = serializable
