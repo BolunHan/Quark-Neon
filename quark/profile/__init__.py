@@ -53,12 +53,12 @@ def session_dummies(timestamp: float | list[float], inplace: dict[str, float | l
 
     if isinstance(timestamp, (float, int)):
         # For a single timestamp
-        d['Dummies.IsOpening'] = 1 if datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE).time() < DUMMIES_SESSION_OPENING else 0
-        d['Dummies.IsClosing'] = 1 if datetime.datetime.fromtimestamp(timestamp, tz=TIME_ZONE).time() > DUMMIES_SESSION_CLOSING else 0
+        d['Dummies.IsOpening'] = 1 if datetime.datetime.fromtimestamp(timestamp, tz=GlobalStatics.TIME_ZONE).time() < DUMMIES_SESSION_OPENING else 0
+        d['Dummies.IsClosing'] = 1 if datetime.datetime.fromtimestamp(timestamp, tz=GlobalStatics.TIME_ZONE).time() > DUMMIES_SESSION_CLOSING else 0
     else:
         # For a list of timestamps
-        d['Dummies.IsOpening'] = [1 if datetime.datetime.fromtimestamp(_, tz=TIME_ZONE).time() < DUMMIES_SESSION_OPENING else 0 for _ in timestamp]
-        d['Dummies.IsClosing'] = [1 if datetime.datetime.fromtimestamp(_, tz=TIME_ZONE).time() > DUMMIES_SESSION_CLOSING else 0 for _ in timestamp]
+        d['Dummies.IsOpening'] = [1 if datetime.datetime.fromtimestamp(_, tz=GlobalStatics.TIME_ZONE).time() < DUMMIES_SESSION_OPENING else 0 for _ in timestamp]
+        d['Dummies.IsClosing'] = [1 if datetime.datetime.fromtimestamp(_, tz=GlobalStatics.TIME_ZONE).time() > DUMMIES_SESSION_CLOSING else 0 for _ in timestamp]
 
     return d
 

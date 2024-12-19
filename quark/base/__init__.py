@@ -1,6 +1,8 @@
 __package__ = 'quark.base'
 
+import inspect
 import logging
+import os
 
 from algo_engine.engine import EVENT_ENGINE
 
@@ -11,13 +13,18 @@ from ._exceptions import Exceptions
 from ._statics import GlobalStatics
 
 # step 2: load config defined in GlobalStatics
-from ._config import CONFIG
+from ._config import CONFIG, ConfigDict
 
 # step 3: init loggers and profiler
 from ._telemetries import LOGGER, PROFILER
 
 
 def safe_exit(code: int = 0, *args, **kwargs):
+    # Get the caller information
+    caller_frame = inspect.stack()[1]
+    caller_info = f'{caller_frame.function} in {caller_frame.filename}:{caller_frame.lineno}'
+
+    LOGGER.info(f'Exiting with code {code} by {caller_info}...')
     stop()
 
     try:
@@ -26,11 +33,15 @@ def safe_exit(code: int = 0, *args, **kwargs):
     except KeyboardInterrupt as _:
         LOGGER.info('Daemon threads interrupted!')
 
+    from ._telemetries import CWD, INFO
+    lock_file = CWD.joinpath(f'{INFO.program}.{INFO.run_id}.lock') if INFO.run_id else CWD.joinpath(f'{INFO.program}.lock')
+    if os.path.isfile(lock_file):
+        os.remove(lock_file)
+
     force_exit(code, *args, **kwargs)
 
 
 def force_exit(code: int = 0, *args, **kwargs):
-    import os
     exit_status = [f'{code}']
 
     if args:
@@ -40,11 +51,6 @@ def force_exit(code: int = 0, *args, **kwargs):
         exit_status.append(f'{kwargs}')
 
     LOGGER.info(f'Quark exit with code {", ".join(exit_status)}')
-
-    from ._telemetries import CWD, PROCESS_ID
-    lock_file = CWD.joinpath(f'Quark.{PROCESS_ID}.lock') if PROCESS_ID else CWD.joinpath(f'Quark.lock')
-    if os.path.isfile(lock_file):
-        os.remove(lock_file)
 
     # noinspection PyUnresolvedReferences, PyProtectedMember
     os._exit(code)
@@ -72,4 +78,8 @@ def stop():
 
 set_logger(logger=LOGGER)
 
-start()
+# start()
+
+__all__ = [
+    'EVENT_ENGINE', 'GlobalStatics', 'CONFIG', 'ConfigDict', 'LOGGER', 'PROFILER', 'safe_exit', 'force_exit'
+]

@@ -27,7 +27,7 @@ class StrategyProfile(NameSpace):
 
         self.fee_rate = kwargs.get('fee_rate', 0.00037)
 
-        self.sampling_interval: float = kwargs.get('sampling_interval', CONFIG.Statistics.FACTOR_SAMPLING_INTERVAL)
+        self.sampling_interval: float = kwargs.get('sampling_interval', CONFIG.get_config('Statistics.FACTOR_SAMPLING_INTERVAL', default=10))
         self.clear_on_eod: bool = kwargs.get('clear_on_eod', True)
 
 

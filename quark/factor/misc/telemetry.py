@@ -1,21 +1,23 @@
-import os
 import datetime
+import os
 from collections import deque
 from typing import Literal
 
 import psutil
 from algo_engine.base import MarketData, TradeData, TransactionData, TickData
-from algo_engine.profile import PROFILE
 
-from .. import LOGGER
-from ..utils import FactorMonitor
+from .. import LOGGER, FactorMonitor, FixedIntervalSampler, SamplerMode
+from ...base import GlobalStatics
 
 __all__ = ['TelemetryMonitor']
 
 
-class TelemetryMonitor(FactorMonitor):
+class TelemetryMonitor(FactorMonitor, FixedIntervalSampler):
     def __init__(self, collect_out_session: bool = True, enable_trade_monitor: bool = True, enable_tick_monitor=True, name: str = 'Monitor.Telemetry'):
         super().__init__(name=name)
+        FixedIntervalSampler.__init__(self=self, sampling_interval=1, sample_size=60)
+
+        self.register_sampler(topic='lag', mode=SamplerMode.mean, interval=1)
 
         self.collect_out_session = collect_out_session
         self.enable_trade_monitor = enable_trade_monitor
@@ -96,7 +98,7 @@ class TelemetryMonitor(FactorMonitor):
         last_ts = ticker_statistics['timestamp'][-1] if ticker_statistics['count'] else 0
 
         if last_ts and timestamp - last_ts > self._datafeed_break_threshold:
-            LOGGER.error(f'{ticker} breaking tick data feed detected at {tick_data.market_time}, last_update={datetime.datetime.fromtimestamp(last_ts, tz=PROFILE.time_zone)}, break seconds = {timestamp - last_ts:,.2f}!')
+            LOGGER.error(f'{ticker} breaking tick data feed detected at {tick_data.market_time}, last_update={datetime.datetime.fromtimestamp(last_ts, tz=GlobalStatics.TIME_ZONE)}, break seconds = {timestamp - last_ts:,.2f}!')
         elif last_ts >= timestamp:
             LOGGER.error(f'{ticker} duplicated tick data feed detected at {timestamp}!')
             return

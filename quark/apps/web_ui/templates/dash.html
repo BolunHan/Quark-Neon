@@ -1,0 +1,21 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Dashboard {{ ticker }}</title>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static',filename='styles/dash.css') }}">
+</head>
+
+<body>
+    <div class="container">
+        <!-- Replace the header with the banner -->
+        <div class="header">
+            {{ banner | safe }}
+        </div>
+        <div class="content dashboard">
+            {{ dashboard|safe }}
+        </div>
+    </div>
+</body>
+</html>

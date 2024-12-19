@@ -3,16 +3,17 @@ import glob
 import inspect
 import json
 import logging
-import logging.handlers
+import logging.config
+import multiprocessing
 import os
 import pathlib
-import sys
 import threading
 import time
 import traceback
 import warnings
 from collections import defaultdict
 from enum import Enum
+from queue import Empty
 from types import SimpleNamespace
 
 import pandas as pd
@@ -23,33 +24,31 @@ from ._statics import get_current_path
 
 FILE_PATH = get_current_path()
 CWD = pathlib.Path(GlobalStatics.WORKING_DIRECTORY.value)
-try:
-    LOG_LEVEL = CONFIG.Telemetric.LOG_LEVEL
-except AttributeError:
-    LOG_LEVEL = logging.INFO
-
+LOG_LEVEL = CONFIG.get_config('Telemetric.LOG_LEVEL', default=logging.INFO)
+PACKAGE_NAME = pathlib.Path(__file__).resolve().parents[1].name
+# PACKAGE_NAME = sys.modules[__package__].__name__
 INFO = SimpleNamespace(
-    program='Quark',
-    description='Telemetries tools for Quark and all its sub-modules',
-    process_id=0,  # to support multiple process running at same time
+    program=PACKAGE_NAME,
+    description=f'Telemetries tools for {PACKAGE_NAME} and all its sub-modules',
+    process_id=os.getpid(),  # Use system PID
+    run_id=0,
     init_ts=time.time()
 )
 
 # step -1: instance a lock file
 while True:
-    PROCESS_ID = INFO.process_id
-    lock_file = CWD.joinpath(f'Quark.{PROCESS_ID}.lock') if PROCESS_ID else CWD.joinpath(f'Quark.lock')
+    lock_file = CWD.joinpath(f'{INFO.program}.{INFO.run_id}.lock') if INFO.run_id else CWD.joinpath(f'{INFO.program}.lock')
+    log_file = CWD.joinpath(f'{INFO.program}.{INFO.run_id}.log') if INFO.run_id else CWD.joinpath(f'{INFO.program}.log')
 
     if not os.path.isfile(lock_file):
         with open(lock_file, 'w') as f:
-            f.write(json.dumps(INFO.__dict__))
+            f.write(json.dumps(INFO.__dict__, indent=4))
 
         break
 
-    INFO.process_id += 1
+    INFO.run_id += 1
 
 # step 0: delete old logs
-log_file = CWD.joinpath(f'{INFO.program}.{PROCESS_ID}.log') if PROCESS_ID else CWD.joinpath(f'{INFO.program}.log')
 for _ in glob.glob(os.path.realpath(CWD.joinpath(f'{log_file}*'))):
     try:
         os.remove(CWD.joinpath(_))
@@ -109,8 +108,8 @@ class _Profiler(object):
         self.fmt = fmt
         self.logger = logger if logger else LOGGER.getChild('Profiler')
         self.enabled = kwargs.pop('enabled', True)
-        self.log_path = kwargs.pop('log_path', CWD.joinpath(f'profile.{PROCESS_ID}.log') if PROCESS_ID else CWD.joinpath(f'profile.log'))
-        self.profile_path = kwargs.pop('profile_path', CWD.joinpath(f'profile.{PROCESS_ID}.csv') if PROCESS_ID else CWD.joinpath(f'profile.csv'))
+        self.log_path = kwargs.pop('log_path', CWD.joinpath(f'profile.{INFO.run_id}.log') if INFO.run_id else CWD.joinpath(f'profile.log'))
+        self.profile_path = kwargs.pop('profile_path', CWD.joinpath(f'profile.{INFO.run_id}.csv') if INFO.run_id else CWD.joinpath(f'profile.csv'))
         self.report_schedule = kwargs.pop('report_schedule', 60)
         self.report_size = kwargs.pop('report_size', 10)
         self.log_level = kwargs.pop('log_level', 5)
@@ -339,29 +338,174 @@ class _Profiler(object):
         return class_decorator
 
 
+class MultiProcessingHandler(logging.Handler):
+    """
+    A logging handler that supports multiprocessing by sending log records
+    through a multiprocessing.Queue. This ensures that logs from different
+    processes are handled by a single logging handler.
+
+    Args:
+        name (str): The name for the receiver thread.
+        sub_handler (logging.Handler, optional): The underlying handler to use
+            for emitting log records. Defaults to `logging.StreamHandler()`.
+    """
+
+    def __init__(self, name: str, sub_handler: logging.Handler = None):
+        super().__init__()
+
+        if sub_handler is None:
+            sub_handler = logging.StreamHandler()
+        self.sub_handler = sub_handler
+
+        self.setLevel(self.sub_handler.level)
+        self.setFormatter(self.sub_handler.formatter)
+        self.filters = self.sub_handler.filters
+
+        self.queue: multiprocessing.Queue[logging.LogRecord] = multiprocessing.Queue(-1)
+        self._is_closed: bool = False
+
+        # The thread handles receiving records asynchronously.
+        self._receive_thread = threading.Thread(target=self._receive, name=name)
+        self._receive_thread.daemon = True
+        self._receive_thread.start()
+
+    def setFormatter(self, fmt: logging.Formatter) -> None:
+        """Set the formatter for this handler and the underlying handler."""
+        super().setFormatter(fmt)
+        self.sub_handler.setFormatter(fmt)
+
+    def _receive(self) -> None:
+        """Receive log records from the queue and emit them using the sub_handler."""
+        while True:
+            try:
+                if self._is_closed and self.queue.empty():
+                    break
+
+                record = self.queue.get(timeout=0.2)
+                self.sub_handler.emit(record)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except (EOFError, OSError):
+                break  # The queue was closed by child
+            except Empty:
+                pass  # Periodically checks if the logger is closed
+            except Exception:
+                from sys import stderr
+                from traceback import print_exc
+
+                print_exc(file=stderr)
+                raise
+
+        self.queue.close()
+        self.queue.join_thread()
+
+    def _send(self, record: logging.LogRecord) -> None:
+        """Send a log record to the queue."""
+        self.queue.put_nowait(record)
+
+    def _format_record(self, record: logging.LogRecord) -> logging.LogRecord:
+        """
+        Ensure that exc_info and args have been stringified.
+        This removes any chance of unpickleable objects and reduces message size.
+
+        Args:
+            record (logging.LogRecord): The log record to format.
+
+        Returns:
+            logging.LogRecord: The formatted log record.
+        """
+        if record.args:
+            record.msg = record.msg % record.args
+            record.args = None
+        if record.exc_info:
+            self.format(record)
+            record.exc_info = None
+
+        return record
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """
+        Emit a log record by formatting and sending it to the queue.
+
+        Args:
+            record (logging.LogRecord): The log record to emit.
+        """
+        try:
+            formatted_record = self._format_record(record)
+            self._send(formatted_record)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        """
+        Close the handler and ensure all records are processed.
+        """
+        if not self._is_closed:
+            self._is_closed = True
+            self._receive_thread.join(5.0)  # Waits for receive queue to empty
+
+            self.sub_handler.close()
+            super().close()
+
+
+# Step 1: Define logging configuration using dictConfig
+LOGGING_CONFIG = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'colored': {
+            '()': ColoredFormatter,  # Custom formatter
+        },
+        'standard': {
+            'format': '[{asctime} {name} - {threadName} - {module}:{lineno} - {levelname}] {message}',
+            'datefmt': '%Y-%m-%d %H:%M:%S',
+            'style': '{',  # Added to support new-style string formatting
+        }
+    },
+    'handlers': {
+        'console': {
+            'level': LOG_LEVEL,
+            'class': 'logging.StreamHandler',
+            'stream': 'ext://sys.stdout',
+            'formatter': 'colored',
+        },
+        'file': {
+            'level': LOG_LEVEL,
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': str(log_file),
+            'maxBytes': 1024 * 1024 * 16,
+            'backupCount': 10,
+            'formatter': 'standard',
+        },
+    },
+    'loggers': {
+        INFO.program: {
+            'level': LOG_LEVEL,
+            'handlers': ['console', 'file'],
+            'propagate': False,
+        },
+    },
+}
+
+# Step 2: Apply logging configuration
+logging.config.dictConfig(LOGGING_CONFIG)
 LOGGER = logging.getLogger(INFO.program)
-LOGGER.setLevel(LOG_LEVEL)
-logging.Formatter.converter = time.gmtime
-logger_ch = logging.StreamHandler(stream=sys.stdout)
-logger_ch.setLevel(level=LOG_LEVEL)
-logger_ch.setFormatter(fmt=ColoredFormatter())
-LOGGER.addHandler(logger_ch)
 
-logger_fh = logging.handlers.RotatingFileHandler(filename=log_file, maxBytes=1024 * 1024 * 16, backupCount=10)
-logger_fh.setLevel(level=LOG_LEVEL)
-logger_fh.setFormatter(fmt=ColoredFormatter())
-LOGGER.addHandler(logger_fh)
-
-# step 2: init Status and Profiler
+# step 3: init Status and Profiler
 PROFILER = _Profiler(enabled=False)
 
-# step 3: add some annotations
-
-# add some annotations
+# step 4: validate GlobalStatics
 if GlobalStatics.TIME_ZONE is not None:
-    LOGGER.warning(f'{INFO.program}.{PROCESS_ID} is using timezone={GlobalStatics.TIME_ZONE}! Some api may not support timezone awareness!')
+    LOGGER.warning(f'{INFO.program}.{INFO.run_id} is using timezone={GlobalStatics.TIME_ZONE}! Some api may not support timezone awareness!')
 
 if GlobalStatics.DEBUG_MODE:
-    LOGGER.warning(f'{INFO.program}.{PROCESS_ID} is in debug mode! Limited efficiency of program execution')
+    LOGGER.warning(f'{INFO.program}.{INFO.run_id} is in debug mode! Limited efficiency of program execution')
+    stack = inspect.stack()
+    trace_log = []
+    for i, frame in enumerate(stack):
+        trace_log.append(f"Level {i}: File '{frame.filename}', line {frame.lineno}, in function '{frame.function}'.")
+    LOGGER.info(f"quark import traceback\n:{'\n'.join(trace_log)}")  # Separate this output for clarity
 
-__all__ = ['PROFILER', 'LOGGER', 'INFO', 'PROCESS_ID']
+__all__ = ['PROFILER', 'LOGGER', 'INFO']

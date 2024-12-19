@@ -122,7 +122,6 @@ class FactorValueCollector(object):
         self._length = kwargs['length_buffer'] if 'length_buffer' in kwargs else RawValue(c_ulonglong)
         self.lock = kwargs.get('lock')
 
-
     def __len__(self):
         return self._length.value
 
@@ -316,9 +315,10 @@ class ConcurrentMonitorManager(MonitorManager):
             LOGGER.info(f'{self.__class__.__name__} too little child worker, concurrency will not cover cost of overhead, starting in single process mode.')
             return
 
-            # main_tasks = self._main_tasks
+        # main_tasks = self._main_tasks
         # child_tasks = self._child_tasks
         monitor = self.monitor.copy()
+        LOGGER.info(f'{self.__class__.__name__} initializing buffer for {len(self._child_tasks)} workers...')
         self._initialize_buffer(n_workers=len(self._child_tasks))
 
         workers = {}
@@ -414,6 +414,13 @@ class AsyncMonitorManager(ConcurrentMonitorManager):
         self._buffer = MarketDataBuffer(n_workers=n_workers, size=1 * 1024 * 1024, block=False)
         self._update_ready = RawArray(c_bool, n_workers)
         self._update_barrier = Barrier(n_workers + 1)
+
+    def clear(self):
+        super().clear()
+
+        self._buffer = None
+        self._update_ready = None
+        self._update_barrier = None
 
     def _distribute_market_data(self, market_data: MarketData):
         self._buffer.put(market_data=market_data)

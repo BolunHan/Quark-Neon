@@ -51,11 +51,12 @@ def collect_factor(monitors: dict[str, MarketDataMonitor] | list[MarketDataMonit
 def set_logger(logger: logging.Logger):
     from . import decoder
     from . import factor_pool
-    from . import utils
+    from . import utils, utils_shm
 
     decoder.LOGGER = logger.getChild('Decoder')
     factor_pool.LOGGER = LOGGER.getChild('FactorPool')
     utils.LOGGER = LOGGER.getChild('Utils')
+    utils_shm.LOGGER = LOGGER.getChild('Utils.SHM')
 
 
 from .sampler import *
@@ -98,8 +99,8 @@ __all__ = [
     # from misc module
     'SyntheticIndexMonitor',
     # from utils module
-    'FactorMonitor', 'ConcurrentMonitorManager', 'EMA', 'MACD',
+    'FactorInfo', 'FactorTree', 'FactorMonitor', 'ConcurrentMonitorManager', 'EMA', 'MACD',
     'ALPHA_05', 'ALPHA_02', 'ALPHA_01', 'ALPHA_001', 'ALPHA_0001',
     'Synthetic', 'IndexWeight',
-    'SamplerMode', 'SamplerData', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler'
+    'SamplerMode', 'SamplerData', 'FixedIntervalSampler', 'FixedVolumeIntervalSampler', 'AdaptiveVolumeIntervalSampler', 'VolumeProfileSampler', 'VolumeProfileType'
 ]
