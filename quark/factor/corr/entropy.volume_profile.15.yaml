@@ -1,0 +1,74 @@
+config_overrides:
+  Datalore:
+    FEE_RATE: 0.00032
+    POLY_DEGREE: 2
+    default:
+      alpha: 0.1
+      avoid_quantile_crossing: false
+      balanced_label: false
+      enable_diagnose: false
+      enable_lr_scheduler: true
+      l1: 0.0
+      l2: 0.0
+      lr: 0.0001
+      maxiter: 50000
+      n_worker: -1
+      optimizer: SLSQP
+      patience: 100
+      tol: 0
+      validation_split: 0.5
+      verbose: false
+    down_actual_3:
+      ALPHA: 0.3
+      optimizer: SLSQP
+      tol: 1.0e-06
+    down_smoothed_3:
+      ALPHA: 0.3
+      optimizer: SLSQP
+      tol: 1.0e-06
+    pct_change_900:
+      ALPHA: 0.3
+      balanced_label: true
+      l1: 0.01
+      l2: 0.01
+      optimizer: SLSQP
+      tol: 1.0e-9
+    state_3:
+      ALPHA: 0.3
+      balanced_label: true
+      l1: 0.001
+      l2: 0.001
+      optimizer: SLSQP
+      tol: 1.0e-06
+    target_actual_3:
+      ALPHA: 0.4
+      balanced_label: true
+      l1: 0.0001
+      l2: 0.0001
+      optimizer: SLSQP
+      tol: 1.0e-9
+    target_smoothed_3:
+      ALPHA: 0.4
+      balanced_label: true
+      l1: 0.0001
+      l2: 0.0001
+      optimizer: SLSQP
+      tol: 1.0e-9
+    up_actual_3:
+      ALPHA: 0.5
+      optimizer: SLSQP
+      tol: 1.0e-06
+    up_smoothed_3:
+      ALPHA: 0.5
+      optimizer: SLSQP
+      tol: 1.0e-06
+dtype: FactorTree
+enable_multiprocessing: false
+hex: 86e77adf984c893c0bea7da9e873883dc33f40d8f550e340c3451b9bd2de753e
+nodes:
+- file: /home/bolun/Projects/Quark-Prod/factor/corr/entropy.volume_profile.py
+  md5: 467b7d19b116bb82b17f3e87f8d22db3
+  name: Monitor.Entropy.VolumeProfile.15
+- file: /home/bolun/Projects/Quark-Prod/factor/_aux/_aux.py
+  md5: 0d42f27ebea067a7f308e5310b581466
+  name: Monitor.Aux.Adaptive.Index.30
